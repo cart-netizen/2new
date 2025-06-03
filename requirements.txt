@@ -1,0 +1,12 @@
+
+
+# asyncio - usually part of Python stdlib
+# logging - part of Python stdlib
+# dataclasses - part of Python stdlib for Python 3.7+
+# enum - part of Python stdlib
+# json - part of Python stdlib
+# sqlite3 - part of Python stdlib
+# matplotlib - for model_trainer.py (optional for now if not running main in it)
+# seaborn - for model_trainer.py (optional for now if not running main in it)
+# aiogram - for model_retraining_task.py (optional, for Telegram)
+# aiohttp - for model_retraining_task.py (optional, for webhooks)

@@ -47,8 +47,8 @@ class BybitConnector:
     self.exchange = ccxt.bybit(exchange_params)
 
 
-  # def _generate_signature(self, params_str: str) -> str:
-  #   return hmac.new(self.api_secret.encode('utf-8'), params_str.encode('utf-8'), hashlib.sha256).hexdigest()
+  def _generate_signature(self, params_str: str) -> str:
+    return hmac.new(self.api_secret.encode('utf-8'), params_str.encode('utf-8'), hashlib.sha256).hexdigest()
 
   async def initialize(self):
     """Инициализирует сессию и синхронизирует время"""
@@ -453,3 +453,21 @@ class BybitConnector:
 #     return self._make_request('POST', endpoint, params)
 
   # Другие методы для размещения/отмены ордеров, получения позиций и т.д. будут добавлены позже.
+
+  async def get_server_time(self) -> Optional[int]:
+    """Получает время сервера Bybit (v5 API)."""
+    if not self.exchange: return None  # Используем CCXT если доступно
+    try:
+      server_time = await self.exchange.fetch_time()
+      logger.info(f"Время сервера Bybit (CCXT): {server_time}")
+      return server_time
+    except Exception as e_ccxt:
+      logger.warning(f"Не удалось получить время сервера через CCXT: {e_ccxt}. Попытка через прямой запрос.")
+      # Запасной вариант через прямой запрос
+      response = await self._request("GET", "/v5/market/time")
+      if response and "timeNano" in response:  # или timeSecond
+        server_time_ms = int(response["timeNano"]) // 1_000_000
+        logger.info(f"Время сервера Bybit (прямой запрос): {server_time_ms}")
+        return server_time_ms
+      logger.error("Не удалось получить время сервера Bybit.")
+      return None

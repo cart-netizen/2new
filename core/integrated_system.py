@@ -38,7 +38,11 @@ class IntegratedTradingSystem:
   async def initialize(self):
     """Инициализация системы: выбор символов, получение баланса."""
     logger.info("Начало инициализации системы...")
+
+    await self.connector.initialize()
+
     self.active_symbols = await self.data_fetcher.get_active_symbols_by_volume()
+
     if not self.active_symbols:
       logger.warning("Не удалось выбрать активные символы. Система не может продолжить работу без символов.")
       # Можно либо завершить работу, либо перейти в режим ожидания/повторной попытки
@@ -49,19 +53,19 @@ class IntegratedTradingSystem:
     # Установка плеча по умолчанию для всех активных символов (если нужно)
     for symbol in self.active_symbols:
       self.current_leverage.setdefault(symbol, trading_params.DEFAULT_LEVERAGE)
-      # await self.set_leverage_for_symbol(symbol, trading_params.DEFAULT_LEVERAGE) # Реальная установка плеча
+      await self.set_leverage_for_symbol(symbol, trading_params.DEFAULT_LEVERAGE) # Реальная установка плеча
     logger.info("Инициализация системы завершена.")
     return True
 
   async def update_account_balance(self):
     logger.info("Запрос баланса аккаунта...")
-    balance_data = self.connector.get_account_balance(account_type="CONTRACT", coin="USDT")
+    balance_data = await self.connector.get_account_balance(account_type="CONTRACT", coin="USDT")
     if balance_data and 'walletBalance' in balance_data and 'availableToWithdraw' in balance_data:
       self.account_balance = RiskMetrics(
-        total_balance_usdt=float(balance_data.get('walletBalance', 0)),
-        available_balance_usdt=float(balance_data.get('availableToWithdraw', 0)),
-        # Пример, может быть другая логика для доступного
-        unrealized_pnl_total=float(balance_data.get('unrealisedPnl', 0))  # Пример
+        total_balance_usdt=float(balance_data.get('total', 0)),
+        available_balance_usdt=float(balance_data.get('free', 0)),
+
+        unrealized_pnl_total=float(balance_data.get('used', 0))  # Пример
       )
       logger.info(f"Баланс обновлен: Всего={self.account_balance.total_balance_usdt:.2f} USDT, "
                   f"Доступно={self.account_balance.available_balance_usdt:.2f} USDT, "
@@ -71,21 +75,23 @@ class IntegratedTradingSystem:
       self.account_balance = RiskMetrics()  # Устанавливаем значения по умолчанию
 
   async def set_leverage_for_symbol(self, symbol: str, leverage: int) -> bool:
+    """ИСПРАВЛЕНО: Обновлен для работы с новым методом connector.set_leverage"""
     logger.info(f"Попытка установить плечо {leverage}x для {symbol}")
     if not (1 <= leverage <= 100):  # Примерный диапазон, уточнить для Bybit
       logger.error(f"Некорректное значение плеча: {leverage}. Должно быть в диапазоне [1-100].")
       return False
 
-    # Bybit требует строку для плеча
-    leverage_str = str(leverage)
-    response = self.connector.set_leverage(symbol, leverage_str, leverage_str)
-    if response:  # Успешный ответ от Bybit V5 API (retCode == 0) обычно не содержит много деталей, просто подтверждает действие
-      logger.info(f"Кредитное плечо {leverage}x успешно установлено для {symbol}.")
-      self.current_leverage[symbol] = leverage
-      # Можно также запросить текущую позицию, чтобы убедиться, что плечо применилось, если API это поддерживает
-      return True
-    else:
-      logger.error(f"Не удалось установить плечо для {symbol}.")
+    try:
+      success = await self.connector.set_leverage(symbol, leverage, leverage)
+      if success:
+        logger.info(f"Кредитное плечо {leverage}x успешно установлено для {symbol}.")
+        self.current_leverage[symbol] = leverage
+        return True
+      else:
+        logger.error(f"Не удалось установить плечо для {symbol}.")
+        return False
+    except Exception as e:
+      logger.error(f"Ошибка при установке плеча для {symbol}: {e}", exc_info=True)
       return False
 
   async def _monitor_symbol(self, symbol: str):
@@ -161,7 +167,7 @@ class IntegratedTradingSystem:
       return
 
     self.is_running = True
-    await self.bybit_connector.initialize()
+    # ИСПРАВЛЕНО: Убрали дублирующий вызов initialize()
     logger.info("Торговая система запускается...")
     self._monitoring_task = asyncio.create_task(self._monitoring_loop())
     logger.info("Торговая система успешно запущена.")
@@ -172,7 +178,6 @@ class IntegratedTradingSystem:
       return
 
     self.is_running = False
-    await self.bybit_connector.close()
     logger.info("Остановка торговой системы...")
     if self._monitoring_task:
       self._monitoring_task.cancel()
@@ -180,6 +185,9 @@ class IntegratedTradingSystem:
         await self._monitoring_task
       except asyncio.CancelledError:
         logger.info("Цикл мониторинга успешно отменен.")
+
+    # ИСПРАВЛЕНО: Закрываем соединения коннектора
+    await self.connector.close()
     logger.info("Торговая система остановлена.")
 
   # Методы для взаимодействия с GUI (пока будут выводить в консоль)
@@ -492,3 +500,15 @@ class IntegratedTradingSystem:
     running_max = np.maximum.accumulate(cumulative)
     drawdown = (cumulative - running_max) / (running_max + 1e-8)
     return float(np.min(drawdown))
+
+  def get_trades_for_symbol(self, symbol: str) -> List[Dict]:
+    """Заглушка для получения сделок по символу"""
+    # TODO: Реализовать когда будет подключена база данных
+    logger.debug(f"Заглушка: запрос сделок для символа {symbol}")
+    return []
+
+  def get_all_trades(self, limit: int = 1000) -> List[Dict]:
+    """Заглушка для получения всех сделок"""
+    # TODO: Реализовать когда будет подключена база данных
+    logger.debug(f"Заглушка: запрос всех сделок с лимитом {limit}")
+    return []

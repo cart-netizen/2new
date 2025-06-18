@@ -1,16 +1,32 @@
 import asyncio
 import signal  # Для корректной остановки
 import sys
-from utils.logging_config import setup_logging, get_logger
+from utils.logging_config import setup_logging, get_logger, setup_signal_logger
 from config import settings
 from core.integrated_system import IntegratedTradingSystem
+
+import warnings
+# Попытаемся импортировать конкретный тип предупреждения.
+# Если не получится (вдруг его тоже удалят), будем использовать общий DeprecationWarning.
+try:
+    from pkg_resources import PkgResourcesDeprecationWarning
+    warnings.filterwarnings("ignore", category=PkgResourcesDeprecationWarning)
+except ImportError:
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+# --- БЛОК ФИЛЬТРАЦИИ ПРЕДУПРЕЖДЕНИЙ ---
+# Игнорируем предупреждение об устаревшем pkg_resources от pandas_ta
+# Фильтруем по тексту, так как это UserWarning, а не DeprecationWarning
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
+# --- КОНЕЦ БЛОКА --
+
 
 logger = get_logger(__name__)
 
 
 async def main():
   setup_logging(settings.LOG_LEVEL)
-  logger.info("Запуск торгового бота...")
+  setup_signal_logger()
+  logger.info("Запуск торгового бота с оптимизациями...")
 
   trading_system = IntegratedTradingSystem()
 
@@ -31,11 +47,16 @@ async def main():
     signal.signal(signal.SIGINT, lambda s, f: signal_handler())
 
   try:
-    await trading_system.start()
+    # Используем оптимизированный запуск
+    await trading_system.start_optimized()  # Вместо start()
 
     while not stop_event.is_set() and trading_system.is_running:
       trading_system.display_balance()
       trading_system.display_active_symbols()
+
+      # Выводим статистику производительности
+      if hasattr(trading_system, '_monitoring_cycles') and trading_system._monitoring_cycles % 10 == 0:
+        await trading_system._log_performance_stats()
 
       try:
         await asyncio.wait_for(stop_event.wait(), timeout=60)

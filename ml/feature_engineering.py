@@ -1,3 +1,5 @@
+import asyncio
+
 import pandas as pd
 import numpy as np
 import pandas_ta as ta
@@ -5,8 +7,16 @@ from typing import Tuple, Optional, List, Dict
 from sklearn.preprocessing import StandardScaler, RobustScaler
 import logging
 
-logger = logging.getLogger(__name__)
+from core.enums import Timeframe
 
+logger = logging.getLogger(__name__)
+def crossover_series(x: pd.Series, y: pd.Series) -> pd.Series:
+    """Проверяет, пересекла ли серия x серию y снизу вверх."""
+    return (x > y) & (x.shift(1) < y.shift(1))
+
+def crossunder_series(x: pd.Series, y: pd.Series) -> pd.Series:
+    """Проверяет, пересекла ли серия x серию y сверху вниз."""
+    return (x < y) & (x.shift(1) > y.shift(1))
 
 class AdvancedFeatureEngineer:
     """
@@ -16,7 +26,7 @@ class AdvancedFeatureEngineer:
 
     def __init__(self,
                  lookback_periods: List[int] = [5, 10, 20, 50],
-                 prediction_horizon: int = 3,
+                 prediction_horizon: int = 5,
                  volatility_window: int = 20,
                  use_robust_scaling: bool = True,
                  adaptive_thresholds: bool = True):
@@ -31,11 +41,45 @@ class AdvancedFeatureEngineer:
             adaptive_thresholds: Использовать адаптивные пороги для создания меток
         """
         self.lookback_periods = lookback_periods
-        self.prediction_horizon = prediction_horizon
+        # self.prediction_horizon = prediction_horizon
         self.volatility_window = volatility_window
         self.adaptive_thresholds = adaptive_thresholds
-        self.scaler = RobustScaler() if use_robust_scaling else StandardScaler()
+        # self.scaler = RobustScaler() if use_robust_scaling else StandardScaler()
         self.is_fitted = False
+        self.feature_names_in_ = []
+        self.prediction_horizon = prediction_horizon
+        self.scaler = RobustScaler(quantile_range=(25.0, 75.0)) if use_robust_scaling else StandardScaler()
+        self.is_fitted = False
+
+    @staticmethod
+    def calculate_mfi_manual(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series,
+                             length: int = 14) -> pd.Series:
+        """
+        Ручной, надежный расчет Money Flow Index (MFI).
+        """
+        # 1. Рассчитываем типичную цену
+        typical_price = (high + low + close) / 3
+
+        # 2. Рассчитываем денежный поток (Raw Money Flow)
+        money_flow = typical_price * volume
+
+        # 3. Определяем положительные и отрицательные денежные потоки
+        price_diff = typical_price.diff(1)
+
+        positive_flow = money_flow.where(price_diff > 0, 0)
+        negative_flow = money_flow.where(price_diff < 0, 0)
+
+        # 4. Суммируем потоки за заданный период
+        positive_mf_sum = positive_flow.rolling(window=length, min_periods=1).sum()
+        negative_mf_sum = negative_flow.rolling(window=length, min_periods=1).sum()
+
+        # 5. Рассчитываем Money Flow Ratio (MFR) с защитой от деления на ноль
+        money_flow_ratio = positive_mf_sum / (negative_mf_sum + 1e-9)  # +1e-9 для избежания деления на ноль
+
+        # 6. Рассчитываем MFI по стандартной формуле
+        mfi = 100 - (100 / (1 + money_flow_ratio))
+
+        return mfi
 
     @staticmethod
     def calculate_vpt_manual(close: pd.Series, volume: pd.Series) -> pd.Series:
@@ -71,18 +115,114 @@ class AdvancedFeatureEngineer:
         Расчет технических индикаторов с обработкой ошибок
         """
         data = df.copy()
+        logger.info("Расчет оптимизированного набора технических индикаторов...")
 
-        # Убеждаемся, что у нас есть необходимые колонки
+        # --- ШАГ 1: АГРЕССИВНАЯ ОЧИСТКА ДАННЫХ ---
         required_cols = ['open', 'high', 'low', 'close', 'volume']
+
+        # Проверяем наличие колонок
+        if not all(col in data.columns for col in required_cols):
+            logger.error(f"Отсутствуют необходимые OHLCV колонки. Пропускаем расчет.")
+            return pd.DataFrame()  # Возвращаем пустой DataFrame
+
+        # Принудительно преобразуем все ключевые колонки в числовой формат.
+        # Все, что не может быть преобразовано, станет NaN (Not a Number).
         for col in required_cols:
-            if col not in data.columns:
-                if col == 'volume':
-                    data[col] = 1.0  # Заглушка для объема
-                else:
-                    data[col] = data['close']  # Заглушка для OHLC
+            data[col] = pd.to_numeric(data[col], errors='coerce')
+
+        # Удаляем ЛЮБУЮ строку, где есть хотя бы одно значение NaN в ключевых колонках.
+        initial_rows = len(data)
+        data.dropna(subset=required_cols, inplace=True)
+
+        if len(data) < initial_rows:
+            logger.warning(f"Удалено {initial_rows - len(data)} строк с невалидными данными.")
+
+        # Если после очистки данных не осталось, прекращаем работу
+        if data.empty or len(data) < 50:  # 50 - минимум для многих индикаторов
+            logger.error("После очистки не осталось достаточно данных для расчета индикаторов.")
+            return pd.DataFrame()
+
+        # # Убеждаемся, что у нас есть необходимые колонки
+        # required_cols = ['open', 'high', 'low', 'close', 'volume']
+        # for col in required_cols:
+        #     if col not in data.columns:
+        #         if col == 'volume':
+        #             data[col] = 1.0  # Заглушка для объема
+        #         else:
+        #             data[col] = data['close']  # Заглушка для OHLC
 
         try:
             # === ТРЕНДОВЫЕ ИНДИКАТОРЫ ===
+            try:
+                # === ГРУППА 1: Базовые индикаторы и волатильность (из прошлых версий) ===
+                data.ta.rsi(length=14, append=True)
+                data.ta.ema(length=50, append=True)
+                data.ta.ema(length=200, append=True)
+                data.ta.adx(length=14, append=True)
+                data.ta.atr(length=14, append=True)
+                # data['atr_ratio'] = data['atr'] / data['close']
+                # Рассчитываем ATR и ATR_Ratio в одном блоке
+                # atr = ta.atr(data['high'], data['low'], data['close'], length=14)
+                # if atr is not None and not atr.isnull().all():
+                #     data['atr'] = atr
+                #     data['atr_ratio'] = atr / data['close']
+                if 'atr' in data.columns:
+                    data['atr_ratio'] = data['atr'] / (data['close'] + 1e-9)
+
+
+                # === ГРУППА 2: Компоненты из "MFI + RSI + EMA Dynamic Signals" ===
+                logger.debug("Расчет признаков из 'MFI + RSI + EMA'...")
+                data['mfi_14'] = self.calculate_mfi_manual(data['high'], data['low'], data['close'], data['volume'], length=14)
+                ema_fast = ta.ema(data['close'], length=9)
+                ema_slow = ta.ema(data['close'], length=21)
+                data['ema_fast_9'] = ema_fast
+                data['ema_slow_21'] = ema_slow
+                # Признак "близости к пересечению"
+                data['ema_proximity_percent'] = abs((ema_fast - ema_slow) / ema_slow) * 100
+                # Признак факта пересечения (1 = было, 0 = не было)
+                # --- ИСПОЛЬЗУЕМ ВАШИ НОВЫЕ ФУНКЦИИ ---
+                data['ema_9_21_crossover'] = crossover_series(ema_fast, ema_slow).astype(int)
+                data['ema_9_21_crossunder'] = crossunder_series(ema_fast, ema_slow).astype(int)
+                # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+                # === ГРУППА 3: Компоненты из "RSITrend" ===
+                logger.debug("Расчет признаков из 'RSITrend'...")
+                # Рассчитываем Hull Moving Average (HMA)
+                hma_fast = ta.hma(data['close'], length=30)
+                # Для сигнала нам нужно сравнить текущее значение с предыдущим сдвинутым
+                hma_slow = hma_fast.shift(2)
+                data['hma_fast_30'] = hma_fast
+                data['hma_slow_30_shifted'] = hma_slow
+                # Сигнал тренда по HMA (1 = вверх, 0 = вниз)
+                data['hma_trend_signal'] = (hma_fast > hma_slow).astype(int)
+
+                # Рассчитываем RSI от HMA (сглаженный RSI)
+                if hma_fast is not None and not hma_fast.isnull().all():
+                    data['rsi_of_hma'] = ta.rsi(hma_fast, length=14)
+
+                # === ГРУППА 4: Анализ всплесков объема (уже был, но проверяем) ===
+                logger.debug("Расчет признаков всплеска объема...")
+                volume_sma = ta.sma(data['volume'], length=20)
+                data['volume_spike_ratio'] = data['volume'] / (volume_sma + 1e-9)
+
+                feature_count = len([col for col in data.columns if col not in df.columns])
+                logger.info(f"Создано {feature_count} НОВЫХ технических индикаторов.")
+
+            except Exception as e:
+                logger.error(f"Общая ошибка при расчете индикаторов: {e}", exc_info=True)
+
+            try:
+                # Parabolic SAR (для динамического стоп-лосса)
+                psar_data = ta.psar(data['high'], data['low'], data['close'])
+                if psar_data is not None:
+                    # Нас интересует основная линия PSAR
+                    psar_col = next((col for col in psar_data.columns if
+                                     'PSAR' in col and 'PSARl' not in col and 'PSARs' not in col), None)
+                    if psar_col:
+                        data['psar'] = psar_data[psar_col]
+
+            except Exception as e:
+                logger.warning(f"Ошибка при расчете осцилляторов и волатильности: {e}")
 
             # Скользящие средние различных типов
             for period in self.lookback_periods:
@@ -117,6 +257,21 @@ class AdvancedFeatureEngineer:
             except Exception as e:
                 logger.warning(f"Ошибка при расчете Bollinger Bands: {e}")
 
+            # ++ ДОБАВЛЯЕМ ПРИЗНАКИ ГЛОБАЛЬНОГО ТРЕНДА ++
+            try:
+                ema_200 = ta.ema(data['close'], length=200)
+                # Отношение цены к долгосрочной EMA показывает позицию в тренде
+                data['price_to_ema_200_ratio'] = data['close'] / ema_200
+
+                # Долгосрочный ADX для оценки силы глобального тренда
+                adx_long = ta.adx(data['high'], data['low'], data['close'], length=50)
+                if adx_long is not None:
+                    data['adx_long_term'] = adx_long.iloc[:, 0]  # Берем значение 'ADX_50'
+
+            except Exception as e:
+                logger.warning(f"Ошибка при расчете признаков глобального тренда: {e}")
+
+
             # === ОСЦИЛЛЯТОРЫ ===
 
             # RSI с различными периодами
@@ -134,17 +289,25 @@ class AdvancedFeatureEngineer:
             except Exception as e:
                 logger.warning(f"Ошибка при расчете Stochastic: {e}")
 
-            # Williams %R
-            try:
-                data['willr'] = ta.willr(data['high'], data['low'], data['close'])
-            except Exception as e:
-                logger.warning(f"Ошибка при расчете Williams %R: {e}")
+            # # Williams %R
+            # try:
+            #     data['willr'] = ta.willr(data['high'], data['low'], data['close'])
+            # except Exception as e:
+            #     logger.warning(f"Ошибка при расчете Williams %R: {e}")
 
-            # CCI (Commodity Channel Index)
+            # Aroon Oscillator
             try:
-                data['cci'] = ta.cci(data['high'], data['low'], data['close'])
+                aroon_data = ta.aroon(data['high'], data['low'], length=14)
+                if aroon_data is not None and not aroon_data.empty:
+                    data = pd.concat([data, aroon_data], axis=1)
             except Exception as e:
-                logger.warning(f"Ошибка при расчете CCI: {e}")
+                logger.warning(f"Ошибка при расчете Aroon: {e}")
+
+            # # CCI (Commodity Channel Index)
+            # try:
+            #     data['cci'] = ta.cci(data['high'], data['low'], data['close'])
+            # except Exception as e:
+            #     logger.warning(f"Ошибка при расчете CCI: {e}")
 
             # === ВОЛАТИЛЬНОСТЬ ===
 
@@ -200,9 +363,9 @@ class AdvancedFeatureEngineer:
             # === ЦЕНОВЫЕ ПАТТЕРНЫ ===
 
             # Gaps
-            data['gap_up'] = (data['open'] > data['close'].shift(1)).astype(int)
-            data['gap_down'] = (data['open'] < data['close'].shift(1)).astype(int)
-            data['gap_size'] = abs(data['open'] - data['close'].shift(1)) / data['close'].shift(1)
+            # data['gap_up'] = (data['open'] > data['close'].shift(1)).astype(int)
+            # data['gap_down'] = (data['open'] < data['close'].shift(1)).astype(int)
+            # # data['gap_size'] = abs(data['open'] - data['close'].shift(1)) / data['close'].shift(1)
 
             # Price ranges
             data['high_low_ratio'] = data['high'] / data['low']
@@ -336,30 +499,30 @@ class AdvancedFeatureEngineer:
         Создание кросс-секционных признаков (взаимодействие между индикаторами)
         """
         result = data.copy()
-
-        # Важные пары индикаторов для взаимодействия
-        indicator_pairs = [
-            ('rsi_14', 'willr'),
-            ('sma_10', 'sma_20'),
-            ('ema_10', 'ema_20'),
-            ('atr', 'volatility_20'),
-        ]
-
-        for ind1, ind2 in indicator_pairs:
-            if ind1 in data.columns and ind2 in data.columns:
-                try:
-                    # Отношение
-                    result[f'{ind1}_to_{ind2}_ratio'] = data[ind1] / (data[ind2] + 1e-10)
-
-                    # Разность
-                    result[f'{ind1}_minus_{ind2}'] = data[ind1] - data[ind2]
-
-                    # Корреляция на скользящем окне
-                    result[f'{ind1}_{ind2}_correlation'] = (
-                        data[ind1].rolling(window=20).corr(data[ind2])
-                    )
-                except Exception as e:
-                    logger.warning(f"Ошибка при создании кросс-секционных признаков для {ind1}/{ind2}: {e}")
+        #
+        # # Важные пары индикаторов для взаимодействия
+        # indicator_pairs = [
+        #     ('rsi_14', 'willr'),
+        #     ('sma_10', 'sma_20'),
+        #     ('ema_10', 'ema_20'),
+        #     ('atr', 'volatility_20'),
+        # ]
+        #
+        # for ind1, ind2 in indicator_pairs:
+        #     if ind1 in data.columns and ind2 in data.columns:
+        #         try:
+        #             # Отношение
+        #             result[f'{ind1}_to_{ind2}_ratio'] = data[ind1] / (data[ind2] + 1e-10)
+        #
+        #             # Разность
+        #             result[f'{ind1}_minus_{ind2}'] = data[ind1] - data[ind2]
+        #
+        #             # Корреляция на скользящем окне
+        #             result[f'{ind1}_{ind2}_correlation'] = (
+        #                 data[ind1].rolling(window=20).corr(data[ind2])
+        #             )
+        #         except Exception as e:
+        #             logger.warning(f"Ошибка при создании кросс-секционных признаков для {ind1}/{ind2}: {e}")
 
         return result
 
@@ -369,109 +532,167 @@ class AdvancedFeatureEngineer:
         """
         result = data.copy()
 
-        try:
-            # Волатильность режимы
-            if 'volatility_20' in data.columns:
-                vol_data = data['volatility_20'].dropna()
-                if len(vol_data) > 0:
-                    vol_quantiles = vol_data.quantile([0.33, 0.66])
-                    result['volatility_regime'] = pd.cut(
-                        data['volatility_20'],
-                        bins=[-np.inf, vol_quantiles[0.33], vol_quantiles[0.66], np.inf],
-                        labels=[0, 1, 2]
-                    ).astype(float)
-
-            # Трендовые режимы на основе скользящих средних
-            if 'sma_10' in data.columns and 'sma_50' in data.columns:
-                result['trend_regime'] = np.where(
-                    data['sma_10'] > data['sma_50'], 1, 0  # 1 = восходящий тренд, 0 = нисходящий
-                )
-
-            # Momentum режимы
-            if 'rsi_14' in data.columns:
-                result['momentum_regime'] = pd.cut(
-                    data['rsi_14'],
-                    bins=[0, 30, 70, 100],
-                    labels=[0, 1, 2]  # 0 = oversold, 1 = neutral, 2 = overbought
-                ).astype(float)
-
-        except Exception as e:
-            logger.warning(f"Ошибка при создании режимных признаков: {e}")
+        # try:
+        #     # Волатильность режимы
+        #     if 'volatility_20' in data.columns:
+        #         vol_data = data['volatility_20'].dropna()
+        #         if len(vol_data) > 0:
+        #             vol_quantiles = vol_data.quantile([0.33, 0.66])
+        #             result['volatility_regime'] = pd.cut(
+        #                 data['volatility_20'],
+        #                 bins=[-np.inf, vol_quantiles[0.33], vol_quantiles[0.66], np.inf],
+        #                 labels=[0, 1, 2]
+        #             ).astype(float)
+        #
+        #     # Трендовые режимы на основе скользящих средних
+        #     if 'sma_10' in data.columns and 'sma_50' in data.columns:
+        #         result['trend_regime'] = np.where(
+        #             data['sma_10'] > data['sma_50'], 1, 0  # 1 = восходящий тренд, 0 = нисходящий
+        #         )
+        #
+        #     # Momentum режимы
+        #     if 'rsi_14' in data.columns:
+        #         result['momentum_regime'] = pd.cut(
+        #             data['rsi_14'],
+        #             bins=[0, 30, 70, 100],
+        #             labels=[0, 1, 2]  # 0 = oversold, 1 = neutral, 2 = overbought
+        #         ).astype(float)
+        #
+        # except Exception as e:
+        #     logger.warning(f"Ошибка при создании режимных признаков: {e}")
 
         return result
 
     def create_labels(self, data: pd.DataFrame) -> pd.Series:
         """
-        Создание меток для классификации с улучшенной балансировкой
+        Создает метки для классификации с использованием "Метода трех барьеров".
+        Это золотой стандарт в финансовом ML.
 
         Returns:
-            Метки: 0 = продавать, 1 = держать, 2 = покупать
+            Метки: 0 = SELL (касание стоп-лосса), 1 = HOLD (касание временного барьера), 2 = BUY (касание тейк-профита)
         """
         if 'close' not in data.columns:
             raise ValueError("Колонка 'close' не найдена в данных")
 
-        # Рассчитываем будущую доходность
-        future_returns = data['close'].shift(-self.prediction_horizon) / data['close'] - 1
+        logger.info("Создание меток с помощью метода трех барьеров...")
 
-        if self.adaptive_thresholds:
-            # Рассчитываем динамические пороги на основе волатильности
-            if 'atr' in data.columns and data['atr'].notna().sum() > 0:
-                volatility_threshold = data['atr'] / data['close']
-            else:
-                # Используем историческую волатильность
-                returns = data['close'].pct_change()
-                volatility_threshold = returns.rolling(window=self.volatility_window).std()
+        # 1. Настройка барьеров
+        # Рассчитываем волатильность (через ATR) для установки динамических барьеров
+        if 'atr' not in data.columns or data['atr'].isnull().all():
+            data['atr'] = ta.atr(data['high'], data['low'], data['close'], length=14)
 
-            # Создаем адаптивные пороги - делаем их менее строгими для лучшего баланса классов
-            upper_threshold = volatility_threshold * 0.75  # Уменьшили с 1.5 до 0.75
-            lower_threshold = -volatility_threshold * 0.75  # Уменьшили с 1.5 до 0.75
-        else:
-            # Фиксированные пороги на основе квантилей
-            returns_clean = future_returns.dropna()
-            if len(returns_clean) > 0:
-                upper_threshold = returns_clean.quantile(0.7)  # Увеличили с 0.75 до 0.7
-                lower_threshold = returns_clean.quantile(0.3)  # Уменьшили с 0.25 до 0.3
-            else:
-                upper_threshold = 0.01
-                lower_threshold = -0.01
+        # Заполняем возможные пропуски в ATR
+        data['atr'] = data['atr'].ffill().bfill()
 
-        # Создаем метки
-        labels = pd.Series(1, index=data.index)  # По умолчанию HOLD
-        labels[future_returns > upper_threshold] = 2  # BUY
-        labels[future_returns < lower_threshold] = 0  # SELL
+        # Динамические барьеры: тейк-профит будет в 2 раза дальше стоп-лосса
+        tp_multiplier = 2.0
+        sl_multiplier = 1.0
 
-        # Проверяем распределение классов и корректируем при необходимости
-        class_counts = labels.value_counts()
-        total_samples = len(labels)
+        take_profit_level = data['atr'] / data['close'] * tp_multiplier
+        stop_loss_level = data['atr'] / data['close'] * sl_multiplier
 
-        # Если какой-то класс составляет менее 5% от общего количества, корректируем пороги
-        min_class_ratio = 0.05
-        for class_label, count in class_counts.items():
-            if count / total_samples < min_class_ratio:
-                logger.warning(f"Класс {class_label} составляет менее {min_class_ratio*100}% данных ({count}/{total_samples})")
+        # Вертикальный барьер (максимальное время удержания сделки)
+        time_barrier_periods = self.prediction_horizon * 2  # Например, 10 свечей
 
-                # Делаем пороги еще менее строгими
-                if self.adaptive_thresholds:
-                    upper_threshold = volatility_threshold * 0.5
-                    lower_threshold = -volatility_threshold * 0.5
-                else:
-                    upper_threshold = returns_clean.quantile(0.65)
-                    lower_threshold = returns_clean.quantile(0.35)
+        # 2. Основной цикл для вычисления меток
+        labels = pd.Series(1, index=data.index)  # По умолчанию 1 (HOLD)
 
-                # Пересоздаем метки
-                labels = pd.Series(1, index=data.index)
-                labels[future_returns > upper_threshold] = 2
-                labels[future_returns < lower_threshold] = 0
-                break
+        for i in range(len(data) - time_barrier_periods):
+            entry_price = data['close'].iloc[i]
 
+            # Итерируемся по будущим свечам внутри временного окна
+            for j in range(1, time_barrier_periods + 1):
+                future_price = data['close'].iloc[i + j]
+
+                # Проверяем касание верхнего барьера (Take Profit)
+                if (future_price - entry_price) / entry_price >= take_profit_level.iloc[i]:
+                    labels.iloc[i] = 2  # BUY
+                    break  # Выходим из внутреннего цикла, барьер найден
+
+                # Проверяем касание нижнего барьера (Stop Loss)
+                elif (entry_price - future_price) / entry_price >= stop_loss_level.iloc[i]:
+                    labels.iloc[i] = 0  # SELL
+                    break  # Выходим из внутреннего цикла, барьер найден
+
+            # Если ни один из боковых барьеров не был коснут, метка остается 1 (HOLD)
+
+        logger.info(f"Распределение меток (Triple Barrier): {labels.value_counts().to_dict()}")
         return labels
+
+    # def create_labels(self, data: pd.DataFrame) -> pd.Series:
+    #     """
+    #     Создание меток для классификации с улучшенной балансировкой
+    #
+    #     Returns:
+    #         Метки: 0 = продавать, 1 = держать, 2 = покупать
+    #     """
+    #     if 'close' not in data.columns:
+    #         raise ValueError("Колонка 'close' не найдена в данных")
+    #
+    #     # Рассчитываем будущую доходность
+    #     future_returns = data['close'].shift(-self.prediction_horizon) / data['close'] - 1
+    #
+    #     if self.adaptive_thresholds:
+    #         # Рассчитываем динамические пороги на основе волатильности
+    #         if 'atr' in data.columns and data['atr'].notna().sum() > 0:
+    #             volatility_threshold = data['atr'] / data['close'] if 'atr' in data.columns else 0.01
+    #         else:
+    #             # Используем историческую волатильность
+    #             returns = data['close'].pct_change()
+    #             volatility_threshold = returns.rolling(window=self.volatility_window).std()
+    #
+    #         # Создаем адаптивные пороги - делаем их менее строгими для лучшего баланса классов
+    #         upper_threshold = volatility_threshold * 0.75  # Уменьшили с 1.5 до 0.75
+    #         lower_threshold = -volatility_threshold * 0.75  # Уменьшили с 1.5 до 0.75
+    #     else:
+    #         # Фиксированные пороги на основе квантилей
+    #         returns_clean = future_returns.dropna()
+    #         if len(returns_clean) > 0:
+    #             upper_threshold = returns_clean.quantile(0.7)  # Увеличили с 0.75 до 0.7
+    #             lower_threshold = returns_clean.quantile(0.3)  # Уменьшили с 0.25 до 0.3
+    #         else:
+    #             upper_threshold = 0.01
+    #             lower_threshold = -0.01
+    #
+    #     # Создаем метки
+    #     labels = pd.Series(1, index=data.index)  # По умолчанию HOLD
+    #     labels[future_returns > upper_threshold] = 2  # BUY
+    #     labels[future_returns < lower_threshold] = 0  # SELL
+    #
+    #     # Проверяем распределение классов и корректируем при необходимости
+    #     class_counts = labels.value_counts()
+    #     total_samples = len(labels)
+    #
+    #     # Если какой-то класс составляет менее 5% от общего количества, корректируем пороги
+    #     min_class_ratio = 0.05
+    #     for class_label, count in class_counts.items():
+    #         if count / total_samples < min_class_ratio:
+    #             logger.warning(f"Класс {class_label} составляет менее {min_class_ratio*100}% данных ({count}/{total_samples})")
+    #
+    #             # Делаем пороги еще менее строгими
+    #             if self.adaptive_thresholds:
+    #                 upper_threshold = volatility_threshold * 0.5
+    #                 lower_threshold = -volatility_threshold * 0.5
+    #             else:
+    #                 upper_threshold = returns_clean.quantile(0.65)
+    #                 lower_threshold = returns_clean.quantile(0.35)
+    #
+    #             # Пересоздаем метки
+    #             labels = pd.Series(1, index=data.index)
+    #             labels[future_returns > upper_threshold] = 2
+    #             labels[future_returns < lower_threshold] = 0
+    #             break
+    #
+    #
+    #
+    #     return labels
 
     def clean_and_validate_data(self, data: pd.DataFrame) -> pd.DataFrame:
         """
         Очистка и валидация данных
         """
         # Удаляем строки с бесконечными значениями
-        data = data.replace([np.inf, -np.inf], np.nan)
+        data = data.replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)
 
         # Заполняем пропущенные значения
         # Для индикаторов используем forward fill, затем backward fill
@@ -514,7 +735,7 @@ class AdvancedFeatureEngineer:
         logger.info(f"Выбрано {len(numeric_cols)} числовых признаков из {len(all_cols)} общих колонок")
         return numeric_cols
 
-    def create_features_and_labels(self, data: pd.DataFrame) -> Tuple[Optional[pd.DataFrame], Optional[pd.Series]]:
+    def create_features_and_labels(self, data: pd.DataFrame, for_prediction: bool = False) -> Tuple[Optional[pd.DataFrame], Optional[pd.Series]]:
         """
         Основная функция для создания признаков и меток
 
@@ -576,9 +797,9 @@ class AdvancedFeatureEngineer:
                 logger.warning("После очистки данные стали пустыми")
                 return None, None
 
-            # 8. Создание меток
-            logger.info("Создание меток...")
-            labels = self.create_labels(clean_data)
+            # # 8. Создание меток
+            # logger.info("Создание меток...")
+            # labels = self.create_labels(clean_data)
 
             # 9. Выбор только числовых признаков
             logger.info("Выбор числовых признаков для нормализации...")
@@ -626,52 +847,240 @@ class AdvancedFeatureEngineer:
                 logger.error(f"Ошибка при нормализации признаков: {e}")
                 return None, None
 
-            # Убеждаемся, что признаки и метки имеют одинаковый индекс
-            common_index = features_scaled.index.intersection(labels.index)
-            features_final = features_scaled.loc[common_index]
-            labels_final = labels.loc[common_index]
+            if for_prediction:
+                # Если нам нужны только признаки для предсказания, возвращаем их
+                logger.debug(
+                    f"Создано {features_scaled.shape[1]} признаков для {features_scaled.shape[0]} наблюдений (режим предсказания).")
+                return features_scaled, None
+            else:
+                # --- Этот блок выполняется только при обучении (когда for_prediction=False) ---
+                logger.info("Создание меток для обучения...")
 
-            # Проверяем балансировку классов
-            class_distribution = labels_final.value_counts()
-            logger.info(f"Создано {features_final.shape[1]} признаков для {features_final.shape[0]} наблюдений")
-            logger.info(f"Распределение меток: {class_distribution.to_dict()}")
+                # 8. Создание меток
+                labels = self.create_labels(clean_data)
 
-            # Дополнительная проверка на сильный дисбаланс классов
-            total_samples = len(labels_final)
-            min_class_size = class_distribution.min()
-            min_class_ratio = min_class_size / total_samples
+                # Выравнивание признаков и меток по индексам
+                common_index = features_scaled.index.intersection(labels.index)
+                features_final = features_scaled.loc[common_index]
+                labels_final = labels.loc[common_index]
 
-            if min_class_ratio < 0.05:  # Если минимальный класс менее 5%
-                logger.warning(f"Обнаружен сильный дисбаланс классов. Минимальный класс: {min_class_ratio:.2%}")
+                # Логика проверки и улучшения баланса классов
+                class_distribution = labels_final.value_counts()
+                logger.info(f"Создано {features_final.shape[1]} признаков для {features_final.shape[0]} наблюдений")
+                logger.info(f"Распределение меток: {class_distribution.to_dict()}")
 
-                # Пытаемся улучшить баланс, создавая более мягкие пороги
-                returns = clean_data['close'].pct_change()
-                returns_clean = returns.dropna()
+                total_samples = len(labels_final)
+                if total_samples > 0:
+                    min_class_size = class_distribution.min()
+                    min_class_ratio = min_class_size / total_samples
+                    if min_class_ratio < 0.05:  # Если минимальный класс менее 5%
+                        logger.warning(f"Обнаружен сильный дисбаланс классов. Минимальный класс: {min_class_ratio:.2%}")
 
-                if len(returns_clean) > 10:
-                    # Используем более мягкие квантили
-                    upper_threshold = returns_clean.quantile(0.6)
-                    lower_threshold = returns_clean.quantile(0.4)
+                        # Пытаемся улучшить баланс, создавая более мягкие пороги
+                        returns = clean_data['close'].pct_change()
+                        returns_clean = returns.dropna()
 
-                    future_returns = clean_data['close'].shift(-self.prediction_horizon) / clean_data['close'] - 1
-                    labels_balanced = pd.Series(1, index=clean_data.index)
-                    labels_balanced[future_returns > upper_threshold] = 2
-                    labels_balanced[future_returns < lower_threshold] = 0
+                        if len(returns_clean) > 10:
+                            # Используем более мягкие квантили
+                            upper_threshold = returns_clean.quantile(0.6)
+                            lower_threshold = returns_clean.quantile(0.4)
 
-                    # Обновляем метки если баланс улучшился
-                    new_distribution = labels_balanced.value_counts()
-                    new_min_ratio = new_distribution.min() / len(labels_balanced)
+                            future_returns = clean_data['close'].shift(-self.prediction_horizon) / clean_data['close'] - 1
+                            labels_balanced = pd.Series(1, index=clean_data.index)
+                            labels_balanced[future_returns > upper_threshold] = 2
+                            labels_balanced[future_returns < lower_threshold] = 0
 
-                    if new_min_ratio > min_class_ratio:
-                        labels_final = labels_balanced.loc[common_index]
-                        logger.info(f"Улучшенное распределение меток: {labels_final.value_counts().to_dict()}")
+                            # Обновляем метки если баланс улучшился
+                            new_distribution = labels_balanced.value_counts()
+                            new_min_ratio = new_distribution.min() / len(labels_balanced)
 
-            return features_final, labels_final
+                            if new_min_ratio > min_class_ratio:
+                                labels_final = labels_balanced.loc[common_index]
+                                logger.info(f"Улучшенное распределение меток: {labels_final.value_counts().to_dict()}")
+
+                    return features_final, labels_final
 
         except Exception as e:
             logger.error(f"Ошибка при создании признаков и меток: {e}", exc_info=True)
             return None, None
+#-----------------------------------------------
+    def _add_volume_spike_feature(self, data: pd.DataFrame, suffix: str = "") -> pd.DataFrame:
+        """Добавляет признак для анализа всплесков объема."""
+        df = data.copy()
+        try:
+            volume_sma = ta.sma(df['volume'], length=20)
+            # Добавляем малое число, чтобы избежать деления на ноль, если объем был нулевым
+            df[f'volume_spike_ratio{suffix}'] = df['volume'] / (volume_sma + 1e-9)
+        except Exception as e:
+            logger.warning(f"Не удалось рассчитать всплеск объема для суффикса '{suffix}': {e}")
+        return df
 
+    def _calculate_secondary_indicators(self, data: pd.DataFrame, suffix: str) -> pd.DataFrame:
+        """
+        Рассчитывает УПРОЩЕННЫЙ набор индикаторов с ЗАЩИТОЙ от ошибок.
+        """
+        df = data.copy()
+
+        # Сначала рассчитываем всплеск объема
+        df = self._add_volume_spike_feature(df, suffix)
+
+        try:
+            # Расчет EMA и RSI
+            ema_200 = ta.ema(df['close'], length=200)
+            rsi_14 = ta.rsi(df['close'], length=14)
+
+            # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ: ПРОВЕРЯЕМ РЕЗУЛЬТАТ ПЕРЕД ИСПОЛЬЗОВАНИЕМ ---
+            if ema_200 is not None and not ema_200.isnull().all():
+                df[f'price_to_ema_200{suffix}'] = df['close'] / ema_200
+            else:
+                # Если рассчитать не удалось, создаем колонку с нейтральным значением
+                df[f'price_to_ema_200{suffix}'] = 1.0
+
+            if rsi_14 is not None and not rsi_14.isnull().all():
+                df[f'rsi_14{suffix}'] = rsi_14
+            else:
+                # Нейтральное значение для RSI - 50
+                df[f'rsi_14{suffix}'] = 50.0
+
+        except Exception as e:
+            logger.warning(f"Не удалось рассчитать индикаторы для {suffix}: {e}")
+            # Создаем колонки с нейтральными значениями в случае любой ошибки
+            df[f'price_to_ema_200{suffix}'] = 1.0
+            df[f'rsi_14{suffix}'] = 50.0
+
+        # Выбираем только созданные колонки для мержа
+        indicator_cols = [col for col in df.columns if suffix in col]
+        return df[indicator_cols]
+
+    # def _create_primary_features(self, data: pd.DataFrame) -> pd.DataFrame:
+    #     """
+    #     Создает ПОЛНЫЙ набор признаков для основного таймфрейма (1H).
+    #     Мы используем вашу существующую функцию.
+    #     """
+    #     df = self._add_volume_spike_feature(data.copy())  # Добавляем анализ объема
+    #     return self.calculate_technical_indicators(df)  # Вызываем вашу основную функцию расчета
+
+    def _create_primary_features(self, data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Создает ПОЛНЫЙ набор признаков для основного таймфрейма (1H).
+        """
+        df = self._add_volume_spike_feature(data.copy())
+
+        # Сначала вызываем вашу основную функцию расчета
+        df_with_indicators = self.calculate_technical_indicators(df)
+
+        # --- ДОБАВЛЯЕМ НЕДОСТАЮЩИЙ AROON ---
+        try:
+            aroon_data = ta.aroon(df_with_indicators['high'], df_with_indicators['low'], length=14)
+            if aroon_data is not None and not aroon_data.empty:
+                # Явно переименовываем колонки, чтобы избежать конфликтов
+                aroon_data.columns = [f"{col.upper()}_1H" for col in aroon_data.columns]
+                df_with_indicators = pd.concat([df_with_indicators, aroon_data], axis=1)
+                logger.debug("Индикатор Aroon успешно добавлен в основной набор признаков.")
+        except Exception as e:
+            logger.warning(f"Ошибка при расчете Aroon для основного таймфрейма: {e}")
+        # --- КОНЕЦ БЛОКА ---
+
+        return df_with_indicators
+
+    def _final_preparation(self, features: pd.DataFrame, labels: Optional[pd.Series] = None) -> Tuple[
+        Optional[pd.DataFrame], Optional[pd.Series]]:
+        """
+        ФИНАЛЬНАЯ ВЕРСИЯ: Очистка, нормализация и ГАРАНТИРОВАННОЕ ВЫРАВНИВАНИЕ КОЛОНОК.
+        """
+        # --- БЛОК ОЧИСТКИ ---
+        numeric_feature_cols = self.select_numeric_features(features)
+        if not numeric_feature_cols: return None, None
+
+        features_df = features[numeric_feature_cols].copy()
+        features_df = features_df.ffill().bfill().fillna(0)
+
+        # --- БЛОК НОРМАЛИЗАЦИИ И ВЫРАВНИВАНИЯ ---
+        try:
+            if not self.is_fitted:
+                # Первое обучение: обучаем и сохраняем эталонный список колонок
+                logger.info("Первый запуск: обучение нормализатора и сохранение эталонных признаков...")
+                scaled_data = self.scaler.fit_transform(features_df)
+                self.is_fitted = True
+                # Сохраняем имена признаков в том порядке, в котором они были при обучении
+                self.feature_names_in_ = features_df.columns.tolist()
+                features_scaled = pd.DataFrame(scaled_data, columns=self.feature_names_in_, index=features_df.index)
+            else:
+                # Последующие запуски: приводим колонки к эталону
+                current_columns = features_df.columns
+
+                # Добавляем недостающие колонки (которые были при обучении, но нет сейчас)
+                missing_cols = set(self.feature_names_in_) - set(current_columns)
+                for col in missing_cols:
+                    features_df[col] = 0 # Заполняем нулем
+
+                # Удаляем лишние колонки (которые есть сейчас, но не было при обучении)
+                extra_cols = set(current_columns) - set(self.feature_names_in_)
+                if extra_cols:
+                    features_df = features_df.drop(columns=list(extra_cols))
+
+                # Гарантируем правильный порядок колонок
+                features_df = features_df[self.feature_names_in_]
+
+                # Теперь нормализуем, зная, что структура совпадает
+                scaled_data = self.scaler.transform(features_df)
+                features_scaled = pd.DataFrame(scaled_data, columns=self.feature_names_in_, index=features_df.index)
+
+        except Exception as e:
+            logger.error(f"Ошибка нормализации: {e}")
+            return None, None
+
+        if labels is None:
+            return features_scaled, None
+
+        common_index = features_scaled.index.intersection(labels.index)
+        features_final = features_scaled.loc[common_index]
+        labels_final = labels.loc[common_index]
+        return features_final, labels_final
+
+    async def create_multi_timeframe_features(self, symbol: str, data_fetcher) -> Tuple[
+        Optional[pd.DataFrame], Optional[pd.Series]]:
+        """
+        ГЛАВНАЯ ФУНКЦИЯ: Создает признаки, объединяя данные с нескольких таймфреймов.
+        """
+        try:
+            logger.info(f"МТА для {symbol}: Загрузка данных для всех таймфреймов...")
+            timeframes_to_fetch = {
+                '15m': Timeframe.FIFTEEN_MINUTES, '30m': Timeframe.THIRTY_MINUTES,
+                '1h': Timeframe.ONE_HOUR, '4h': Timeframe.FOUR_HOURS, '1d': Timeframe.ONE_DAY
+            }
+            tasks = {name: data_fetcher.get_historical_candles(symbol, tf, limit=1000) for name, tf in
+                     timeframes_to_fetch.items()}
+            all_data_dict = dict(zip(tasks.keys(), await asyncio.gather(*tasks.values())))
+
+            df_primary = all_data_dict.get('1h')
+            if df_primary is None or df_primary.empty or len(df_primary) < 200:
+                logger.warning(f"Недостаточно основных данных (1H) для {symbol}")
+                return None, None
+
+            logger.info(f"МТА для {symbol}: Создание основного набора признаков (1H)...")
+            features = self._create_primary_features(df_primary)
+
+            for tf_name, df_other in all_data_dict.items():
+                if tf_name == '1h' or df_other is None or df_other.empty:
+                    continue
+
+                logger.info(f"МТА для {symbol}: Расчет и добавление признаков с {tf_name}...")
+                indicators_other_tf = self._calculate_secondary_indicators(df_other, suffix=f"_{tf_name}")
+
+                features = pd.merge_asof(
+                    features.sort_index(), indicators_other_tf.sort_index(),
+                    on='timestamp', direction='backward'
+                )
+
+            labels = self.create_labels(features)
+            return self._final_preparation(features, labels)
+
+        except Exception as e:
+            logger.error(f"Ошибка при создании мультитаймфрейм-признаков для {symbol}: {e}", exc_info=True)
+            return None, None
+
+#-----------------------------------------------
 
 # Глобальный экземпляр для использования в main.py
 feature_engineer = AdvancedFeatureEngineer()
@@ -809,54 +1218,62 @@ def validate_data_quality(features: pd.DataFrame, labels: pd.Series) -> Dict[str
         elif len(features) < 500:
             validation_results['warnings'].append(f"Малый размер выборки: {len(features)}. Рекомендуется > 500")
 
+        # --- ИСПРАВЛЕНИЕ ЗДЕСЬ: ПРОВЕРКА ПЕРЕД ДЕЛЕНИЕМ ---
         # Проверка баланса классов
         class_counts = labels.value_counts()
         total_samples = len(labels)
+
+        if total_samples == 0:
+            validation_results['errors'].append("После обработки не осталось меток для анализа баланса классов.")
+            validation_results['is_valid'] = False
+            return validation_results
+
         min_class_ratio = class_counts.min() / total_samples
 
-        if min_class_ratio < 0.01:  # Менее 1%
+        if min_class_ratio < 0.01:
             validation_results['errors'].append(f"Критический дисбаланс классов: {class_counts.to_dict()}")
             validation_results['is_valid'] = False
-        elif min_class_ratio < 0.05:  # Менее 5%
+        elif min_class_ratio < 0.05:
             validation_results['warnings'].append(f"Сильный дисбаланс классов: {class_counts.to_dict()}")
-            validation_results['recommendations'].append("Рассмотрите использование SMOTE или изменение порогов классификации")
+            validation_results['recommendations'].append(
+                "Рассмотрите использование SMOTE или изменение порогов классификации")
 
         # Проверка на пропущенные значения
-        missing_ratio = features.isnull().sum().sum() / (len(features) * len(features.columns))
-        if missing_ratio > 0.1:
-            validation_results['warnings'].append(f"Высокий процент пропущенных значений: {missing_ratio:.2%}")
+        denominator = len(features) * len(features.columns)
+        if denominator > 0:
+            missing_ratio = features.isnull().sum().sum() / denominator
+            if missing_ratio > 0.1:
+                validation_results['warnings'].append(f"Высокий процент пропущенных значений: {missing_ratio:.2%}")
 
         # Проверка на константные признаки
-        constant_features = []
-        for col in features.columns:
-            if features[col].nunique() <= 1:
-                constant_features.append(col)
-
+        constant_features = [col for col in features.columns if features[col].nunique() <= 1]
         if constant_features:
             validation_results['warnings'].append(f"Найдены константные признаки: {len(constant_features)}")
             validation_results['recommendations'].append("Удалите константные признаки перед обучением")
 
-        # Проверка на сильно коррелированные признаки
-        if len(features.columns) > 1:
-            corr_matrix = features.corr().abs()
-            high_corr_pairs = []
-            for i in range(len(corr_matrix.columns)):
-                for j in range(i+1, len(corr_matrix.columns)):
-                    if corr_matrix.iloc[i, j] > 0.95:
-                        high_corr_pairs.append((corr_matrix.columns[i], corr_matrix.columns[j]))
-
-            if high_corr_pairs:
-                validation_results['warnings'].append(f"Найдены сильно коррелированные признаки: {len(high_corr_pairs)} пар")
-                validation_results['recommendations'].append("Рассмотрите удаление дублирующих признаков")
-
         # Проверка масштаба признаков
         feature_scales = features.std()
-        if feature_scales.max() / feature_scales.min() > 1000:
-            validation_results['warnings'].append("Большие различия в масштабах признаков")
-            validation_results['recommendations'].append("Убедитесь, что признаки нормализованы")
+        min_std = feature_scales.min()
+        if min_std > 1e-9:  # Проверяем, что минимальное ст. отклонение не равно нулю
+            if feature_scales.max() / min_std > 1000:
+                validation_results['warnings'].append("Большие различия в масштабах признаков")
+                validation_results['recommendations'].append("Убедитесь, что признаки нормализованы")
 
     except Exception as e:
         validation_results['errors'].append(f"Ошибка при валидации: {e}")
         validation_results['is_valid'] = False
 
     return validation_results
+
+def create_regression_target(self, data: pd.DataFrame, target_col: str = 'volatility_20') -> Optional[pd.Series]:
+        """
+        Создает целевую переменную для регрессионной модели (предсказание будущей волатильности).
+        """
+        if target_col not in data.columns:
+            logger.warning(f"Целевая колонка '{target_col}' не найдена в данных для создания регрессионной метки.")
+            return None
+
+        # Сдвигаем данные волатильности назад, чтобы на текущей свече предсказывать будущее значение
+        return data[target_col].shift(-self.prediction_horizon)
+
+

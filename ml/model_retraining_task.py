@@ -15,11 +15,16 @@ import threading
 import time
 from aiogram.dispatcher.middlewares import manager
 from logger_setup import setup_logging
-
+from core.enums import Timeframe
 from data.database_manager import AdvancedDatabaseManager
 from strategies.base_strategy import BaseStrategy
 from strategies.ensemble_ml_strategy import EnsembleMLStrategy
-
+from ml.feature_engineering import feature_engineer, validate_data_quality
+from ml.lorentzian_classifier import LorentzianClassifier
+import asyncio
+from concurrent.futures import ProcessPoolExecutor
+from sklearn.metrics import accuracy_score
+from .feature_engineering import analyze_feature_importance
 # from TG_bot import telegram_bot
 
 # Импорты для ML и статистики
@@ -37,6 +42,7 @@ except ImportError:
 # Импорты из нашей системы (предполагается структура проекта)
 from .feature_engineering import create_features_and_labels, analyze_feature_importance, get_feature_statistics, \
   validate_data_quality
+from config.config_manager import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -87,65 +93,288 @@ class RetrainingConfig:
   parallel_processing: bool = True
   max_workers: int = 4
 
+# -------------------------------------------------------------------------------------
+# ШАГ 1: ВОРКЕР-ФУНКЦИЯ ДЛЯ СОЗДАНИЯ ПРИЗНАКОВ (ВЫПОЛНЯЕТСЯ ПАРАЛЛЕЛЬНО)
+# -------------------------------------------------------------------------------------
+def feature_creation_worker(data: pd.DataFrame) -> Tuple[Optional[pd.DataFrame], Optional[pd.Series]]:
+    """
+    Синхронная функция-воркер, которая создает признаки и метки для ОДНОГО символа.
+    Именно эта функция будет распараллеливаться.
+    """
+    try:
+        # for_prediction=False, так как нам нужны метки для обучения
+        features, labels = feature_engineer.create_features_and_labels(data, for_prediction=False)
+        return features, labels
+    except Exception as e:
+        # Логирование из дочерних процессов может быть сложным, поэтому используем print
+        print(f"ОШИБКА ВОРКЕРА: Ошибка при создании признаков: {e}")
+        return None, None
+
+# -------------------------------------------------------------------------------------
+# ШАГ 1: СОЗДАЕМ НЕЗАВИСИМУЮ "РАБОЧУЮ" ФУНКЦИЮ ВНЕ КЛАССА
+# -------------------------------------------------------------------------------------
+def train_worker_function(features: pd.DataFrame, labels: pd.Series, model_save_path: Path, feature_weights: Dict[str, float]) -> Tuple[bool, str]:
+  """
+  СИНХРОННАЯ функция, выполняющая всю тяжелую работу в отдельном процессе.
+  Она не имеет доступа к 'self' и получает все через аргументы.
+  """
+  try:
+    # # Шаги 2-6 из вашей старой функции находятся здесь.
+    # logger.info("WORKER: Создание признаков и меток...")
+    # features, labels = feature_engineer.create_features_and_labels(raw_data)
+    # if features is None or labels is None:
+    #   return False, "WORKER: Ошибка при создании признаков и меток"
+    logger.info("WORKER: Начало обучения на готовых признаках...")
+    logger.info("WORKER: Валидация качества данных...")
+    validation = validate_data_quality(features, labels)
+    if not validation['is_valid']:
+      error_msg = f"WORKER: Данные не прошли валидацию: {validation['errors']}"
+      logger.error(error_msg)
+      return False, error_msg
+
+    logger.info("WORKER: Обучение новой модели LorentzianClassifier с весами...")
+
+    # --- ИЗМЕНЕНИЕ ЗДЕСЬ: ПЕРЕДАЕМ ВЕСА В МОДЕЛЬ ---
+    # Мы вернулись к LorentzianClassifier, как вы и просили
+    new_model = LorentzianClassifier(
+      k_neighbors=14,
+      feature_weights=feature_weights  # <--- ПЕРЕДАЕМ ВЕСА
+    )
+    new_model.fit(features, labels)
+
+    logger.info("WORKER: Расчет точности на выборке...")
+    # Используем iloc[:2000] для гарантированной выборки первых 2000 строк
+    sample_features = features.iloc[:2000]
+    sample_labels = labels.iloc[:2000]  # <--- ИСПРАВЛЕНО
+
+    predictions = new_model.predict(sample_features)
+
+    # Дополнительная защитная проверка перед расчетом точности
+    if predictions is None or len(sample_labels) != len(predictions):
+      logger.error("Размерности меток и предсказаний не совпадают после предсказания. Прерывание.")
+      return False, "Ошибка согласованности размеров при оценке"
+
+    accuracy = accuracy_score(sample_labels, predictions)
+
+    model_path_full = model_save_path / "live_model.pkl"
+    joblib.dump(new_model, model_path_full)
+    logger.info(f"WORKER: Новая модель сохранена в: {model_path_full}")
+
+    return True, f"Модель успешно переобучена с точностью {accuracy:.2f}"
+
+  except Exception as e:
+    # Логирование из дочернего процесса может быть проблематичным,
+    # поэтому мы возвращаем ошибку как строку.
+    error_message = f"Критическая ошибка в дочернем процессе обучения: {e}"
+    print(error_message)  # Прямой print для надежности
+    return False, error_message
 
 
+# -------------------------------------------------------------------------------------
+# ШАГ 2: КЛАСС ModelRetrainingManager ТЕПЕРЬ ТОЛЬКО УПРАВЛЯЕТ ЗАДАЧАМИ
+# -------------------------------------------------------------------------------------
 class ModelRetrainingManager:
-  """
-  Продвинутый менеджер для управления переобучением моделей машинного обучения
-  с поддержкой адаптивного обучения, мониторинга производительности и backup системы
-  """
-  def __init__(self,
-               model_save_path: str = "ml_models/",
-               config: Optional[RetrainingConfig] = None,
-               data_fetcher=None,
-               ml_model=None,
-               db_manager=None):
-    """
-    Инициализация менеджера переобучения
+  # def __init__(self, data_fetcher, model_save_path: str = "ml_models/"):
+  #   self.data_fetcher = data_fetcher
+  #   self.model_save_path = Path(model_save_path)
+  #   self.model_save_path.mkdir(exist_ok=True, parents=True)
+  #   self.process_pool = ProcessPoolExecutor()
+  #   self.last_retrain_time = None
+  #   self.is_running = False
+  #   logger.info("ModelRetrainingManager (для мультипроцессинга) инициализирован.")
 
-    Args:
-        model_save_path: Путь для сохранения моделей
-        config: Конфигурация переобучения
-        data_fetcher: Объект для получения данных
-        ml_model: ML модель для переобучения
-        db_manager: Менеджер базы данных
-    """
-    self.config = config or RetrainingConfig()
+  def __init__(self, data_fetcher, model_save_path: str = "ml_models/"):
+    self.data_fetcher = data_fetcher
     self.model_save_path = Path(model_save_path)
     self.model_save_path.mkdir(exist_ok=True, parents=True)
-
-    # Создаем подпапки
     (self.model_save_path / "backups").mkdir(exist_ok=True)
     (self.model_save_path / "performance_logs").mkdir(exist_ok=True)
     (self.model_save_path / "feature_importance").mkdir(exist_ok=True)
+    # Создаем пул процессов, который будет жить вместе с менеджером
+    self.process_pool = ProcessPoolExecutor()
 
-    self.data_fetcher = data_fetcher
-    self.ml_model = ml_model
-    self.db_manager = db_manager
+    # --- ДОБАВЛЯЕМ ЗАГРУЗКУ КОНФИГА ---
+    self.config_manager = ConfigManager()
+    self.config = self.config_manager.load_config()
+    # --- КОНЕЦ БЛОКА ---
 
-    # Состояние системы
-    self.is_running = False
     self.last_retrain_time = None
-    self.current_model_version = "v1.0.0"
+    self.is_running = False
+
+    self.model_lock = threading.Lock()
+    self.performance_lock = threading.Lock()
+    self.current_model_version = "v1.0.0"  # Установим начальную версию
     self.performance_history: List[ModelPerformanceMetrics] = []
     self.feature_importance_history: List[Dict] = []
 
-    # Очередь задач и пул потоков
-    self.task_queue = asyncio.Queue()
-    self.thread_pool = ThreadPoolExecutor(max_workers=self.config.max_workers)
+    logger.info("ModelRetrainingManager (для мультипроцессинга) инициализирован.")
 
-    # Блокировки для потокобезопасности
-    self.model_lock = threading.Lock()
-    self.performance_lock = threading.Lock()
+  async def _get_training_data(self, symbols: List[str], timeframe: Timeframe, limit: int) -> Optional[pd.DataFrame]:
+    # Этот метод остается без изменений, т.к. он асинхронный
+    all_data_frames = []
+    for symbol in symbols:
+      data = await self.data_fetcher.get_historical_candles(symbol, timeframe, limit=limit)
+      if not data.empty:
+        all_data_frames.append(data)
 
-    # Callbacks
-    self.on_retrain_complete: Optional[Callable] = None
-    self.on_performance_decline: Optional[Callable] = None
+    if not all_data_frames:
+      return None
 
-    # Загружаем историю производительности
-    self._load_performance_history()
+    return pd.concat(all_data_frames, ignore_index=True)
 
-    logger.info(f"ModelRetrainingManager инициализирован с конфигурацией: {self.config}")
+  # async def retrain_model(self, symbols: List[str],
+  #                         timeframe: Timeframe = Timeframe.ONE_HOUR,
+  #                         limit: int = 1000,
+  #                         force_retrain: bool = False) -> Tuple[bool, str]:
+  #   """
+  #   Основная АСИНХРОННАЯ функция, которая передает тяжелую работу в пул процессов.
+  #   """
+  #   try:
+  #     loop = asyncio.get_running_loop()
+  #     logger.info(f"Начинаем переобучение модели для символов: {symbols}")
+  #     logger.info("Создание мультитаймфрейм-признаков для обучения...")
+  #     all_features = []
+  #     all_labels = []
+  #     for symbol in symbols:
+  #       features, labels = await feature_engineer.create_multi_timeframe_features(symbol, self.data_fetcher)
+  #       if features is not None and labels is not None:
+  #         all_features.append(features)
+  #         all_labels.append(labels)
+  #
+  #     if not all_features:
+  #       return False, "Не удалось создать признаки ни для одного символа"
+  #
+  #     combined_features = pd.concat(all_features)
+  #     combined_labels = pd.concat(all_labels)
+  #
+  #     # Передаем уже готовые признаки в воркер
+  #     success, message = await loop.run_in_executor(
+  #       self.process_pool,
+  #       train_worker_function,
+  #       combined_features,
+  #       combined_labels,
+  #       self.model_save_path
+  #     )
+  #     logger.info("Получение обучающих данных...")
+  #     raw_data = await self._get_training_data(symbols, timeframe, limit)
+  #     if raw_data is None or raw_data.empty:
+  #       return False, "Не удалось получить данные для обучения"
+  #
+  #     loop = asyncio.get_running_loop()
+  #     logger.info("Передача задачи на обучение в пул процессов...")
+  #
+  #     # Вызываем нашу новую НЕЗАВИСИМУЮ функцию
+  #     success, message = await loop.run_in_executor(
+  #       self.process_pool,
+  #       train_worker_function,  # <-- какую функцию запустить
+  #       raw_data,  # <-- 1-й аргумент для нее
+  #       self.model_save_path  # <-- 2-й аргумент для нее
+  #     )
+  #
+  #     if success:
+  #       logger.info(f"Переобучение успешно: {message}")
+  #       self.last_retrain_time = datetime.now()
+  #     else:
+  #       logger.error(f"Ошибка переобучения: {message}")
+  #
+  #     logger.info(f"Результат из дочернего процесса: {message}")
+  #     return success, message
+  #
+  #   except Exception as e:
+  #     logger.error(f"Критическая ошибка в `retrain_model`: {e}", exc_info=True)
+  #     return False, f"Критическая ошибка: {e}"
+
+  async def retrain_model(self, symbols: List[str],
+                          timeframe: Timeframe = Timeframe.ONE_HOUR,
+                          limit: int = 1000) -> Tuple[bool, str]:
+    """
+    Основная АСИНХРОННАЯ функция, которая управляет всем процессом переобучения.
+    """
+    try:
+      logger.info(f"Начинаем переобучение модели для {len(symbols)} символов...")
+
+      # --- ЭТАП 1: Параллельная загрузка данных ---
+      logger.info("Асинхронная загрузка исторических данных...")
+      tasks = [self.data_fetcher.get_historical_candles(s, timeframe, limit) for s in symbols]
+      list_of_dataframes = await asyncio.gather(*tasks)
+
+      # --- ЭТАП 2: Параллельное создание признаков ---
+      loop = asyncio.get_running_loop()
+      feature_tasks = []
+      valid_dataframes = [df for df in list_of_dataframes if df is not None and not df.empty]
+      logger.info(f"Отправка {len(valid_dataframes)} задач на создание признаков в пул процессов...")
+      for df in valid_dataframes:
+        task = loop.run_in_executor(self.process_pool, feature_creation_worker, df)
+        feature_tasks.append(task)
+
+      # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ: БЛОК СБОРА РЕЗУЛЬТАТОВ ---
+      # Ожидаем завершения всех задач по созданию признаков
+      results = await asyncio.gather(*feature_tasks)
+
+      # Собираем успешные результаты
+      all_features = [res[0] for res in results if res and res[0] is not None]
+      all_labels = [res[1] for res in results if res and res[1] is not None]
+
+      if not all_features:
+        return False, "Не удалось создать признаки ни для одного символа."
+
+      # Объединяем результаты от всех воркеров в единые датафреймы
+      combined_features = pd.concat(all_features)
+      combined_labels = pd.concat(all_labels)
+      logger.info(f"Все признаки успешно созданы. Итоговый размер данных: {combined_features.shape}")
+      # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+      # Читаем веса из конфига для передачи в воркер
+      feature_weights = self.config.get("feature_weights", {})
+      logger.info(f"Используются веса признаков: {feature_weights}")
+
+      # Передаем уже готовые данные в воркер для обучения
+      success, message = await loop.run_in_executor(
+        self.process_pool,
+        train_worker_function,
+        combined_features,  # Теперь эта переменная существует
+        combined_labels,  # И эта тоже
+        self.model_save_path,
+        feature_weights
+      )
+
+      if success:
+        self.last_retrain_time = datetime.now()
+
+      logger.info(f"Результат из дочернего процесса: {message}")
+      return success, message
+
+      # --- ЭТАП 3: Обучение и оценка (выполняется в основном процессе) ---
+      logger.info("Обучение основной модели...")
+      model = LorentzianClassifier(k_neighbors=16)
+      # fit() для k-NN - это быстрая операция, ее можно оставить в основном потоке
+      model.fit(combined_features, combined_labels)
+
+      logger.info("Расчет точности на выборке...")
+      # predict() - медленная операция, но для небольшой выборки это приемлемо
+      sample_features = combined_features.head(20000)
+      sample_labels = combined_labels.iloc[:20000]
+      predictions = model.predict(sample_features)
+
+      if predictions is None or len(sample_labels) != len(predictions):
+        logger.error("Размерности меток и предсказаний не совпадают после предсказания. Прерывание.")
+        return False, "Ошибка согласованности размеров при оценке"
+
+      accuracy = accuracy_score(sample_labels, predictions)
+      message = f"Модель успешно переобучена с точностью {accuracy:.2f}"
+      logger.info(message)
+
+      # Сохранение модели
+      model_path = self.model_save_path / "live_model.pkl"
+      joblib.dump(model, model_path)
+      logger.info(f"Новая модель сохранена в: {model_path}")
+
+      self.last_retrain_time = datetime.now()
+      return True, message
+
+    except Exception as e:
+      logger.error(f"Критическая ошибка в процессе переобучения: {e}", exc_info=True)
+      return False, f"Критическая ошибка: {e}"
 
   def calculate_vpt_manual(close: pd.Series, volume: pd.Series) -> pd.Series:
     """
@@ -268,59 +497,59 @@ class ModelRetrainingManager:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return f"v{timestamp}"
 
-  async def _get_training_data(self, symbols: List[str],
-                               timeframe: str = '1h',
-                               limit: int = 1000) -> Optional[pd.DataFrame]:
-    """
-    Получает данные для обучения модели
-
-    Args:
-        symbols: Список символов для получения данных
-        timeframe: Таймфрейм данных
-        limit: Количество свечей
-
-    Returns:
-        DataFrame с данными или None в случае ошибки
-    """
-    try:
-      if not self.data_fetcher:
-        logger.error("DataFetcher не предоставлен")
-        return None
-
-      all_data = {}
-
-      for symbol in symbols:
-        try:
-          data = await self.data_fetcher.get_historical_data(
-            symbol=symbol,
-            timeframe=timeframe,
-            limit=min(limit, self.config.max_data_points)
-          )
-
-          if not data.empty:
-            all_data[symbol] = data
-            logger.info(f"Получены данные для {symbol}: {len(data)} записей")
-          else:
-            logger.warning(f"Пустые данные для символа {symbol}")
-
-        except Exception as e:
-          logger.error(f"Ошибка получения данных для {symbol}: {e}")
-          continue
-
-      if not all_data:
-        logger.error("Не удалось получить данные ни для одного символа")
-        return None
-
-      # Объединяем данные всех символов
-      combined_data = pd.concat(all_data.values(), keys=all_data.keys(), names=['symbol', 'index'])
-      combined_data = combined_data.reset_index(level=0)  # symbol становится колонкой
-
-      logger.info(f"Общий размер обучающих данных: {len(combined_data)} записей")
-      return combined_data
-
-    except Exception as e:
-      logger.error(f"Ошибка при получении обучающих данных: {e}", exc_info=True)
-      return None
+  # async def _get_training_data(self, symbols: List[str],
+  #                              timeframe: Timeframe = Timeframe.ONE_HOUR,
+  #                              limit: int = 1000) -> Optional[pd.DataFrame]:
+  #   """
+  #   Получает данные для обучения модели
+  #
+  #   Args:
+  #       symbols: Список символов для получения данных
+  #       timeframe: Таймфрейм данных
+  #       limit: Количество свечей
+  #
+  #   Returns:
+  #       DataFrame с данными или None в случае ошибки
+  #   """
+  #   try:
+  #     if not self.data_fetcher:
+  #       logger.error("DataFetcher не предоставлен")
+  #       return None
+  #
+  #     all_data = {}
+  #
+  #     for symbol in symbols:
+  #       try:
+  #         data = await self.data_fetcher.get_historical_candles(
+  #           symbol=symbol,
+  #           timeframe=timeframe,
+  #           limit=min(limit, self.config.max_data_points)
+  #         )
+  #
+  #         if not data.empty:
+  #           all_data[symbol] = data
+  #           logger.info(f"Получены данные для {symbol}: {len(data)} записей")
+  #         else:
+  #           logger.warning(f"Пустые данные для символа {symbol}")
+  #
+  #       except Exception as e:
+  #         logger.error(f"Ошибка получения данных для {symbol}: {e}")
+  #         continue
+  #
+  #     if not all_data:
+  #       logger.error("Не удалось получить данные ни для одного символа")
+  #       return None
+  #
+  #     # Объединяем данные всех символов
+  #     combined_data = pd.concat(all_data.values(), keys=all_data.keys(), names=['symbol', 'index'])
+  #     combined_data = combined_data.reset_index(level=0)  # symbol становится колонкой
+  #
+  #     logger.info(f"Общий размер обучающих данных: {len(combined_data)} записей")
+  #     return combined_data
+  #
+  #   except Exception as e:
+  #     logger.error(f"Ошибка при получении обучающих данных: {e}", exc_info=True)
+  #     return None
 
   def _validate_data_quality(self, features: pd.DataFrame, labels: pd.Series) -> Tuple[bool, str]:
     """
@@ -671,117 +900,46 @@ class ModelRetrainingManager:
     except Exception as e:
       logger.error(f"Ошибка анализа важности признаков: {e}")
 
-  async def retrain_model(self, symbols: List[str],
-                          timeframe: str = '1h',
-                          limit: int = 1000,
-                          force_retrain: bool = False) -> Tuple[bool, str]:
-    """
-    Основная функция переобучения модели
-
-    Args:
-        symbols: Список символов для получения данных
-        timeframe: Таймфрейм данных
-        limit: Количество свечей для получения
-        force_retrain: Принудительное переобучение, игнорируя интервалы
-
-    Returns:
-        Tuple[success, message]
-    """
-    try:
-      logger.info(f"Начинаем переобучение модели для символов: {symbols}")
-
-      # Проверяем, нужно ли переобучение (если не принудительное)
-      if not force_retrain and self.last_retrain_time:
-        time_since_last = datetime.now() - self.last_retrain_time
-        if time_since_last.total_seconds() < self.config.retraining_interval_hours * 3600:
-          remaining_time = self.config.retraining_interval_hours * 3600 - time_since_last.total_seconds()
-          return False, f"Переобучение еще не требуется. Осталось {remaining_time / 3600:.1f} часов"
-
-      # 1. Получаем данные
-      logger.info("Получение обучающих данных...")
-      raw_data = await self._get_training_data(symbols, timeframe, limit)
-
-      if raw_data is None or raw_data.empty:
-        return False, "Не удалось получить данные для обучения"
-
-      # 2. Создаем признаки и метки
-      logger.info("Создание признаков и меток...")
-      features, labels = create_features_and_labels(raw_data)
-
-      if features is None or labels is None:
-        return False, "Не удалось создать признаки и метки"
-
-      validation_results = validate_data_quality(features, labels)
-      if not validation_results['is_valid']:
-        logger.error(f"Data validation failed: {validation_results['errors']}")
-        return False, f"Валидация данных не пройдена: {validation_results['errors']}"
-
-      # 3. Валидируем качество данных
-      logger.info("Валидация качества данных...")
-      is_valid, validation_message = self._validate_data_quality(features, labels)
-
-      if not is_valid:
-        return False, f"Данные не прошли валидацию: {validation_message}"
-
-      logger.info(f"Данные валидированы: {validation_message}")
-
-      # 4. Предобрабатываем данные
-      logger.info("Предобработка признаков...")
-      processed_features, processed_labels = self._preprocess_features(features, labels)
-
-      # 5. Обучаем модель
-      logger.info("Обучение модели...")
-      self.current_model_version = self._generate_model_version()
-
-      training_success, metrics = self._train_model(processed_features, processed_labels)
-
-      if not training_success or metrics is None:
-        return False, "Не удалось обучить модель"
-
-      # 6. Проверяем, стоит ли принимать новую модель
-      should_accept, accept_reason = self._should_accept_new_model(metrics)
-
-      if not should_accept:
-        logger.info(f"Новая модель отклонена: {accept_reason}")
-        return False, f"Модель отклонена: {accept_reason}"
-
-      # 7. Сохраняем модель и метрики
-      logger.info(f"Принимаем новую модель: {accept_reason}")
-      self._save_model(metrics)
-
-      # 8. Анализируем важность признаков
-      self._analyze_and_save_feature_importance(processed_features, processed_labels)
-
-      # 9. Обновляем время последнего переобучения
-      self.last_retrain_time = datetime.now()
-
-      # 10. Вызываем callback, если установлен
-      if self.on_retrain_complete:
-        try:
-          if asyncio.iscoroutinefunction(self.on_retrain_complete):
-            await self.on_retrain_complete(metrics)
-          else:
-            self.on_retrain_complete(metrics)
-        except Exception as callback_error:
-          logger.error(f"Ошибка callback on_retrain_complete: {callback_error}")
-
-        success_message = (
-          f"Модель успешно переобучена! "
-          f"Версия: {self.current_model_version}, "
-          f"Точность: {metrics.accuracy:.3f}, "
-          f"F1: {metrics.f1_score:.3f}, "
-          f"Время обучения: {metrics.training_time_seconds:.1f}с"
-        )
-
-        logger.info(success_message)
-        return True, success_message
-
-    except Exception as e:
-        logger.error(f"Критическая ошибка переобучения модели: {e}", exc_info=True)
-        return False, f"Критическая ошибка: {e}"
+  # async def retrain_model(self, symbols: List[str],
+  #                         timeframe: Timeframe = Timeframe.ONE_HOUR,
+  #                         limit: int = 1000,
+  #                         force_retrain: bool = False) -> Tuple[bool, str]:
+  #   """
+  #   Основная АСИНХРОННАЯ функция, которая передает тяжелую работу в пул процессов.
+  #   """
+  #   try:
+  #     logger.info(f"Начинаем переобучение модели для символов: {symbols}")
+  #
+  #     # 1. Получаем данные (эта операция остается в основном потоке, т.к. она асинхронная)
+  #     logger.info("Получение обучающих данных...")
+  #     raw_data = await self._get_training_data(symbols, timeframe, limit)
+  #     if raw_data is None or raw_data.empty:
+  #       return False, "Не удалось получить данные для обучения"
+  #
+  #     # --- ЗАПУСК ТЯЖЕЛОЙ ЗАДАЧИ В ОТДЕЛЬНОМ ПРОЦЕССЕ ---
+  #     loop = asyncio.get_running_loop()
+  #     logger.info("Передача задачи на обучение и оценку в пул процессов...")
+  #
+  #     # Запускаем нашу синхронную "рабочую" функцию в другом процессе
+  #     # и ждем результата, не блокируя основной поток.
+  #     success, message = await loop.run_in_executor(
+  #       self.process_pool,  # <-- в каком пуле выполнять
+  #       self._train_and_evaluate_model_sync,  # <-- какую функцию запустить
+  #       raw_data  # <-- аргументы для этой функции
+  #     )
+  #
+  #     if success:
+  #       self.last_retrain_time = datetime.now()
+  #
+  #     logger.info(f"Результат из дочернего процесса: {message}")
+  #     return success, message
+  #
+  #   except Exception as e:
+  #     logger.error(f"Критическая ошибка в `retrain_model`: {e}", exc_info=True)
+  #     return False, f"Критическая ошибка: {e}"
 
   async def schedule_retraining(self, symbols: List[str],
-                                  timeframe: str = '1h',
+                                  timeframe: Timeframe = Timeframe.ONE_HOUR,
                                   limit: int = 1000):
     """
     Планирует периодическое переобучение модели
@@ -792,10 +950,18 @@ class ModelRetrainingManager:
           limit: Количество свечей
     """
     try:
-        logger.info(f"Запуск планировщика переобучения с интервалом {self.config.retraining_interval_hours} часов")
+        logger.info(f"Запуск планировщика переобучения с интервалом 24 часа")
 
         while self.is_running:
           try:
+            # Ожидаем следующий интервал
+            await asyncio.sleep(24 * 3600)
+
+            # --- ПОТОМ ДЕЙСТВУЕМ ---
+            # Проверяем, что мы все еще должны работать, после долгого сна
+            if not self.is_running:
+              break
+
             # Переобучаем модель
             success, message = await self.retrain_model(symbols, timeframe, limit)
 
@@ -804,8 +970,6 @@ class ModelRetrainingManager:
             else:
               logger.warning(f"Плановое переобучение неудачно: {message}")
 
-            # Ожидаем следующий интервал
-            await asyncio.sleep(self.config.retraining_interval_hours * 3600)
 
           except asyncio.CancelledError:
             logger.info("Планировщик переобучения отменен")
@@ -819,7 +983,7 @@ class ModelRetrainingManager:
         logger.error(f"Критическая ошибка планировщика переобучения: {e}", exc_info=True)
 
   def start_scheduled_retraining(self, symbols: List[str],
-                                   timeframe: str = '1h',
+                                   timeframe: Timeframe = Timeframe.ONE_HOUR,
                                    limit: int = 1000) -> asyncio.Task:
       """
       Запускает планировщик переобучения в фоне
@@ -836,10 +1000,11 @@ class ModelRetrainingManager:
       logger.info("Планировщик переобучения запущен в фоне")
       return task
 
-  async def stop_scheduled_retraining(self):
-      """Останавливает планировщик переобучения"""
+  def stop_scheduled_retraining(self):
+    """Останавливает цикл планировщика переобучения."""
+    if self.is_running:
+      logger.info("Остановка планировщика переобучения...")
       self.is_running = False
-      logger.info("Планировщик переобучения остановлен")
 
   def get_performance_history(self, last_n: Optional[int] = None) -> List[ModelPerformanceMetrics]:
       """
@@ -946,7 +1111,7 @@ class ModelRetrainingManager:
         return False, f"Ошибка проверки: {e}"
 
   async def check_and_trigger_emergency_retraining(self, symbols: List[str],
-                                                     timeframe: str = '1h',
+                                                     timeframe:Timeframe = Timeframe.ONE_HOUR,
                                                      limit: int = 1000) -> Tuple[bool, str]:
       """
       Проверяет и при необходимости запускает экстренное переобучение
@@ -990,12 +1155,16 @@ class ModelRetrainingManager:
         if filepath is None:
           timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
           filepath = self.model_save_path / "performance_logs" / f"performance_report_{timestamp}.json"
+          current_metrics = self.get_current_performance()
+
 
         report = {
           'generation_time': datetime.now().isoformat(),
           'total_models_trained': len(self.performance_history),
           'current_model_version': self.current_model_version,
-          'config': asdict(self.config),
+          'current_model_accuracy': current_metrics.accuracy if current_metrics else "N/A",
+
+          'config': self.config,
           'performance_history': [m.to_dict() for m in self.performance_history],
           'feature_importance_history': self.feature_importance_history,
           'trends': {
@@ -1104,6 +1273,38 @@ class ModelRetrainingManager:
       await self.stop_scheduled_retraining()
       if hasattr(self, 'thread_pool'):
         self.thread_pool.shutdown(wait=True)
+
+  def _train_and_evaluate_model_sync(self, features: pd.DataFrame, labels: pd.Series) -> float:
+    """
+    СИНХРОННАЯ функция, выполняющая CPU-затратные операции.
+    Запускается в отдельном процессе.
+    """
+    try:
+      logger.info("Worker Process: Начало обучения новой модели LorentzianClassifier...")
+      new_model = LorentzianClassifier(k_neighbors=8)
+      new_model.fit(features, labels)
+
+      logger.info("Worker Process: Расчет точности на выборке...")
+      sample_features = features.head(2000)  # Используем небольшую выборку для быстрой оценки
+      sample_labels = labels.loc[sample_features.index]
+      predictions = new_model.predict(sample_features)
+
+      if predictions is None:
+        logger.error("Worker Process: Предсказание модели вернуло None.")
+        return 0.0
+
+      accuracy = accuracy_score(sample_labels, predictions)
+      logger.info(f"Worker Process: Модель обучена. Точность: {accuracy:.2f}")
+
+      # Сохраняем модель из этого же процесса
+      model_path = self.model_save_path / "live_model.pkl"
+      joblib.dump(new_model, model_path)
+      logger.info(f"Worker Process: Новая модель сохранена в: {model_path}")
+
+      return accuracy
+    except Exception as e:
+      logger.error(f"Ошибка в дочернем процессе обучения: {e}", exc_info=True)
+      return 0.0
 
     # Вспомогательные функции для интеграции
 
@@ -1312,71 +1513,71 @@ class MLFeedbackLoop:
       print(f"❌ Ошибка получения данных для обратной связи: {e}")
 
 
-
-if __name__ == "__main__":
-      # Пример использования для тестирования
-      async def test_retraining_manager():
-        import sys
-        sys.path.append('.')
-
-
-        setup_logging("INFO")
-
-        # Создаем тестовые данные
-        test_data = pd.DataFrame({
-          'close': np.random.randn(1000).cumsum() + 100,
-          'volume': np.random.randn(1000) * 1000 + 10000,
-          'high': np.random.randn(1000) + 101,
-          'low': np.random.randn(1000) + 99,
-          'open': np.random.randn(1000) + 100
-        })
-
-        # Мок объекты
-        class MockDataFetcher:
-          async def get_historical_data(self, symbol, timeframe, limit):
-            return test_data.head(limit)
-
-        class MockMLModel:
-          def __init__(self):
-            self.is_fitted = False
-
-          def fit(self, X, y):
-            self.is_fitted = True
-
-          def predict(self, X):
-            return np.random.choice([0, 1], size=len(X))
-
-        # Создаем менеджер
-        config = RetrainingConfig(
-          min_data_points=100,
-          retraining_interval_hours=0.01,  # 36 секунд для теста
-          performance_threshold=0.4
-        )
-
-        data_fetcher = MockDataFetcher()
-        ml_model = MockMLModel()
-
-        manager = ModelRetrainingManager(
-          model_save_path="test_models/",
-          config=config,
-          data_fetcher=data_fetcher,
-          ml_model=ml_model
-        )
-
-        # Тестируем переобучение
-        success, message = await manager.retrain_model(['BTCUSDT'], '1h', 500, force_retrain=True)
-        print(f"Результат переобучения: {success}, {message}")
-
-        # Проверяем информацию о модели
-        info = manager.get_model_info()
-        print(f"Информация о модели: {json.dumps(info, indent=2, default=str)}")
-
-        # Экспортируем отчет
-        report_path = manager.export_performance_report()
-        print(f"Отчет сохранен: {report_path}")
-
-        # Очищаем тестовые файлы
-        manager.cleanup_old_files(0)
-
-# Запускаем тест
-asyncio.run(test_retraining_manager())
+#
+# if __name__ == "__main__":
+#       # Пример использования для тестирования
+#       async def test_retraining_manager():
+#         import sys
+#         sys.path.append('.')
+#
+#
+#         setup_logging("INFO")
+#
+#         # Создаем тестовые данные
+#         test_data = pd.DataFrame({
+#           'close': np.random.randn(1000).cumsum() + 100,
+#           'volume': np.random.randn(1000) * 1000 + 10000,
+#           'high': np.random.randn(1000) + 101,
+#           'low': np.random.randn(1000) + 99,
+#           'open': np.random.randn(1000) + 100
+#         })
+#
+#         # Мок объекты
+#         class MockDataFetcher:
+#           async def get_historical_data(self, symbol, timeframe, limit):
+#             return test_data.head(limit)
+#
+#         class MockMLModel:
+#           def __init__(self):
+#             self.is_fitted = False
+#
+#           def fit(self, X, y):
+#             self.is_fitted = True
+#
+#           def predict(self, X):
+#             return np.random.choice([0, 1], size=len(X))
+#
+#         # Создаем менеджер
+#         config = RetrainingConfig(
+#           min_data_points=100,
+#           retraining_interval_hours=0.01,  # 36 секунд для теста
+#           performance_threshold=0.4
+#         )
+#
+#         data_fetcher = MockDataFetcher()
+#         ml_model = MockMLModel()
+#
+#         manager = ModelRetrainingManager(
+#           model_save_path="test_models/",
+#           config=config,
+#           data_fetcher=data_fetcher,
+#           ml_model=ml_model
+#         )
+#
+#         # Тестируем переобучение
+#         success, message = await manager.retrain_model(['BTCUSDT'], '1h', 500, force_retrain=True)
+#         print(f"Результат переобучения: {success}, {message}")
+#
+#         # Проверяем информацию о модели
+#         info = manager.get_model_info()
+#         print(f"Информация о модели: {json.dumps(info, indent=2, default=str)}")
+#
+#         # Экспортируем отчет
+#         report_path = manager.export_performance_report()
+#         print(f"Отчет сохранен: {report_path}")
+#
+#         # Очищаем тестовые файлы
+#         manager.cleanup_old_files(0)
+#
+# # Запускаем тест
+# asyncio.run(test_retraining_manager())

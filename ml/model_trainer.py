@@ -14,6 +14,7 @@ import warnings
 
 from .lorentzian_classifier import LorentzianClassifier, create_training_labels
 from utils.logging_config import get_logger
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 
 logger = get_logger(__name__)
 warnings.filterwarnings('ignore')
@@ -603,6 +604,7 @@ class ModelTrainer:
         logger.info(f"Удален старый файл модели: {model_file}")
       except Exception as e:
         logger.error(f"Ошибка при удалении файла {model_file}: {e}")
+
 
 
 # Пример использования

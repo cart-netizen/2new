@@ -1,329 +1,321 @@
 from datetime import datetime, timezone
+from typing import Dict, Any, Tuple, Optional
 
 import ccxt
 
 import config
 from core.bybit_connector import BybitConnector
-from core.integrated_system import IntegratedTradingSystem
+from core.enums import Timeframe, SignalType
+# from core.integrated_system import IntegratedTradingSystem
 from core.schemas import TradingSignal
 from data.database_manager import AdvancedDatabaseManager
 
 from utils.logging_config import setup_logging, get_logger
-from config import LEVERAGE  # Глобальное плечо по умолчанию
-
-
+# from config.trading_params import DEFAULT_LEVERAGE  # Глобальное плечо по умолчанию
+from core.data_fetcher import DataFetcher
+import logging
+signal_logger = logging.getLogger('SignalTrace')
 logger = get_logger(__name__)
 
 
 class TradeExecutor:
-  def __init__(self, connector: BybitConnector, db_manager: AdvancedDatabaseManager, telegram_bot=None):
+  def __init__(self, connector: BybitConnector, db_manager: AdvancedDatabaseManager,data_fetcher: DataFetcher,settings: Dict[str, Any] ):
+    """
+
+    """
     self.connector = connector
     self.db_manager = db_manager
-    self.telegram_bot = telegram_bot
-    self.trading_system = IntegratedTradingSystem(db_manager=db_manager)
+    # self.telegram_bot = telegram_bot
+    self.data_fetcher = data_fetcher
+    self.config = settings
+    # self.trading_system = IntegratedTradingSystem(db_manager=db_manager)
 
+  async def execute_trade(self, signal: TradingSignal, symbol: str, quantity: float) -> Tuple[bool, Optional[Dict]]:
+    """
+    РЕАЛЬНАЯ ВЕРСИЯ: Исполняет торговый сигнал, отправляя ордер на биржу.
+    """
+    logger.info(
+      f"ИСПОЛНИТЕЛЬ для {symbol}: Получена команда на реальное исполнение. Сигнал: {signal.signal_type.value}, Кол-во: {quantity:.5f}")
 
-  async def execute_trade(self, signal: TradingSignal, symbol: str, quantity: float):
-    """Исполняет торговый сигнал через интегрированную систему"""
     try:
-      # Создаем order_id
-      order_id = f"{symbol}_{int(datetime.now().timestamp())}"
+      # 1. Получаем настройки торговли из сохраненного конфига
+      trade_settings = self.config.get('trade_settings', {})
+      leverage = trade_settings.get('leverage', 10)
 
-      # Добавляем сделку через AdvancedDatabaseManager
-      trade_id = self.db_manager.add_trade_with_signal(
-        signal=signal,
-        order_id=order_id,
-        quantity=quantity,
-        leverage=config.LEVERAGE
-      )
 
-      if trade_id:
-        # Логируем исполненный сигнал
-        self.db_manager.log_signal(signal, symbol, executed=True)
-        return True
-      return False
+      # 1. Формируем параметры для ордера
+      params = {
+        'symbol': symbol,
+        'side': 'Buy' if signal.signal_type == SignalType.BUY else 'Sell',
+        'orderType': 'Market',
+        'qty': str(quantity)
+      }
+
+      # Bybit API требует, чтобы SL/TP были строками
+      if signal.stop_loss and signal.stop_loss != 0:
+        params['stopLoss'] = str(abs(signal.stop_loss))
+      if signal.take_profit and signal.take_profit != 0:
+        params['takeProfit'] = str(abs(signal.take_profit))
+
+      # leverage = self.config.get('trade_settings', {}).get('leverage', 10)
+
+      # 2. Отправляем ордер на биржу
+      logger.info(f"Отправка ордера на открытие: {params}")
+      order_response = await self.connector.place_order(**params)
+
+      # 3. Обрабатываем ответ
+      if order_response and order_response.get('orderId'):
+        order_id = order_response.get('orderId')
+        logger.info(f"✅ Ордер на открытие {symbol} успешно принят биржей. OrderID: {order_id}")
+
+        # Теперь этот метод будет возвращать созданную запись из БД
+        trade_details = await self.db_manager.add_trade_with_signal(
+          signal=signal,
+          order_id=order_id,
+          quantity=quantity,
+          leverage=leverage
+        )
+        # Возвращаем успех и детали сделки
+        return True, trade_details
+      else:
+        ret_msg = order_response.get('retMsg', 'Нет сообщения') if order_response else 'Нет ответа'
+        logger.error(
+          f"❌ Не удалось разместить ордер на открытие для {symbol}. Причина: {ret_msg}. Ответ биржи: {order_response}")
+        signal_logger.error(f"ИСПОЛНИТЕЛЬ: ОШИБКА. Ордер не принят. Ответ: {order_response}")
+        signal_logger.info(f"====== ЦИКЛ СИГНАЛА ДЛЯ {symbol} ЗАВЕРШЕН ======\n")
+        return False, None
+
     except Exception as e:
-      logger.error(f"Ошибка исполнения сделки: {e}")
-      return False
+      logger.error(f"Критическая ошибка при исполнении сделки {symbol}: {e}", exc_info=True)
+      return False, None
 
-#--------прошлая реализация async def execute_trade---------
-  # async def execute_trade(self, symbol: str, side: str, quantity: float, strategy_name: str,
-  #                         order_type: str = "Market", price: [float] = None, leverage: int = LEVERAGE,
-  #                         stop_loss: [float] = None, take_profit: [float] = None) -> [str]:
+
+  # async def execute_trade(self, signal: TradingSignal, symbol: str, quantity: float):
+  #   """Исполняет торговый сигнал через интегрированную систему"""
+  #   logger.info(f"ИСПОЛНИТЕЛЬ для {symbol}: Получена команда на исполнение сделки. Сигнал: {signal.signal_type.value}, Кол-во: {quantity:.4f}")
+  #
+  #   try:
+  #     # Создаем order_id
+  #     order_id = f"{symbol}_{int(datetime.now().timestamp())}"
+  #
+  #     # Добавляем сделку через AdvancedDatabaseManager
+  #     trade_id = await self.db_manager.add_trade_with_signal(
+  #       signal=signal,
+  #       order_id=order_id,
+  #       quantity=quantity,
+  #       leverage=DEFAULT_LEVERAGE
+  #     )
+  #
+  #     if trade_id:
+  #       # Логируем исполненный сигнал
+  #       await self.db_manager.log_signal(signal, symbol, executed=True)
+  #       return True
+  #     return False
+  #   except Exception as e:
+  #     logger.error(f"Ошибка исполнения сделки: {e}")
+  #     return False
+
+  async def close_position(self, symbol: str) -> bool:
+    """
+    Реализует полный алгоритм закрытия позиции по рынку.
+    """
+    logger.info(f"Попытка закрытия позиции по символу {symbol}...")
+
+    try:
+      # 1. Получаем реальную информацию о позициях с биржи
+      positions = await self.connector.fetch_positions(symbol)
+      active_position = next((pos for pos in positions if float(pos.get('size', 0)) > 0), None)
+
+      # 2. Проверяем, есть ли что закрывать на бирже
+      if not active_position:
+        logger.warning(f"На бирже не найдено активной открытой позиции для {symbol}.")
+
+        # --- ЛОГИКА ОБРАБОТКИ ЗОМБИ-ПОЗИЦИИ ---
+        local_trade = await self.db_manager.get_open_trade_by_symbol(symbol)
+        if local_trade:
+          logger.warning(
+            f"Найдена 'зомби-позиция' в локальной БД (ID: {local_trade['id']}). Принудительное закрытие...")
+          # Получаем последнюю цену для записи в БД
+          last_kline = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_MINUTE, limit=1)
+          close_price = last_kline['close'].iloc[-1] if not last_kline.empty else 0
+
+          await self.db_manager.force_close_trade(
+            trade_id=local_trade['id'],
+            close_price=close_price,
+            reason=f"Forced closure due to no position on exchange"
+          )
+          logger.info(f"Зомби-позиция (ID: {local_trade['id']}) успешно закрыта в БД.")
+        # --- КОНЕЦ ЛОГИКИ ---
+        return True  # Считаем задачу выполненной в любом случае
+
+      # Если позиция на бирже есть, продолжаем стандартное закрытие
+      pos_size_str = active_position.get('size', '0')
+      pos_side = active_position.get('side')
+      logger.info(f"Найдена позиция на бирже: {pos_side} {pos_size_str} {symbol}")
+
+      # 3. Формируем ордер на закрытие
+      close_side = "Sell" if pos_side == "Buy" else "Buy"
+      params = {
+        'symbol': symbol,
+        'side': close_side,
+        'orderType': 'Market',
+        'qty': str(float(pos_size_str)),
+        'reduceOnly': True
+      }
+      # 4. Отправляем ордер
+      order_response = await self.connector.place_order(**params)
+
+      # 5. Проверяем результат
+      if order_response and order_response.get('orderId'):
+        logger.info(f"✅ Ордер на закрытие {symbol} успешно принят биржей. OrderID: {order_response.get('orderId')}")
+
+        # ВАЖНО: На этом этапе мы только отправили ордер.
+        # Расчет PnL и обновление статуса в БД на 'CLOSED' должно происходить
+        # в отдельном процессе, который отслеживает исполнение ордеров.
+
+        return True
+      else:
+        logger.error(f"❌ Не удалось разместить ордер на закрытие для {symbol}. Ответ биржи: {order_response}")
+        return False
+
+    except Exception as e:
+      logger.error(f"Критическая ошибка при закрытии позиции {symbol}: {e}", exc_info=True)
+      return False
+#-----------------------------------------------------------
+  # async def close_position(self, symbol: str, db_trade_id: [int] = None, open_order_id: [str] = None,
+  #                          quantity_to_close: [float] = None) -> bool:
   #   """
-  #   Исполняет торговый приказ (открытие позиции).
+  #   Закрывает существующую открытую позицию (или ее часть).
+  #   Предполагается, что закрытие происходит рыночным ордером в противоположную сторону.
   #
   #   Args:
   #       symbol (str): Торговый символ.
-  #       side (str): 'buy' или 'sell'.
-  #       quantity (float): Количество для покупки/продажи.
-  #       strategy_name (str): Название стратегии, сгенерировавшей сигнал.
-  #       order_type (str): 'Market' или 'Limit'.
-  #       price (Optional[float]): Цена для Limit ордера.
-  #       leverage (int): Кредитное плечо.
-  #       stop_loss (Optional[float]): Цена Stop Loss.
-  #       take_profit (Optional[float]): Цена Take Profit.
+  #       db_trade_id (Optional[int]): ID сделки в нашей БД (если закрываем конкретную).
+  #       open_order_id (Optional[str]): ID ордера на открытие (если db_trade_id не известен).
+  #       quantity_to_close (Optional[float]): Количество для закрытия. Если None, закрывается вся позиция из БД.
   #
   #   Returns:
-  #       Optional[str]: ID ордера на бирже в случае успеха, иначе None.
+  #       bool: True, если закрытие инициировано успешно, иначе False.
   #   """
-  #   logger.info(f"Попытка исполнить сделку: {symbol} {side} {quantity} @ {price if price else 'Market'}, "
-  #               f"Strategy: {strategy_name}, Leverage: {leverage}x")
-  #   #self.log(f"Попытка разместить ордер: {symbol} | {side} | amount={quantity} | price={price or 'market'}")
+  #   trade_info = None
+  #   if db_trade_id:
+  #     # Этот метод должен быть синхронным, если db_manager не async
+  #     # trade_info = self.db_manager.get_trade_by_id(db_trade_id) # Предположим, есть такой метод
+  #     # Если нет, то ищем по order_id или другим критериям
+  #     pass  # Для примера, если бы мы искали по ID из нашей БД
   #
-  #   # 1. Установка кредитного плеча (если оно не установлено глобально или отличается)
-  #   # Bybit требует установку плеча перед размещением ордера для пары.
-  #   # Этот вызов может быть избыточным, если плечо уже установлено и не меняется.
-  #   # Можно добавить проверку текущего плеча или управлять этим более гранулярно.
-  #   # ВАЖНО: set_leverage должно быть вызвано до create_order
-  #   leverage_set = await self.connector.set_leverage(symbol, leverage)
-  #   if not leverage_set:  # или если leverage_set вернул ошибку
-  #     # Некоторые реализации set_leverage в ccxt могут не возвращать тело ответа, а просто не кидать исключение
-  #     # Проверяем более тщательно
+  #   if not trade_info and open_order_id:
+  #     trade_info = self.db_manager.get_trade_by_order_id(open_order_id)
+  #
+  #   if not trade_info:
+  #     # Если нет информации из БД, пытаемся получить текущую позицию с биржи
   #     logger.warning(
-  #       f"Не удалось подтвердить установку плеча {leverage}x для {symbol}, но продолжаем с размещением ордера.")
-  #     # В критических системах, если set_leverage не подтвердилось, лучше не продолжать.
+  #       f"Нет информации о сделке в БД для {symbol} (OrderID: {open_order_id}). Попытка получить позицию с биржи.")
+  #     positions = await self.connector.fetch_positions(symbols=[symbol])
+  #     if positions:
+  #       # Ищем позицию по символу. Bybit fetch_positions может возвращать несколько (для hedge mode)
+  #       # Для one-way mode должна быть одна или ни одной.
+  #       current_pos = None
+  #       for pos_item in positions:
+  #         if pos_item['symbol'] == symbol and float(pos_item.get('contracts', 0)) != 0:
+  #           current_pos = pos_item
+  #           break
   #
-  #   # 2. Подготовка параметров ордера, включая SL/TP для Bybit API v5
-  #   params = {'category': self.connector.exchange.options.get('defaultType', 'linear')}  # 'linear' или 'inverse'
-  #   if order_type.lower() == 'market':
-  #     price = None  # Для рыночного ордера цена не указывается
+  #       if current_pos:
+  #         pos_size = float(current_pos.get('contracts', 0))
+  #         pos_side = 'buy' if pos_size > 0 else 'sell'  # Направление открытой позиции
   #
-  #   if stop_loss:
-  #     params['stopLoss'] = str(stop_loss)
-  #     # Для Bybit может потребоваться 'slTriggerBy': 'MarkPrice' или 'LastPrice'
-  #     # params['slTriggerBy'] = 'MarkPrice'
-  #   if take_profit:
-  #     params['takeProfit'] = str(take_profit)
-  #     # params['tpTriggerBy'] = 'MarkPrice'
+  #         close_side = 'sell' if pos_side == 'buy' else 'buy'
+  #         qty_to_close = abs(pos_size)
   #
-  #   # 3. Размещение ордера через BybitConnector
-  #   try:
-  #     order_response = await self.connector.place_order(
-  #       symbol=symbol,
-  #       side=side.lower(),
-  #       order_type=order_type.lower(),
-  #       amount=quantity,
-  #       price=price,
-  #       params=params
-  #     )
-  #
-  #     if order_response and 'id' in order_response:
-  #       order_id = order_response['id']
-  #       open_price = float(
-  #         order_response.get('price', 0.0))  # Для рыночных ордеров цена исполнения будет в 'average' или 'filledPrice'
-  #
-  #       # Если это рыночный ордер, цена исполнения может быть не сразу известна или отличаться.
-  #       # Bybit часто возвращает 0 в поле 'price' для рыночных ордеров в ответе create_order.
-  #       # Реальную цену исполнения нужно будет получить из fetch_order(order_id) или из WebSocket обновлений.
-  #       # Для простоты здесь используем то, что вернулось, или цену запроса для лимитных.
-  #       if order_type.lower() == 'market' and order_response.get('average'):
-  #         actual_open_price = float(order_response['average'])
-  #       elif order_type.lower() == 'limit' and order_response.get('price'):
-  #         actual_open_price = float(order_response['price'])
-  #       else:  # Запасной вариант или если цена не пришла сразу
-  #         actual_open_price = price if price else 0.0  # Нужна лучшая логика для рыночных
-  #         logger.warning(
-  #           f"Цена открытия для ордера {order_id} не была четко определена в ответе: {order_response}. Используется {actual_open_price}")
-  #
-  #       logger.info(f"Ордер {order_id} ({symbol} {side} {quantity}) успешно размещен. "
-  #                   f"Цена открытия (приблизительно): {actual_open_price}")
-  #
-  #       if "error" in order_response:
-  #         msg = f"⚠️ Ордер {side} {symbol} НЕ размещен: {result['error']}"
-  #         self.log(msg, level="warning")
-  #         await self.notify(msg)
-  #         return False
-  #
-  #       if "order" in order_response:
-  #         order_data = order_response["order"]
-  #         msg = (
-  #           f"✅ Ордер размещен: {side.upper()} {symbol}\n"
-  #           f"📦 Кол-во: {order_data['amount']}\n"
-  #           f"💵 Цена: {order_data.get('price', 'market')}\n"
-  #           f"🆔 ID: {order_data.get('id')}"
+  #         logger.info(f"Найдена активная позиция на бирже для {symbol}: {pos_side} {qty_to_close}. Попытка закрытия.")
+  #         # Размещаем ордер на закрытие
+  #         # Bybit API v5 для закрытия требует `reduceOnly=True`
+  #         close_order_params = {
+  #           'category': self.connector.exchange.options.get('defaultType', 'linear'),
+  #           'reduceOnly': True
+  #         }
+  #         close_order_response = await self.connector.place_order(
+  #           symbol=symbol,
+  #           side=close_side,
+  #           order_type='market',
+  #           amount=qty_to_close,
+  #           params=close_order_params
   #         )
-  #         self.log(msg)
-  #         await self.notify(msg)
   #
-  #         return True
-  #       self.log(f"⚠️ Неизвестный результат от биржи для {symbol}", level="warning")
-  #
-  #       # 4. Запись информации об открытой сделке в БД
-  #       self.db_manager.add_open_trade(
-  #         symbol=symbol,
-  #         order_id=order_id,
-  #         strategy=strategy_name,
-  #         side=side.lower(),
-  #         open_timestamp=datetime.now(timezone.utc),  # Используем UTC
-  #         open_price=actual_open_price,  # Здесь должна быть фактическая цена исполнения
-  #         quantity=quantity,
-  #         leverage=leverage
-  #       )
-  #       return order_id
+  #         if close_order_response and 'id' in close_order_response:
+  #           close_order_id = close_order_response['id']
+  #           # Цена закрытия и PnL будут известны после исполнения ордера.
+  #           # Это требует дополнительной логики для отслеживания исполнения и обновления БД.
+  #           logger.info(f"Ордер на закрытие позиции {symbol} (ID: {close_order_id}) успешно размещен.")
+  #           # Здесь нужно будет дождаться исполнения и обновить БД, это упрощенный пример.
+  #           # Для корректного обновления БД с PnL, нужна информация о цене закрытия.
+  #           # Можно подписаться на WebSocket на обновления ордеров или периодически опрашивать.
+  #           # Пока что просто логируем факт отправки ордера на закрытие.
+  #           # db_manager.update_close_trade(...) будет вызван позже, когда будут данные.
+  #           return True
+  #         else:
+  #           logger.error(f"Не удалось разместить ордер на закрытие для {symbol}. Ответ: {close_order_response}")
+  #           return False
+  #       else:
+  #         logger.warning(f"Нет активной позиции на бирже для {symbol} для закрытия.")
+  #         return False
   #     else:
-  #       logger.error(f"Не удалось разместить ордер для {symbol} {side}. Ответ API: {order_response}")
-  #
-  #   except RuntimeError as e:
-  #     if "Недостаточно средств" in str(e):
-  #       msg = f"❌ {symbol} | Ордер не выполнен: Недостаточно средств"
-  #       self.log(msg, level="error")
-  #       await self.notify(msg)
+  #       logger.error(f"Не удалось получить информацию о позициях с биржи для {symbol}.")
   #       return False
   #
+  #   # Если же у нас есть trade_info из нашей БД (т.е. мы отслеживаем позицию)
+  #   if trade_info and trade_info['status'] == 'OPEN':
+  #     original_side = trade_info['side']
+  #     original_quantity = trade_info['quantity']
+  #     open_order_id_from_db = trade_info['order_id']
   #
-  #   except Exception as e:
-  #     self.log(f"‼️ Неизвестная ошибка при торговле {symbol}: {e}", level="error")
-  #     await self.notify(f"⚠️ Ошибка при размещении ордера {symbol}: {e}")
+  #     close_side = 'sell' if original_side == 'buy' else 'buy'
+  #     qty_to_close = quantity_to_close if quantity_to_close else original_quantity
+  #
+  #     logger.info(
+  #       f"Попытка закрыть позицию из БД (OrderID: {open_order_id_from_db}): {symbol} {close_side} {qty_to_close}")
+  #
+  #     close_order_params = {
+  #       'category': self.connector.exchange.options.get('defaultType', 'linear'),
+  #       'reduceOnly': True  # Важно для закрытия позиции
+  #     }
+  #
+  #     # Если мы знаем ID ордера на открытие, его можно передать в `clientOrderId` для связи,
+  #     # но это не стандартный параметр для закрытия в CCXT.
+  #     # if open_order_id_from_db:
+  #     #    close_order_params['clientOrderId'] = f"close_{open_order_id_from_db}"
+  #
+  #     close_order_response = await self.connector.place_order(
+  #       symbol=symbol,
+  #       side=close_side,
+  #       order_type='market',  # Обычно закрывают рыночным
+  #       amount=qty_to_close,
+  #       params=close_order_params
+  #     )
+  #
+  #     if close_order_response and 'id' in close_order_response:
+  #       close_order_id = close_order_response['id']
+  #       logger.info(
+  #         f"Ордер на закрытие (ID: {close_order_id}) для позиции {open_order_id_from_db} ({symbol}) успешно размещен.")
+  #
+  #       # ВАЖНО: Обновление БД с P/L, комиссией и ценой закрытия должно происходить
+  #       # ПОСЛЕ фактического исполнения ордера на закрытие и получения этих данных.
+  #       # Это требует механизма отслеживания статуса ордеров (например, через WebSocket или polling).
+  #       # Здесь мы только инициируем закрытие. Логика обновления БД будет в другом месте,
+  #       # например, в основном цикле бота, который слушает обновления ордеров.
+  #
+  #       # Пока что, мы можем пометить в БД, что инициировано закрытие, или дождаться.
+  #       # Для простоты, предположим, что мы получим коллбэк или проверим позже.
+  #       return True
+  #     else:
+  #       logger.error(
+  #         f"Не удалось разместить ордер на закрытие для позиции {open_order_id_from_db} ({symbol}). Ответ: {close_order_response}")
+  #       return False
+  #   else:
+  #     logger.warning(
+  #       f"Не найдена открытая сделка в БД с ID {db_trade_id} или OrderID {open_order_id} для {symbol}, или она уже не 'OPEN'.")
   #     return False
-  #
-  # def log(self, message: str, level="info"):
-  #     logger_method = getattr(self.connector.logger, level, self.connector.logger.info)
-  #     logger_method(message)
-  #
-  # async def notify(self, message: str):
-  #   if self.telegram_bot:
-  #     # try:
-  #       await self.telegram_bot.send_message(message)
-  #     # except Exception as e:
-  #     #   self.connector.logger.warning(f"Ошибка при отправке сообщения в Telegram: {e}")
-  #
-  #
-#-----------------------------------------------------------
-  async def close_position(self, symbol: str, db_trade_id: [int] = None, open_order_id: [str] = None,
-                           quantity_to_close: [float] = None) -> bool:
-    """
-    Закрывает существующую открытую позицию (или ее часть).
-    Предполагается, что закрытие происходит рыночным ордером в противоположную сторону.
-
-    Args:
-        symbol (str): Торговый символ.
-        db_trade_id (Optional[int]): ID сделки в нашей БД (если закрываем конкретную).
-        open_order_id (Optional[str]): ID ордера на открытие (если db_trade_id не известен).
-        quantity_to_close (Optional[float]): Количество для закрытия. Если None, закрывается вся позиция из БД.
-
-    Returns:
-        bool: True, если закрытие инициировано успешно, иначе False.
-    """
-    trade_info = None
-    if db_trade_id:
-      # Этот метод должен быть синхронным, если db_manager не async
-      # trade_info = self.db_manager.get_trade_by_id(db_trade_id) # Предположим, есть такой метод
-      # Если нет, то ищем по order_id или другим критериям
-      pass  # Для примера, если бы мы искали по ID из нашей БД
-
-    if not trade_info and open_order_id:
-      trade_info = self.db_manager.get_trade_by_order_id(open_order_id)
-
-    if not trade_info:
-      # Если нет информации из БД, пытаемся получить текущую позицию с биржи
-      logger.warning(
-        f"Нет информации о сделке в БД для {symbol} (OrderID: {open_order_id}). Попытка получить позицию с биржи.")
-      positions = await self.connector.fetch_positions(symbols=[symbol])
-      if positions:
-        # Ищем позицию по символу. Bybit fetch_positions может возвращать несколько (для hedge mode)
-        # Для one-way mode должна быть одна или ни одной.
-        current_pos = None
-        for pos_item in positions:
-          if pos_item['symbol'] == symbol and float(pos_item.get('contracts', 0)) != 0:
-            current_pos = pos_item
-            break
-
-        if current_pos:
-          pos_size = float(current_pos.get('contracts', 0))
-          pos_side = 'buy' if pos_size > 0 else 'sell'  # Направление открытой позиции
-
-          close_side = 'sell' if pos_side == 'buy' else 'buy'
-          qty_to_close = abs(pos_size)
-
-          logger.info(f"Найдена активная позиция на бирже для {symbol}: {pos_side} {qty_to_close}. Попытка закрытия.")
-          # Размещаем ордер на закрытие
-          # Bybit API v5 для закрытия требует `reduceOnly=True`
-          close_order_params = {
-            'category': self.connector.exchange.options.get('defaultType', 'linear'),
-            'reduceOnly': True
-          }
-          close_order_response = await self.connector.place_order(
-            symbol=symbol,
-            side=close_side,
-            order_type='market',
-            amount=qty_to_close,
-            params=close_order_params
-          )
-
-          if close_order_response and 'id' in close_order_response:
-            close_order_id = close_order_response['id']
-            # Цена закрытия и PnL будут известны после исполнения ордера.
-            # Это требует дополнительной логики для отслеживания исполнения и обновления БД.
-            logger.info(f"Ордер на закрытие позиции {symbol} (ID: {close_order_id}) успешно размещен.")
-            # Здесь нужно будет дождаться исполнения и обновить БД, это упрощенный пример.
-            # Для корректного обновления БД с PnL, нужна информация о цене закрытия.
-            # Можно подписаться на WebSocket на обновления ордеров или периодически опрашивать.
-            # Пока что просто логируем факт отправки ордера на закрытие.
-            # db_manager.update_close_trade(...) будет вызван позже, когда будут данные.
-            return True
-          else:
-            logger.error(f"Не удалось разместить ордер на закрытие для {symbol}. Ответ: {close_order_response}")
-            return False
-        else:
-          logger.warning(f"Нет активной позиции на бирже для {symbol} для закрытия.")
-          return False
-      else:
-        logger.error(f"Не удалось получить информацию о позициях с биржи для {symbol}.")
-        return False
-
-    # Если же у нас есть trade_info из нашей БД (т.е. мы отслеживаем позицию)
-    if trade_info and trade_info['status'] == 'OPEN':
-      original_side = trade_info['side']
-      original_quantity = trade_info['quantity']
-      open_order_id_from_db = trade_info['order_id']
-
-      close_side = 'sell' if original_side == 'buy' else 'buy'
-      qty_to_close = quantity_to_close if quantity_to_close else original_quantity
-
-      logger.info(
-        f"Попытка закрыть позицию из БД (OrderID: {open_order_id_from_db}): {symbol} {close_side} {qty_to_close}")
-
-      close_order_params = {
-        'category': self.connector.exchange.options.get('defaultType', 'linear'),
-        'reduceOnly': True  # Важно для закрытия позиции
-      }
-
-      # Если мы знаем ID ордера на открытие, его можно передать в `clientOrderId` для связи,
-      # но это не стандартный параметр для закрытия в CCXT.
-      # if open_order_id_from_db:
-      #    close_order_params['clientOrderId'] = f"close_{open_order_id_from_db}"
-
-      close_order_response = await self.connector.place_order(
-        symbol=symbol,
-        side=close_side,
-        order_type='market',  # Обычно закрывают рыночным
-        amount=qty_to_close,
-        params=close_order_params
-      )
-
-      if close_order_response and 'id' in close_order_response:
-        close_order_id = close_order_response['id']
-        logger.info(
-          f"Ордер на закрытие (ID: {close_order_id}) для позиции {open_order_id_from_db} ({symbol}) успешно размещен.")
-
-        # ВАЖНО: Обновление БД с P/L, комиссией и ценой закрытия должно происходить
-        # ПОСЛЕ фактического исполнения ордера на закрытие и получения этих данных.
-        # Это требует механизма отслеживания статуса ордеров (например, через WebSocket или polling).
-        # Здесь мы только инициируем закрытие. Логика обновления БД будет в другом месте,
-        # например, в основном цикле бота, который слушает обновления ордеров.
-
-        # Пока что, мы можем пометить в БД, что инициировано закрытие, или дождаться.
-        # Для простоты, предположим, что мы получим коллбэк или проверим позже.
-        return True
-      else:
-        logger.error(
-          f"Не удалось разместить ордер на закрытие для позиции {open_order_id_from_db} ({symbol}). Ответ: {close_order_response}")
-        return False
-    else:
-      logger.warning(
-        f"Не найдена открытая сделка в БД с ID {db_trade_id} или OrderID {open_order_id} для {symbol}, или она уже не 'OPEN'.")
-      return False
 
   async def update_trade_status_from_exchange(self, order_id: str, symbol: str):
     """
@@ -402,7 +394,7 @@ class TradeExecutor:
           logger.info(f"Ордер на закрытие {order_id} для {symbol} исполнен. "
                       f"Цена закрытия: {filled_price}, Кол-во: {filled_qty}, Комиссия: {commission_cost}. Расчетный P/L: {net_pnl}")
 
-          self.db_manager.update_close_trade(
+          await self.db_manager.update_close_trade(
             order_id=original_open_order_id,  # Обновляем запись об исходной сделке
             close_timestamp=datetime.fromtimestamp(order_info['timestamp'] / 1000, tz=timezone.utc) if order_info.get(
               'timestamp') else datetime.now(timezone.utc),

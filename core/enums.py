@@ -29,3 +29,4 @@ class Timeframe(Enum):
     ONE_DAY = "D"
     ONE_WEEK = "W"
     ONE_MONTH = "M"
+

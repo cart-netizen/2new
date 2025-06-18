@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from typing import Dict, Any, Optional
 from core.enums import SignalType
@@ -17,6 +17,13 @@ class TradingSignal:
     # Добавим order_type и quantity для более полного сигнала
     order_type: Optional[str] = "Market" # e.g., OrderType.MARKET.value
     quantity_usdt: Optional[float] = None # Количество в USDT для расчета размера
+
+    def to_dict(self):
+        # Преобразует объект в словарь, обрабатывая Enum и datetime
+        data = asdict(self)
+        data['signal_type'] = self.signal_type.value
+        data['timestamp'] = self.timestamp.isoformat()
+        return data
 
 @dataclass
 class Order:
@@ -55,3 +62,4 @@ class RiskMetrics: # Сильно упрощено для начала
     daily_loss_limit_pct: float = 0.02 # 2%
     current_daily_loss_usdt: float = 0.0
     max_position_size_pct: float = 0.10 # 10%
+    realized_pnl_total: float = 0.0

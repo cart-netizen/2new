@@ -1,4 +1,5 @@
 import asyncio
+import json
 from contextlib import suppress
 from datetime import datetime, timedelta, time
 from typing import List, Optional, Dict, Any
@@ -36,6 +37,7 @@ from ml.anomaly_detector import MarketAnomalyDetector, AnomalyType, AnomalyRepor
 from ml.enhanced_ml_system import EnhancedEnsembleModel, MLPrediction
 import logging # <--- Добавьте импорт
 from core.correlation_manager import CorrelationManager, PortfolioRiskMetrics
+from core.signal_quality_analyzer import SignalQualityAnalyzer, QualityScore
 
 signal_logger = logging.getLogger('SignalTrace') # <--- Получаем наш спец. логгер
 logger = get_logger(__name__)
@@ -173,6 +175,9 @@ class IntegratedTradingSystem:
     self._last_correlation_update = 0
     self._correlation_task: Optional[asyncio.Task] = None
 
+    self.signal_quality_analyzer = SignalQualityAnalyzer(self.data_fetcher, self.db_manager)
+    self.min_quality_score = 0.6  # Минимальный балл качества для исполнения
+
     logger.info("IntegratedTradingSystem полностью инициализирован.")
 
   @staticmethod
@@ -211,6 +216,8 @@ class IntegratedTradingSystem:
     ансамбль стратегий для генерации и подтверждения сигнала.
     """
     logger.debug(f"Поиск сигнала на HTF для символа: {symbol}")
+    logger.info(f"🔍 Начало стандартного мониторинга для {symbol}")
+
     try:
       htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=300)
       if htf_data.empty or len(htf_data) < 52:  # 52 нужно для Ichimoku
@@ -318,7 +325,7 @@ class IntegratedTradingSystem:
     Расширенная версия мониторинга с использованием Enhanced ML
     """
     logger.debug(f"Расширенный поиск сигнала для символа: {symbol}")
-
+    logger.info(f"🔍 Начало расширенного мониторинга для {symbol}")
     try:
       # 1. Получаем данные HTF
       htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=300)
@@ -385,7 +392,7 @@ class IntegratedTradingSystem:
 
             # Продолжаем стандартную обработку сигнала
             # await self._process_trading_signal(trading_signal, symbol, htf_data)
-            await self._process_trading_signal_with_correlation(trading_signal, symbol, htf_data)
+            await self._process_trading_signal_with_correlation_and_quality(trading_signal, symbol, htf_data)
 
         except Exception as e:
           logger.error(f"Ошибка Enhanced ML для {symbol}: {e}")
@@ -402,6 +409,8 @@ class IntegratedTradingSystem:
       """
       Обработка торгового сигнала с учетом аномалий
       """
+      logger.info(f"⚠️ Используется старый метод обработки сигналов для {symbol}")
+
       # Стандартная фильтрация
       is_approved, reason = await self.signal_filter.filter_signal(signal, market_data)
       if not is_approved:
@@ -847,7 +856,11 @@ class IntegratedTradingSystem:
       symbols_for_new_search = [s for s in self.active_symbols if s not in open_and_pending]
 
       if symbols_for_new_search:
-        tasks = [self._monitor_symbol_for_entry(symbol) for symbol in symbols_for_new_search]
+        use_enhanced = self.config.get('ml_settings', {}).get('use_enhanced_processing', True)
+        if use_enhanced and self.enhanced_ml_model:
+          tasks = [self._monitor_symbol_for_entry_enhanced(symbol) for symbol in symbols_for_new_search]
+        else:
+          tasks = [self._monitor_symbol_for_entry(symbol) for symbol in symbols_for_new_search]
         await asyncio.gather(*tasks)
 
       # --- НОВЫЙ БЛОК: ПРОВЕРКА КОМАНД ИЗ ДАШБОРДА ---
@@ -1499,11 +1512,6 @@ class IntegratedTradingSystem:
             if symbol in self.position_manager.open_positions:
               tasks.append(self.position_manager.monitor_single_position(symbol))
 
-          # 3. Ищем новые сигналы для символов без позиций и ожидающих сигналов
-          # for symbol in batch:
-          #   if (symbol not in self.position_manager.open_positions and
-          #       symbol not in self.state_manager.get_pending_signals()):
-          #     tasks.append(self._monitor_symbol_for_entry(symbol))
           # 3. Ищем новые сигналы для символов без позиций
           for symbol in batch:
             if (symbol not in self.position_manager.open_positions and
@@ -1532,6 +1540,9 @@ class IntegratedTradingSystem:
 
         if self._monitoring_cycles % 10 == 0:
           await self._log_performance_stats()
+
+        if self._monitoring_cycles % 20 == 0:
+          await self.display_quality_statistics()
 
         # Ожидание перед следующим циклом
         await asyncio.sleep(monitoring_interval)
@@ -1829,7 +1840,7 @@ class IntegratedTradingSystem:
       logger.info(
         f"  Признаков: {len(self.enhanced_ml_model.selected_features) if self.enhanced_ml_model.selected_features else 0}")
 
-    async def _update_portfolio_correlations(self):
+  async def _update_portfolio_correlations(self):
       """Периодическое обновление корреляций портфеля"""
       while self.is_running:
         try:
@@ -1893,22 +1904,54 @@ class IntegratedTradingSystem:
     """
     Обработка торгового сигнала с учетом аномалий, корреляций и качества
     """
-    # 0. Проверка на аномалии (добавляем это!)
-    if 'anomalies' in signal.metadata:
-        anomalies = signal.metadata['anomalies']
-        if anomalies:
-            # Уменьшаем размер позиции при аномалиях
-            max_severity = max(a['severity'] for a in anomalies)
-            if max_severity > 0.8:
-                logger.warning(f"Критическая аномалия для {symbol}, сигнал заблокирован")
-                return
-    # Стандартная фильтрация
+    # 1. Оценка качества сигнала
+    logger.info(f"Оценка качества сигнала для {symbol}...")
+    signal_logger.info(f"КАЧЕСТВО: Начата оценка сигнала {symbol}")
+
+    # Загружаем дополнительные таймфреймы для анализа
+    additional_timeframes = {}
+    for tf in [Timeframe.FIFTEEN_MINUTES, Timeframe.FOUR_HOURS]:
+      try:
+        tf_data = await self.data_fetcher.get_historical_candles(symbol, tf, limit=100)
+        if not tf_data.empty:
+          additional_timeframes[tf] = tf_data
+      except Exception as e:
+        logger.debug(f"Не удалось загрузить {tf} для {symbol}: {e}")
+
+    quality_metrics = await self.signal_quality_analyzer.rate_signal_quality(
+      signal, market_data, additional_timeframes
+    )
+
+    # Логируем результаты оценки
+    logger.info(
+      f"Качество сигнала {symbol}: {quality_metrics.overall_score:.2f} ({quality_metrics.quality_category.value})")
+    signal_logger.info(
+      f"КАЧЕСТВО: Оценка {quality_metrics.overall_score:.2f} - {quality_metrics.quality_category.value}")
+
+    if quality_metrics.strengths:
+      logger.info(f"Сильные стороны: {', '.join(quality_metrics.strengths[:3])}")
+    if quality_metrics.weaknesses:
+      logger.warning(f"Слабые стороны: {', '.join(quality_metrics.weaknesses[:3])}")
+    if quality_metrics.recommendations:
+      for rec in quality_metrics.recommendations[:2]:
+        signal_logger.info(f"РЕКОМЕНДАЦИЯ: {rec}")
+
+    # Проверяем минимальное качество
+    if quality_metrics.overall_score < self.min_quality_score:
+      logger.warning(
+        f"Сигнал {symbol} отклонен из-за низкого качества: "
+        f"{quality_metrics.overall_score:.2f} < {self.min_quality_score}"
+      )
+      signal_logger.warning(f"КАЧЕСТВО: Сигнал отклонен - низкий балл {quality_metrics.overall_score:.2f}")
+      return
+
+    # 2. Стандартная фильтрация
     is_approved, reason = await self.signal_filter.filter_signal(signal, market_data)
     if not is_approved:
       logger.info(f"Сигнал для {symbol} отклонен фильтром: {reason}")
       return
 
-    # Проверка корреляций с открытыми позициями
+    # 3. Проверка корреляций
     open_symbols = list(self.position_manager.open_positions.keys())
     if open_symbols:
       should_block, block_reason = self.correlation_manager.should_block_signal_due_to_correlation(
@@ -1919,12 +1962,12 @@ class IntegratedTradingSystem:
         signal_logger.warning(f"КОРРЕЛЯЦИЯ: Сигнал {symbol} отклонен - {block_reason}")
         return
 
-    # Проверка рисков
+    # 4. Проверка рисков
     await self.update_account_balance()
     if not self.account_balance or self.account_balance.available_balance_usdt <= 0:
       return
 
-    # Получаем базовый размер позиции от риск-менеджера
+    # 5. Валидация риск-менеджером
     risk_decision = await self.risk_manager.validate_signal(
       signal=signal,
       symbol=symbol,
@@ -1936,40 +1979,197 @@ class IntegratedTradingSystem:
       logger.info(f"Сигнал для {symbol} отклонен риск-менеджером: {risk_decision.get('reasons')}")
       return
 
-    # Корректируем размер позиции с учетом корреляций
+    # 6. Корректировка размера позиции на основе качества
     base_size = risk_decision.get('recommended_size', 0)
 
-    # Создаем словарь сигналов для корректировки
-    signals_dict = {symbol: {'size': base_size}}
+    # Масштабируем размер в зависимости от качества
+    quality_multiplier = 1.0
+    if quality_metrics.quality_category == QualityScore.EXCELLENT:
+      quality_multiplier = 1.2  # Увеличиваем на 20% для отличных сигналов
+    elif quality_metrics.quality_category == QualityScore.GOOD:
+      quality_multiplier = 1.0  # Стандартный размер
+    elif quality_metrics.quality_category == QualityScore.FAIR:
+      quality_multiplier = 0.7  # Уменьшаем на 30%
+    else:
+      quality_multiplier = 0.5  # Минимальный размер для слабых сигналов
 
-    # Получаем текущие размеры позиций
+    quality_adjusted_size = base_size * quality_multiplier
+
+    # 7. Корректировка с учетом корреляций
+    signals_dict = {symbol: {'size': quality_adjusted_size}}
     current_positions = {
       sym: pos.get('quantity', 0)
       for sym, pos in self.position_manager.open_positions.items()
     }
 
-    # Корректируем размеры с учетом корреляций
     adjusted_sizes = await self.correlation_manager.adjust_position_sizes_by_correlation(
       signals_dict, current_positions
     )
 
-    final_size = adjusted_sizes.get(symbol, base_size)
+    final_size = adjusted_sizes.get(symbol, quality_adjusted_size)
 
-    if final_size < base_size * 0.5:
-      logger.warning(
-        f"Размер позиции {symbol} сильно уменьшен из-за корреляций: "
-        f"{base_size:.4f} -> {final_size:.4f}"
-      )
+    logger.info(
+      f"Размер позиции {symbol}: база={base_size:.4f}, "
+      f"качество={quality_adjusted_size:.4f}, финал={final_size:.4f}"
+    )
 
-    # Обновляем сигнал с финальным размером
+    # 8. Обогащаем сигнал информацией о качестве
     signal_dict = signal.to_dict()
-    signal_dict['metadata']['approved_size'] = final_size
-    signal_dict['metadata']['correlation_adjusted'] = final_size != base_size
-    signal_dict['metadata']['signal_time'] = datetime.now().isoformat()
+    signal_dict['metadata'].update({
+      'approved_size': final_size,
+      'quality_score': quality_metrics.overall_score,
+      'quality_category': quality_metrics.quality_category.value,
+      'risk_reward_ratio': quality_metrics.risk_reward_ratio,
+      'expected_win_rate': quality_metrics.expected_win_rate,
+      'signal_percentile': quality_metrics.signal_strength_percentile,
+      'quality_adjusted': True,
+      'correlation_adjusted': final_size != quality_adjusted_size,
+      'signal_time': datetime.now().isoformat()
+    })
 
-    # Ставим в очередь
+    # 9. Ставим в очередь
     pending_signals = self.state_manager.get_pending_signals()
     pending_signals[symbol] = signal_dict
     self.state_manager.update_pending_signals(pending_signals)
 
-    logger.info(f"Сигнал для {symbol} одобрен с учетом корреляций. Размер: {final_size:.4f}")
+    logger.info(
+      f"✅ Сигнал {symbol} одобрен: Качество={quality_metrics.overall_score:.2f}, "
+      f"Категория={quality_metrics.quality_category.value}, Размер={final_size:.4f}"
+    )
+    signal_logger.info(
+      f"ОДОБРЕНО: {symbol} - Качество {quality_metrics.overall_score:.2f}, "
+      f"Размер {final_size:.4f}"
+    )
+
+  def _generate_quality_recommendation(self, results: Dict[str, Any]) -> str:
+    """Генерирует рекомендации на основе анализа качества"""
+    if not results:
+      return "Недостаточно данных для рекомендаций"
+
+    # Анализируем win rate по категориям
+    excellent_wr = results.get('excellent', {}).get('win_rate', 0)
+    good_wr = results.get('good', {}).get('win_rate', 0)
+    fair_wr = results.get('fair', {}).get('win_rate', 0)
+
+    recommendations = []
+
+    if excellent_wr > 70:
+      recommendations.append("Отличные сигналы показывают высокую эффективность - увеличьте размеры позиций для них")
+
+    if fair_wr > good_wr:
+      recommendations.append("⚠️ Сигналы среднего качества работают лучше хороших - проверьте настройки оценки")
+
+    avg_wr = np.mean([r.get('win_rate', 0) for r in results.values() if r])
+    if avg_wr < 50:
+      recommendations.append("Общий win rate ниже 50% - рекомендуется повысить минимальный порог качества")
+
+    return " | ".join(recommendations) if recommendations else "Система работает в нормальном режиме рекомендации на основе анализа качества"""
+
+  if not results:
+    return 'Недостаточно данных для рекомендаций'
+
+    # Анализируем win rate по категориям
+  excellent_wr = results.get('excellent', {}).get('win_rate', 0)
+  good_wr = results.get('good', {}).get('win_rate', 0)
+  fair_wr = results.get('fair', {}).get('win_rate', 0)
+
+  recommendations = []
+
+  if excellent_wr > 70:
+    recommendations.append("Отличные сигналы показывают высокую эффективность - увеличьте размеры позиций для них")
+
+  if fair_wr > good_wr:
+    recommendations.append(f"⚠️ Сигналы среднего качества работают лучше хороших - проверьте настройки о {logger.info({category} : {count}) сигналов
+
+  def set_quality_thresholds(self, min_score: float = 0.6,
+                               quality_weights: Optional[Dict[str, float]] = None):
+      """Настраивает пороги качества для системы"""
+      self.min_quality_score = min_score
+
+      if quality_weights:
+        self.signal_quality_analyzer.quality_weights.update(quality_weights)
+
+      logger.info(f"Обновлены пороги качества: минимальный балл = {min_score}")
+
+  async def analyze_historical_signal_quality(self, days: int = 30) -> Dict[str, Any]:
+    """Анализирует качество сигналов за период и их результаты"""
+    logger.info(f"Анализ качества сигналов за последние {days} дней...")
+
+    # Получаем закрытые сделки за период
+    since_date = datetime.now() - timedelta(days=days)
+    query = """
+        SELECT symbol, strategy, side, open_price, close_price, 
+               profit_loss, metadata, open_timestamp, close_timestamp
+        FROM trades
+        WHERE status = 'CLOSED' AND open_timestamp >= ?
+        ORDER BY open_timestamp DESC
+    """
+
+    trades = await self.db_manager._execute(query, (since_date,), fetch='all')
+
+    if not trades:
+      return {"status": "no_trades"}
+
+    quality_vs_performance = {
+      QualityScore.EXCELLENT: {'total': 0, 'profitable': 0, 'avg_pnl': 0},
+      QualityScore.GOOD: {'total': 0, 'profitable': 0, 'avg_pnl': 0},
+      QualityScore.FAIR: {'total': 0, 'profitable': 0, 'avg_pnl': 0},
+      QualityScore.POOR: {'total': 0, 'profitable': 0, 'avg_pnl': 0}
+    }
+
+    for trade in trades:
+      try:
+        metadata = json.loads(trade['metadata']) if trade['metadata'] else {}
+        quality_score = metadata.get('quality_score', 0.5)
+        quality_category = metadata.get('quality_category', 'fair')
+
+        # Находим категорию
+        category = None
+        for cat in QualityScore:
+          if cat.value == quality_category:
+            category = cat
+            break
+
+        if category and category in quality_vs_performance:
+          stats = quality_vs_performance[category]
+          stats['total'] += 1
+          if trade['profit_loss'] > 0:
+            stats['profitable'] += 1
+          stats['avg_pnl'] += trade['profit_loss']
+
+      except Exception as e:
+        logger.debug(f"Ошибка обработки сделки: {e}")
+        continue
+
+    # Вычисляем средние значения и win rate
+    results = {}
+    for category, stats in quality_vs_performance.items():
+      if stats['total'] > 0:
+        results[category.value] = {
+          'total_trades': stats['total'],
+          'win_rate': stats['profitable'] / stats['total'] * 100,
+          'avg_pnl': stats['avg_pnl'] / stats['total']
+        }
+
+    return {
+      'period_days': days,
+      'total_trades_analyzed': len(trades),
+      'quality_performance': results,
+      'recommendation': self._generate_quality_recommendation(results)
+    }
+
+  def _generate_quality_recommendation(self, results: Dict[str, Any]) -> str:
+    """
+    Генерирует рекоменд# Обновления для integrated_system.py для интеграции системы оценки качества
+    """
+
+    # Добавьте импорт в начало файла:
+    from core.signal_quality_analyzer import SignalQualityAnalyzer, QualityScore
+
+    # В методе __init__ добавьте инициализацию после correlation_manager:
+          # Инициализация анализатора качества сигналов
+          self.signal_quality_analyzer = SignalQualityAnalyzer(self.data_fetcher, self.db_manager)
+          self.min_quality_score = 0.6  # Минимальный балл качества для исполнения
+
+    # Обновите метод _process_trading_signal_with_correlation, добавив оценку качества:
+

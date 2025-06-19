@@ -35,6 +35,8 @@ import os
 from ml.anomaly_detector import MarketAnomalyDetector, AnomalyType, AnomalyReport
 from ml.enhanced_ml_system import EnhancedEnsembleModel, MLPrediction
 import logging # <--- Добавьте импорт
+from core.correlation_manager import CorrelationManager, PortfolioRiskMetrics
+
 signal_logger = logging.getLogger('SignalTrace') # <--- Получаем наш спец. логгер
 logger = get_logger(__name__)
 
@@ -157,13 +159,19 @@ class IntegratedTradingSystem:
     # --- НОВЫЙ БЛОК: ЗАГРУЗКА ПРЕДИКТОРА ВОЛАТИЛЬНОСТИ ---
 
     try:
-      self.volatility_predictor = joblib.load("ml_models/volatility_predictor.pkl")
+      self.volatility_predictor = joblib.load("ml_models/volatility_system.pkl")
       logger.info("Предиктор волатильности успешно загружен.")
     except FileNotFoundError:
       logger.warning("Файл предиктора волатильности не найден. Расчет SL/TP будет производиться по стандартной схеме.")
     except Exception as e:
       logger.error(f"Ошибка при загрузке предиктора волатильности: {e}")
     # --- КОНЕЦ НОВОГО БЛОКА ---
+
+    # Инициализация корреляционного менеджера
+    self.correlation_manager = CorrelationManager(self.data_fetcher)
+    self._correlation_update_interval = 3600  # Обновление корреляций каждый час
+    self._last_correlation_update = 0
+    self._correlation_task: Optional[asyncio.Task] = None
 
     logger.info("IntegratedTradingSystem полностью инициализирован.")
 
@@ -376,7 +384,8 @@ class IntegratedTradingSystem:
             )
 
             # Продолжаем стандартную обработку сигнала
-            await self._process_trading_signal(trading_signal, symbol, htf_data)
+            # await self._process_trading_signal(trading_signal, symbol, htf_data)
+            await self._process_trading_signal_with_correlation(trading_signal, symbol, htf_data)
 
         except Exception as e:
           logger.error(f"Ошибка Enhanced ML для {symbol}: {e}")
@@ -389,7 +398,7 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка в расширенном мониторинге для {symbol}: {e}", exc_info=True)
 
-    async def _process_trading_signal(self, signal: TradingSignal, symbol: str, market_data: pd.DataFrame):
+  async def _process_trading_signal(self, signal: TradingSignal, symbol: str, market_data: pd.DataFrame):
       """
       Обработка торгового сигнала с учетом аномалий
       """
@@ -442,7 +451,7 @@ class IntegratedTradingSystem:
 
       logger.info(f"Enhanced сигнал для {symbol} одобрен и поставлен в очередь")
 
-  async def train_anomaly_detector(self, symbols: List[str], lookback_days: int = 30):
+  async def train_anomaly_detector(self, symbols: List[str], lookback_days: int = 45):
     """
     Обучает детектор аномалий на исторических данных
     """
@@ -506,7 +515,7 @@ class IntegratedTradingSystem:
           limit=24 * lookback_days
         )
 
-        if data.empty or len(data) < 200:
+        if data.empty or len(data) < 100:
           continue
 
         # Создаем метки (пример - можно использовать вашу логику)
@@ -908,6 +917,11 @@ class IntegratedTradingSystem:
     # ++ СООБЩАЕМ, ЧТО БОТ ОСТАНОВЛЕН ++
     self.state_manager.set_status('stopped')
     logger.info("Остановка торговой системы...")
+
+    if self._correlation_task and not self._correlation_task.done():
+      self._correlation_task.cancel()
+      with suppress(asyncio.CancelledError):
+        await self._correlation_task
 
     # Отменяем все задачи мониторинга
     if self._monitoring_task:
@@ -1481,15 +1495,25 @@ class IntegratedTradingSystem:
               tasks.append(self._check_pending_signal_for_entry(symbol))
 
           # 2. Мониторим открытые позиции
-          for symbol, position in self.position_manager.open_positions.items():
-            if symbol in batch:
-              tasks.append(self.position_manager.monitor_position(symbol, position))
+          for symbol in batch:
+            if symbol in self.position_manager.open_positions:
+              tasks.append(self.position_manager.monitor_single_position(symbol))
 
           # 3. Ищем новые сигналы для символов без позиций и ожидающих сигналов
+          # for symbol in batch:
+          #   if (symbol not in self.position_manager.open_positions and
+          #       symbol not in self.state_manager.get_pending_signals()):
+          #     tasks.append(self._monitor_symbol_for_entry(symbol))
+          # 3. Ищем новые сигналы для символов без позиций
           for symbol in batch:
             if (symbol not in self.position_manager.open_positions and
                 symbol not in self.state_manager.get_pending_signals()):
-              tasks.append(self._monitor_symbol_for_entry(symbol))
+              # Используем enhanced версию если модели загружены
+              if self.enhanced_ml_model and self.anomaly_detector:
+                tasks.append(self._monitor_symbol_for_entry_enhanced(symbol))
+              else:
+                tasks.append(self._monitor_symbol_for_entry(symbol))
+
 
           # Выполняем все задачи батча параллельно
           if tasks:
@@ -1518,6 +1542,86 @@ class IntegratedTradingSystem:
       except Exception as e:
         logger.error(f"Ошибка в оптимизированном цикле мониторинга: {e}", exc_info=True)
         await asyncio.sleep(monitoring_interval)
+
+  async def _check_pending_signal_for_entry(self, symbol: str):
+    """Проверяет ожидающий сигнал на точку входа"""
+    pending_signals = self.state_manager.get_pending_signals()
+
+    if symbol not in pending_signals:
+      return
+
+    try:
+      signal_data = pending_signals[symbol]
+
+      # Проверяем таймаут сигнала (например, 30 минут)
+      signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
+      if (datetime.now() - signal_time).seconds > 1800:
+        logger.info(f"Сигнал для {symbol} устарел, удаляем из очереди")
+        del pending_signals[symbol]
+        self.state_manager.update_pending_signals(pending_signals)
+        return
+
+      # Получаем данные LTF для поиска точки входа
+      strategy_settings = self.config.get('strategy_settings', {})
+      ltf_timeframe = strategy_settings.get('ltf_entry_timeframe', '5m')
+
+      ltf_data = await self.data_fetcher.get_historical_candles(symbol, ltf_timeframe, limit=50)
+      if ltf_data.empty:
+        return
+
+      # Проверяем условия входа на LTF
+      entry_found = await self._check_ltf_entry_conditions(signal_data, ltf_data)
+
+      if entry_found:
+        # Исполняем сделку
+        size = signal_data['metadata']['approved_size']
+
+        # Восстанавливаем TradingSignal из словаря
+        trading_signal = TradingSignal(
+          signal_type=SignalType[signal_data['signal_type']],
+          symbol=signal_data['symbol'],
+          price=signal_data['price'],
+          confidence=signal_data['confidence'],
+          strategy_name=signal_data['strategy_name'],
+          timestamp=datetime.fromisoformat(signal_data['timestamp']),
+          stop_loss=signal_data.get('stop_loss'),
+          take_profit=signal_data.get('take_profit'),
+          metadata=signal_data.get('metadata', {})
+        )
+
+        success, order_details = await self.trade_executor.execute_trade(
+          trading_signal, symbol, size
+        )
+
+        if success:
+          logger.info(f"✅ Сделка по {symbol} успешно исполнена")
+          # Удаляем из очереди
+          del pending_signals[symbol]
+          self.state_manager.update_pending_signals(pending_signals)
+
+    except Exception as e:
+      logger.error(f"Ошибка при проверке точки входа для {symbol}: {e}")
+
+  async def _check_ltf_entry_conditions(self, signal_data: Dict, ltf_data: pd.DataFrame) -> bool:
+    """Проверяет условия входа на младшем таймфрейме"""
+    try:
+      signal_type = SignalType[signal_data['signal_type']]
+
+      # Пример простых условий входа
+      last_close = ltf_data['close'].iloc[-1]
+      sma_10 = ltf_data['close'].rolling(10).mean().iloc[-1]
+
+      if signal_type == SignalType.BUY:
+        # Для покупки: цена выше SMA10
+        return last_close > sma_10
+      else:  # SELL
+        # Для продажи: цена ниже SMA10
+        return last_close < sma_10
+
+    except Exception as e:
+      logger.error(f"Ошибка при проверке LTF условий: {e}")
+      return False
+
 
   async def _log_performance_stats(self):
     """
@@ -1659,6 +1763,8 @@ class IntegratedTradingSystem:
       # Периодическая очистка кэшей
       self._cache_cleanup_task = asyncio.create_task(self.cleanup_caches())
 
+      self._correlation_task = asyncio.create_task(self._update_portfolio_correlations())
+
       # Обновление статуса
       self.state_manager.set_status('running')
 
@@ -1707,3 +1813,163 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка при проверке аномалий для {symbol}: {e}")
       return []
+
+  async def display_ml_statistics(self):
+    """Выводит статистику ML моделей"""
+    if self.anomaly_detector:
+      stats = self.anomaly_detector.get_statistics()
+      logger.info(f"📊 Статистика детектора аномалий:")
+      logger.info(f"  Проверок: {stats['total_checks']}")
+      logger.info(f"  Обнаружено аномалий: {stats['anomalies_detected']}")
+      logger.info(f"  По типам: {stats['by_type']}")
+
+    if self.enhanced_ml_model and hasattr(self.enhanced_ml_model, 'performance_history'):
+      logger.info(f"📊 Статистика Enhanced ML:")
+      logger.info(f"  Обучена: {self.enhanced_ml_model.is_fitted}")
+      logger.info(
+        f"  Признаков: {len(self.enhanced_ml_model.selected_features) if self.enhanced_ml_model.selected_features else 0}")
+
+    async def _update_portfolio_correlations(self):
+      """Периодическое обновление корреляций портфеля"""
+      while self.is_running:
+        try:
+          # Ждем перед первым обновлением
+          await asyncio.sleep(300)  # 5 минут после старта
+
+          while self.is_running:
+            logger.info("Обновление корреляций портфеля...")
+
+            # Получаем все активные символы (позиции + мониторимые)
+            active_symbols = list(self.position_manager.open_positions.keys())
+            monitored_symbols = self.active_symbols[:20]  # Топ 20
+
+            all_symbols = list(set(active_symbols + monitored_symbols))
+
+            if len(all_symbols) >= 2:
+              # Анализируем корреляции
+              correlation_report = await self.correlation_manager.analyze_portfolio_correlation(
+                symbols=all_symbols,
+                timeframe=Timeframe.ONE_HOUR,
+                lookback_days=30
+              )
+
+              if correlation_report:
+                # Логируем важную информацию
+                risk_metrics = correlation_report.get('risk_metrics')
+                if risk_metrics:
+                  logger.info(f"📊 Метрики риска портфеля:")
+                  logger.info(f"  Волатильность портфеля: {risk_metrics.portfolio_volatility:.4f}")
+                  logger.info(f"  Коэффициент диверсификации: {risk_metrics.diversification_ratio:.2f}")
+                  logger.info(f"  Эффективное кол-во активов: {risk_metrics.effective_assets:.1f}")
+                  logger.info(f"  Макс. корреляция: {risk_metrics.max_correlation:.2f}")
+
+                # Проверяем рекомендации
+                recommendations = correlation_report.get('recommendations', {})
+                warnings = recommendations.get('warnings', [])
+
+                for warning in warnings:
+                  logger.warning(f"⚠️ Корреляция: {warning}")
+                  signal_logger.warning(f"КОРРЕЛЯЦИЯ: {warning}")
+
+                # Проверяем высокие корреляции
+                high_correlations = correlation_report.get('high_correlations', [])
+                for corr_data in high_correlations[:3]:  # Топ 3
+                  logger.warning(
+                    f"🔗 Высокая корреляция: {corr_data['symbol1']}-{corr_data['symbol2']} "
+                    f"= {corr_data['correlation']:.2f}"
+                  )
+
+            # Ждем до следующего обновления
+            await asyncio.sleep(self._correlation_update_interval)
+
+        except asyncio.CancelledError:
+          break
+        except Exception as e:
+          logger.error(f"Ошибка при обновлении корреляций: {e}")
+          await asyncio.sleep(300)  # Retry через 5 минут
+
+  async def _process_trading_signal_with_correlation_and_quality(self, signal: TradingSignal, symbol: str,
+                                                     market_data: pd.DataFrame):
+    """
+    Обработка торгового сигнала с учетом аномалий, корреляций и качества
+    """
+    # 0. Проверка на аномалии (добавляем это!)
+    if 'anomalies' in signal.metadata:
+        anomalies = signal.metadata['anomalies']
+        if anomalies:
+            # Уменьшаем размер позиции при аномалиях
+            max_severity = max(a['severity'] for a in anomalies)
+            if max_severity > 0.8:
+                logger.warning(f"Критическая аномалия для {symbol}, сигнал заблокирован")
+                return
+    # Стандартная фильтрация
+    is_approved, reason = await self.signal_filter.filter_signal(signal, market_data)
+    if not is_approved:
+      logger.info(f"Сигнал для {symbol} отклонен фильтром: {reason}")
+      return
+
+    # Проверка корреляций с открытыми позициями
+    open_symbols = list(self.position_manager.open_positions.keys())
+    if open_symbols:
+      should_block, block_reason = self.correlation_manager.should_block_signal_due_to_correlation(
+        symbol, open_symbols
+      )
+      if should_block:
+        logger.warning(f"Сигнал для {symbol} заблокирован: {block_reason}")
+        signal_logger.warning(f"КОРРЕЛЯЦИЯ: Сигнал {symbol} отклонен - {block_reason}")
+        return
+
+    # Проверка рисков
+    await self.update_account_balance()
+    if not self.account_balance or self.account_balance.available_balance_usdt <= 0:
+      return
+
+    # Получаем базовый размер позиции от риск-менеджера
+    risk_decision = await self.risk_manager.validate_signal(
+      signal=signal,
+      symbol=symbol,
+      account_balance=self.account_balance.available_balance_usdt,
+      market_data=market_data
+    )
+
+    if not risk_decision.get('approved'):
+      logger.info(f"Сигнал для {symbol} отклонен риск-менеджером: {risk_decision.get('reasons')}")
+      return
+
+    # Корректируем размер позиции с учетом корреляций
+    base_size = risk_decision.get('recommended_size', 0)
+
+    # Создаем словарь сигналов для корректировки
+    signals_dict = {symbol: {'size': base_size}}
+
+    # Получаем текущие размеры позиций
+    current_positions = {
+      sym: pos.get('quantity', 0)
+      for sym, pos in self.position_manager.open_positions.items()
+    }
+
+    # Корректируем размеры с учетом корреляций
+    adjusted_sizes = await self.correlation_manager.adjust_position_sizes_by_correlation(
+      signals_dict, current_positions
+    )
+
+    final_size = adjusted_sizes.get(symbol, base_size)
+
+    if final_size < base_size * 0.5:
+      logger.warning(
+        f"Размер позиции {symbol} сильно уменьшен из-за корреляций: "
+        f"{base_size:.4f} -> {final_size:.4f}"
+      )
+
+    # Обновляем сигнал с финальным размером
+    signal_dict = signal.to_dict()
+    signal_dict['metadata']['approved_size'] = final_size
+    signal_dict['metadata']['correlation_adjusted'] = final_size != base_size
+    signal_dict['metadata']['signal_time'] = datetime.now().isoformat()
+
+    # Ставим в очередь
+    pending_signals = self.state_manager.get_pending_signals()
+    pending_signals[symbol] = signal_dict
+    self.state_manager.update_pending_signals(pending_signals)
+
+    logger.info(f"Сигнал для {symbol} одобрен с учетом корреляций. Размер: {final_size:.4f}")

@@ -429,3 +429,16 @@ class PositionManager:
         return f"Трейлинг-стоп по ATR для SELL сработал: цена {current_price:.4f} > Stop {trailing_stop_price:.4f}"
 
     return None
+
+  async def monitor_single_position(self, symbol: str) -> bool:
+    """Мониторит одну конкретную позицию"""
+    if symbol not in self.open_positions:
+      return False
+
+    try:
+      # Проверяем условия выхода для конкретной позиции
+      await self.manage_open_positions(symbol)
+      return True
+    except Exception as e:
+      logger.error(f"Ошибка при мониторинге позиции {symbol}: {e}")
+      return False

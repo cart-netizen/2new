@@ -1274,6 +1274,32 @@ class ModelRetrainingManager:
       if hasattr(self, 'thread_pool'):
         self.thread_pool.shutdown(wait=True)
 
+  async def check_and_retrain_if_needed(self, symbols: List[str]):
+    """Проверяет необходимость переобучения и запускает если нужно"""
+    try:
+      # Простая логика - переобучаем если прошло больше 7 дней
+      last_training_file = "ml_models/last_training.json"
+
+      need_retrain = True
+      if os.path.exists(last_training_file):
+        with open(last_training_file, 'r') as f:
+          last_training = json.load(f)
+          last_date = datetime.fromisoformat(last_training['date'])
+          if (datetime.now() - last_date).days < 7:
+            need_retrain = False
+
+      if need_retrain:
+        logger.info("Запуск переобучения моделей...")
+        # Здесь вызов методов переобучения
+        await self.retrain_models(symbols)
+
+        # Сохраняем дату обучения
+        with open(last_training_file, 'w') as f:
+          json.dump({'date': datetime.now().isoformat()}, f)
+
+    except Exception as e:
+      logger.error(f"Ошибка при проверке необходимости переобучения: {e}")
+
   def _train_and_evaluate_model_sync(self, features: pd.DataFrame, labels: pd.Series) -> float:
     """
     СИНХРОННАЯ функция, выполняющая CPU-затратные операции.

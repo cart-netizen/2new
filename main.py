@@ -1,4 +1,5 @@
 import asyncio
+import os
 import signal  # Для корректной остановки
 import sys
 from utils.logging_config import setup_logging, get_logger, setup_signal_logger
@@ -33,6 +34,22 @@ async def main():
   # Обработчик для корректного завершения
   # loop = asyncio.get_event_loop()
   stop_event = asyncio.Event()
+
+  if not os.path.exists("ml_models/anomaly_detector.pkl"):
+    logger.info("Обучение детектора аномалий...")
+    # Получаем топ символы для обучения
+    await trading_system.connector.sync_time()
+    symbols = await trading_system.data_fetcher.get_active_symbols_by_volume(10)
+    if symbols:
+      await trading_system.train_anomaly_detector(symbols[:5], lookback_days=7)
+
+  if not os.path.exists("ml_models/enhanced_model.pkl"):
+    logger.info("Обучение Enhanced ML модели...")
+    # Получаем топ символы для обучения
+    await trading_system.connector.sync_time()
+    symbols = await trading_system.data_fetcher.get_active_symbols_by_volume(10)
+    if symbols:
+      await trading_system.train_enhanced_ml_model(symbols[:5], lookback_days=7)
 
   def signal_handler():
     logger.info("Получен сигнал остановки. Завершение работы...")

@@ -402,3 +402,67 @@ class AdvancedDatabaseManager:
     # Используем наш универсальный метод _execute для выполнения запроса
     closed_trades = await self._execute(query, (limit,), fetch='all')
     return closed_trades
+
+  async def get_all_open_trades(self) -> List[Dict]:
+      """Получает все открытые сделки"""
+      query = "SELECT * FROM trades WHERE status = 'OPEN'"
+      return await self._execute(query, fetch='all') or []
+
+  async def update_trade_as_closed(self, trade_id: int, close_price: float,
+                                   pnl: float, commission: float = 0.0,
+                                   close_timestamp: Optional[datetime] = None):
+    """Обновляет сделку как закрытую"""
+    if close_timestamp is None:
+      close_timestamp = datetime.now()
+
+    query = """
+        UPDATE trades 
+        SET status = 'CLOSED',
+            close_price = ?,
+            close_timestamp = ?,
+            profit_loss = ?,
+            commission = ?
+        WHERE id = ?
+    """
+
+    result = await self._execute(
+      query,
+      (close_price, close_timestamp, pnl, commission, trade_id)
+    )
+
+    # Очищаем кэш
+    self.clear_cache("open_positions")
+
+    if result is not None:
+      logger.info(f"Сделка {trade_id} закрыта. PnL: {pnl:.4f}, Комиссия: {commission:.4f}")
+
+    return result is not None
+
+  async def force_close_trade(self, trade_id: int, close_price: float, reason: str = "Forced closure") -> bool:
+    """
+    Принудительно закрывает сделку в БД с нулевым PnL.
+    Используется для "зомби-позиций".
+    """
+    query = """
+        UPDATE trades
+        SET status = 'CLOSED',
+            close_price = ?,
+            close_timestamp = ?,
+            profit_loss = 0,
+            metadata = json_set(COALESCE(metadata, '{}'), '$.close_reason', ?)
+        WHERE id = ?
+    """
+
+    result = await self._execute(
+      query,
+      (close_price, datetime.now(), reason, trade_id)
+    )
+
+    # Очищаем кэш
+    self.clear_cache("open_positions")
+
+    if result is not None:
+      logger.warning(f"Сделка {trade_id} принудительно закрыта. Причина: {reason}")
+      return True
+
+    return False

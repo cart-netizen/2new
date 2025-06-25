@@ -99,33 +99,6 @@ class EnsembleMLStrategy(BaseStrategy):
       current_price = float(data['close'].iloc[-1])
       stop_loss, take_profit = 0.0, 0.0
 
-      # # Получаем настройки из конфига, который мы передали в __init__
-      # trade_settings = self.settings.get('trade_settings', {})
-      # leverage = trade_settings.get('leverage', 10)
-      # sl_roi_pct = trade_settings.get('roi_stop_loss_pct', 20.0)
-      # tp_roi_pct = trade_settings.get('roi_take_profit_pct', 60.0)
-      #
-      # if leverage <= 0: leverage = 1  # Защита от деления на ноль
-
-      # # Рассчитываем процентное изменение цены для достижения нужного ROI
-      # sl_price_change_pct = (sl_roi_pct / 100) / leverage
-      # tp_price_change_pct = (tp_roi_pct / 100) / leverage
-
-      # Рассчитываем процентное изменение цены для достижения нужного ROI
-      # sl_price_change_pct = (sl_roi_pct / 100.0) / leverage
-      # tp_price_change_pct = (tp_roi_pct / 100.0) / leverage
-
-      # Для ПОКУПКИ (BUY): Stop-Loss < Цена < Take-Profit
-      # if signal_type == SignalType.BUY:
-      #   stop_loss = current_price * (1 - sl_price_change_pct)
-      #   take_profit = current_price * (1 + tp_price_change_pct)
-      # # Для ПРОДАЖИ (SELL): Take-Profit < Цена < Stop-Loss
-      # else:  # signal_type == SignalType.SELL
-      #   stop_loss = current_price * (1 + sl_price_change_pct)
-      #   take_profit = current_price * (1 - tp_price_change_pct)
-
-
-      # --- КОНЕЦ ФИНАЛЬНОГО БЛОКА ---
 
       return TradingSignal(
         signal_type=signal_type,

@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 
 import pandas as pd
 import numpy as np
@@ -797,13 +798,15 @@ class AdvancedFeatureEngineer:
                 logger.warning("После очистки данные стали пустыми")
                 return None, None
 
-            # # 8. Создание меток
-            # logger.info("Создание меток...")
-            # labels = self.create_labels(clean_data)
+            # 8. Создание меток
+            logger.info("Создание меток для обучения...")
+            labels = self.create_labels(clean_data)
 
             # 9. Выбор только числовых признаков
             logger.info("Выбор числовых признаков для нормализации...")
             numeric_feature_cols = self.select_numeric_features(clean_data)
+            features_df = clean_data[numeric_feature_cols].copy()
+
 
             if not numeric_feature_cols:
                 logger.error("Не найдено числовых признаков для обучения модели")
@@ -827,14 +830,25 @@ class AdvancedFeatureEngineer:
                 logger.error("После преобразования типов не осталось признаков")
                 return None, None
 
+            # 10. Выравнивание признаков и меток ДО нормализации
+            logger.info("Выравнивание признаков и меток по временному индексу...")
+            common_index = features_df.index.intersection(labels.dropna().index)
+
+            if common_index.empty:
+                logger.error("Нет общих индексов после создания меток. Проверьте логику create_labels.")
+                return None, None
+
+            features_aligned = features_df.loc[common_index]
+            labels_aligned = labels.loc[common_index]
+
             # 11. Нормализация признаков
             logger.info("Нормализация признаков...")
             try:
                 if not self.is_fitted:
                     features_scaled = pd.DataFrame(
-                        self.scaler.fit_transform(features_df),
-                        columns=features_df.columns,
-                        index=features_df.index
+                        self.scaler.fit_transform(features_aligned),
+                        columns=features_aligned.columns,
+                        index=features_aligned.index  # <--- Важно: сохраняем индекс
                     )
                     self.is_fitted = True
                 else:
@@ -1049,7 +1063,7 @@ class AdvancedFeatureEngineer:
                 '15m': Timeframe.FIFTEEN_MINUTES, '30m': Timeframe.THIRTY_MINUTES,
                 '1h': Timeframe.ONE_HOUR, '4h': Timeframe.FOUR_HOURS, '1d': Timeframe.ONE_DAY
             }
-            tasks = {name: data_fetcher.get_historical_candles(symbol, tf, limit=1000) for name, tf in
+            tasks = {name: data_fetcher.get_historical_candles(symbol, tf, limit=2000) for name, tf in
                      timeframes_to_fetch.items()}
             all_data_dict = dict(zip(tasks.keys(), await asyncio.gather(*tasks.values())))
 
@@ -1277,3 +1291,130 @@ def create_regression_target(self, data: pd.DataFrame, target_col: str = 'volati
         return data[target_col].shift(-self.prediction_horizon)
 
 
+class UnifiedFeatureEngineer:
+    """
+    Единый генератор признаков для всех стратегий
+    Обеспечивает консистентность признаков между стратегиями
+    """
+
+    def __init__(self):
+        self.feature_engineer = AdvancedFeatureEngineer()
+        self.feature_cache = {}
+        self.cache_ttl = 300  # 5 минут
+
+    async def get_unified_features(self, symbol: str, data: pd.DataFrame,
+                                   data_fetcher=None, include_multiframe: bool = True) -> pd.DataFrame:
+        """
+        Создает унифицированный набор признаков для всех стратегий
+
+        Args:
+            symbol: Торговый символ
+            data: Основные данные (OHLCV)
+            data_fetcher: Для мультитаймфреймовых признаков
+            include_multiframe: Включать ли мультитаймфреймовые признаки
+
+        Returns:
+            DataFrame с полным набором признаков
+        """
+        cache_key = f"{symbol}_{len(data)}_{data.index[-1]}"
+
+        # Проверяем кэш
+        if cache_key in self.feature_cache:
+            cached_time, cached_features = self.feature_cache[cache_key]
+            if (datetime.now() - cached_time).seconds < self.cache_ttl:
+                return cached_features
+
+        try:
+            # 1. Базовые технические индикаторы
+            features = self.feature_engineer.add_technical_indicators(data.copy())
+
+            # 2. Лаговые признаки
+            feature_cols = [col for col in features.columns
+                            if col not in ['open', 'high', 'low', 'close', 'volume', 'timestamp']]
+            features = self.feature_engineer.create_lagged_features(features, feature_cols[:10])
+
+            # 3. Кросс-секционные признаки
+            features = self.feature_engineer.create_cross_sectional_features(features)
+
+            # 4. Режимные признаки
+            features = self.feature_engineer.create_regime_features(features)
+
+            # 5. Мультитаймфреймовые признаки (если нужно и доступно)
+            if include_multiframe and data_fetcher:
+                try:
+                    mtf_features, _ = await self.feature_engineer.create_multi_timeframe_features(
+                        symbol, data_fetcher
+                    )
+                    if mtf_features is not None and not mtf_features.empty:
+                        # Объединяем признаки
+                        features = features.merge(
+                            mtf_features,
+                            left_index=True,
+                            right_index=True,
+                            how='left'
+                        )
+                except Exception as e:
+                    logger.warning(f"Не удалось создать мультитаймфреймовые признаки: {e}")
+
+            # 6. Нормализация признаков
+            features = self._normalize_features(features)
+
+            # 7. Удаление NaN
+            features = features.fillna(method='ffill').fillna(0)
+
+            # Кэшируем результат
+            self.feature_cache[cache_key] = (datetime.now(), features)
+
+            # Ограничиваем размер кэша
+            if len(self.feature_cache) > 100:
+                oldest_key = min(self.feature_cache.keys(),
+                                 key=lambda k: self.feature_cache[k][0])
+                del self.feature_cache[oldest_key]
+
+            logger.debug(f"Создано {len(features.columns)} унифицированных признаков для {symbol}")
+            return features
+
+        except Exception as e:
+            logger.error(f"Ошибка создания унифицированных признаков: {e}")
+            return data
+
+    def _normalize_features(self, features: pd.DataFrame) -> pd.DataFrame:
+        """Нормализует признаки для консистентности"""
+        # Определяем типы признаков
+        price_features = [col for col in features.columns if any(
+            x in col for x in ['price', 'sma', 'ema', 'high', 'low', 'close', 'open']
+        )]
+
+        ratio_features = [col for col in features.columns if any(
+            x in col for x in ['ratio', 'percent', 'pct', 'rsi', 'cci']
+        )]
+
+        # Нормализуем ценовые признаки относительно текущей цены
+        if 'close' in features.columns:
+            current_price = features['close'].iloc[-1]
+            for col in price_features:
+                if col != 'close' and col in features.columns:
+                    features[f'{col}_norm'] = features[col] / current_price
+
+        # Ограничиваем экстремальные значения
+        for col in features.columns:
+            if features[col].dtype in ['float64', 'float32', 'int64', 'int32']:
+                # Winsorize на уровне 1% и 99%
+                lower = features[col].quantile(0.01)
+                upper = features[col].quantile(0.99)
+                features[col] = features[col].clip(lower=lower, upper=upper)
+
+        return features
+
+    def get_feature_importance_ranking(self) -> List[str]:
+        """Возвращает ранжированный список важности признаков"""
+        # Это может быть обновлено на основе результатов ML моделей
+        return [
+            'rsi_14', 'macd_histogram', 'bb_percent', 'atr_ratio',
+            'volume_ratio', 'momentum_10', 'adx', 'mfi',
+            'trend_strength', 'volatility_20'
+        ]
+
+
+# Создаем глобальный экземпляр
+unified_feature_engineer = UnifiedFeatureEngineer()

@@ -55,11 +55,10 @@ class StateManager:
 
     # --- Публичные методы (теперь они СИНХРОННЫЕ) ---
 
-    def set_status(self, status: str): # <--- Убираем аргумент pid
-        """Устанавливает статус бота (running/stopped)."""
+    def set_status(self, status: str, pid: Optional[int] = None):
+        """Устанавливает статус бота (running/stopped) и его PID."""
         state = self._read_state()
-        # PID больше не нужен в файле состояния
-        state['bot_status'] = {'status': status}
+        state['bot_status'] = {'status': status, 'pid': pid}
         self._write_state(state)
 
     def get_status(self) -> Dict[str, Any]:
@@ -77,16 +76,6 @@ class StateManager:
         metrics_dict = self._read_state().get('latest_metrics')
         return RiskMetrics(**metrics_dict) if metrics_dict else None
 
-    # async def initialize_state(self):
-    #     """Создает таблицу для хранения состояния, если ее нет."""
-    #     await self._execute('''
-    #         CREATE TABLE IF NOT EXISTS bot_state (
-    #             key TEXT PRIMARY KEY,
-    #             value TEXT
-    #         )
-    #     ''')
-    #     # Устанавливаем начальное состояние
-    #     await self.set_status('stopped')
     def update_open_positions(self, positions: Dict[str, Any]):
         """Обновляет список открытых позиций в файле состояния."""
         state = self._read_state()
@@ -134,3 +123,24 @@ class StateManager:
         if 'command' in state:
             del state['command']
             self._write_state(state)
+
+    def get_custom_data(self, key: str) -> Any:
+        """Получает пользовательские данные по ключу"""
+        try:
+            state = self._read_state()
+            custom_data = state.get('custom_data', {})
+            return custom_data.get(key)
+        except Exception as e:
+            logger.error(f"Ошибка получения custom_data[{key}]: {e}")
+            return None
+
+    def set_custom_data(self, key: str, value: Any):
+        """Устанавливает пользовательские данные"""
+        try:
+            state = self._read_state()
+            if 'custom_data' not in state:
+                state['custom_data'] = {}
+            state['custom_data'][key] = value
+            self._write_state(state)
+        except Exception as e:
+            logger.error(f"Ошибка установки custom_data[{key}]: {e}")

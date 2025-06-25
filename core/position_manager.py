@@ -131,6 +131,13 @@ class PositionManager:
     ФИНАЛЬНАЯ ВЕРСИЯ: Управляет открытыми позициями, используя
     иерархию проверок: SL/TP -> PSAR -> Stop-and-Reverse.
     """
+    if not hasattr(self, '_last_order_check'):
+      self._last_order_check = datetime.now()
+
+    if (datetime.now() - self._last_order_check).seconds > 60:  # Каждую минуту
+      await self.track_pending_orders()
+      self._last_order_check = datetime.now()
+
     if not self.open_positions:
       return
 
@@ -276,6 +283,26 @@ class PositionManager:
                   trade_id=trade['id'], close_price=close_price, pnl=net_pnl,
                   commission=commission, close_timestamp=close_timestamp
                 )
+
+                integrated_system = getattr(self.trade_executor, 'integrated_system', None)
+                if integrated_system and hasattr(integrated_system, 'process_trade_feedback'):
+                  try:
+                    trade_result = {
+                      'strategy_name': trade.get('strategy_name', 'Unknown'),
+                      'profit_loss': net_pnl,
+                      'entry_price': open_price,
+                      'exit_price': close_price,
+                      'regime': trade.get('metadata', {}).get('regime', 'unknown') if isinstance(trade.get('metadata'),
+                                                                                                 dict) else 'unknown',
+                      'confidence': trade.get('confidence', 0.5),
+                      'entry_features': trade.get('metadata', {}).get('features', {}) if isinstance(
+                        trade.get('metadata'), dict) else {}
+                    }
+
+                    await integrated_system.process_trade_feedback(symbol, trade['id'], trade_result)
+                    logger.info(f"Обратная связь отправлена для {symbol}")
+                  except Exception as e:
+                    logger.error(f"Ошибка отправки обратной связи: {e}")
 
                 # Удаляем из кэша, если она там была
                 if symbol in self.open_positions:
@@ -442,3 +469,18 @@ class PositionManager:
     except Exception as e:
       logger.error(f"Ошибка при мониторинге позиции {symbol}: {e}")
       return False
+
+  async def track_pending_orders(self):
+    """Отслеживает статус pending ордеров"""
+    # Получаем все открытые сделки
+    open_trades = await self.db_manager.get_all_open_trades()
+
+    for trade in open_trades:
+      if trade.get('order_id'):
+        # Используем метод из trade_executor для проверки статуса
+        await self.trade_executor.update_trade_status_from_exchange(
+          trade['order_id'],
+          trade['symbol']
+        )
+
+    logger.debug("Проверка статусов ордеров завершена")

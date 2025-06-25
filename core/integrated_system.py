@@ -1,20 +1,28 @@
 import asyncio
 import json
 from contextlib import suppress
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
+import sys
+from core.adaptive_strategy_selector import AdaptiveStrategySelector
 from core.indicators import crossover_series, crossunder_series
+from core.market_regime_detector import MarketRegimeDetector, RegimeCharacteristics, MarketRegime
+from ml.feature_engineering import unified_feature_engineer
 from ml.volatility_system import VolatilityPredictor, VolatilityPredictionSystem
 import joblib
 from config.config_manager import ConfigManager
 from core.enums import Timeframe
 from core.position_manager import PositionManager
 from core.signal_filter import SignalFilter
-from ml.lorentzian_classifier import LorentzianClassifier
+from shadow_trading.signal_tracker import DatabaseMonitor
+from strategies.GridStrategy import GridStrategy
+from shadow_trading.shadow_trading_manager import ShadowTradingManager, FilterReason
+
+
 from strategies.dual_thrust_strategy import DualThrustStrategy
 from strategies.ensemble_ml_strategy import EnsembleMLStrategy
 from strategies.ichimoku_strategy import IchimokuStrategy
@@ -29,7 +37,7 @@ from core.risk_manager import AdvancedRiskManager # Будет использо�
 from core.trade_executor import TradeExecutor # Будет использоваться позже
 from data.database_manager import AdvancedDatabaseManager # Будет использоваться позже
 from core.enums import Timeframe, SignalType  # Для запроса свечей
-from core.schemas import RiskMetrics, TradingSignal  # Для отображения баланса
+from core.schemas import RiskMetrics, TradingSignal, GridSignal  # Для отображения баланса
 from ml.model_retraining_task import ModelRetrainingManager
 from data.state_manager import StateManager
 import os
@@ -38,13 +46,14 @@ from ml.enhanced_ml_system import EnhancedEnsembleModel, MLPrediction
 import logging # <--- Добавьте импорт
 from core.correlation_manager import CorrelationManager, PortfolioRiskMetrics
 from core.signal_quality_analyzer import SignalQualityAnalyzer, QualityScore
-
+# from shadow_trading import EnhancedShadowTradingManager
+import time
 signal_logger = logging.getLogger('SignalTrace') # <--- Получаем наш спец. логгер
 logger = get_logger(__name__)
 
 
 class IntegratedTradingSystem:
-  def __init__(self):
+  def __init__(self, db_manager: AdvancedDatabaseManager = None, config: Dict[str, Any] = None):
     logger.info("Инициализация IntegratedTradingSystem...")
 
     # 1. Загружаем конфигурацию
@@ -54,6 +63,8 @@ class IntegratedTradingSystem:
     # 2. Инициализируем основные компоненты
     self.connector = BybitConnector()
     self.db_manager = AdvancedDatabaseManager(settings.DATABASE_PATH)
+    self.db_monitor = DatabaseMonitor(self.db_manager)
+    self._monitoring_tasks = []
     self.state_manager = StateManager()
     self.data_fetcher = DataFetcher(
       self.connector,
@@ -74,15 +85,7 @@ class IntegratedTradingSystem:
     self._anomaly_check_interval = 300  # Проверка аномалий каждые 5 минут
     self._last_anomaly_check = {}
 
-    # Загрузка детектора аномалий
-    try:
-      self.anomaly_detector = MarketAnomalyDetector.load("ml_models/anomaly_detector.pkl")
-      logger.info("✅ Детектор аномалий успешно загружен")
-    except FileNotFoundError:
-      logger.warning("Файл детектора аномалий не найден. Будет использоваться эвристический режим")
-      self.anomaly_detector = MarketAnomalyDetector()
-    except Exception as e:
-      logger.error(f"Ошибка при загрузке детектора аномалий: {e}")
+
 
     # Загрузка расширенной ML модели
     try:
@@ -96,8 +99,26 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка при загрузке расширенной ML модели: {e}")
 
+    # Загрузка детектора аномалий
+    try:
+      self.anomaly_detector = MarketAnomalyDetector.load("ml_models/anomaly_detector.pkl")
+      logger.info("✅ Детектор аномалий успешно загружен")
+    except FileNotFoundError:
+      logger.warning("Файл детектора аномалий не найден. Будет использоваться эвристический режим")
+      self.anomaly_detector = MarketAnomalyDetector()
+    except Exception as e:
+      logger.error(f"Ошибка при загрузке детектора аномалий: {e}")
+
+
+
     self.strategy_manager = StrategyManager()
     self.strategy_manager.add_strategy(ml_strategy)
+
+    self.adaptive_selector = AdaptiveStrategySelector(
+      db_manager=self.db_manager,
+      min_trades_for_evaluation=10
+    )
+    self._evaluation_task: Optional[asyncio.Task] = None
 
     ichimoku_strategy = IchimokuStrategy()
     # "Регистрируем" ее в менеджере стратегий
@@ -110,6 +131,9 @@ class IntegratedTradingSystem:
     mean_reversion_strategy = MeanReversionStrategy()
     self.strategy_manager.add_strategy(mean_reversion_strategy)
 
+    grid_strategy = GridStrategy(config=self.config)
+    self.strategy_manager.add_strategy(grid_strategy)
+
     momentum_strategy = MomentumStrategy()
     self.strategy_manager.add_strategy(momentum_strategy)
     self.volatility_predictor: Optional[VolatilityPredictor] = None
@@ -121,6 +145,11 @@ class IntegratedTradingSystem:
     except FileNotFoundError:
       logger.warning("Файл volatility_system.pkl не найден. SL/TP будут рассчитываться по стандартной схеме.")
     # --- КОНЕЦ БЛОКА ---
+
+    #ДОБАВИТЬ: Enhanced Shadow Trading
+    self.shadow_trading = None
+    self.shadow_trading_enabled = True  # Можно вынести в конфиг
+
     self.risk_manager = AdvancedRiskManager(
       db_manager=self.db_manager,
       settings=self.config,
@@ -132,8 +161,10 @@ class IntegratedTradingSystem:
       connector=self.connector,
       db_manager=self.db_manager,
       data_fetcher=self.data_fetcher,
-      settings=self.config
+      settings=self.config,
+      risk_manager=self.risk_manager
     )
+    self.trade_executor.integrated_system = self
 
     self.signal_filter = SignalFilter(
       settings=strategy_settings,
@@ -168,6 +199,13 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка при загрузке предиктора волатильности: {e}")
     # --- КОНЕЦ НОВОГО БЛОКА ---
+
+    self.market_regime_detector = MarketRegimeDetector(self.data_fetcher)
+    # Флаги для включения/выключения ML моделей (оставляем как есть)
+    self.use_enhanced_ml = True
+    self.use_base_ml = True
+    self._last_regime_check = {}
+    self._regime_check_interval = 300
 
     # Инициализация корреляционного менеджера
     self.correlation_manager = CorrelationManager(self.data_fetcher)
@@ -212,253 +250,439 @@ class IntegratedTradingSystem:
 
   async def _monitor_symbol_for_entry(self, symbol: str):
     """
-    ФИНАЛЬНАЯ ВЕРСИЯ: Определяет режим рынка и использует соответствующий
-    ансамбль стратегий для генерации и подтверждения сигнала.
+    ОБНОВЛЕННАЯ ВЕРСИЯ: Использует MarketRegimeDetector
     """
-    logger.debug(f"Поиск сигнала на HTF для символа: {symbol}")
-    logger.info(f"🔍 Начало стандартного мониторинга для {symbol}")
+    logger.debug(f"Поиск сигнала для символа: {symbol}")
 
     try:
-      htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=300)
-      if htf_data.empty or len(htf_data) < 52:  # 52 нужно для Ichimoku
+      # 1. Получаем рыночный режим
+      regime_characteristics = await self.get_market_regime(symbol)
+      if not regime_characteristics:
+        logger.warning(f"Не удалось определить режим для {symbol}")
         return
 
-      # --- 1. ОПРЕДЕЛЕНИЕ РЕЖИМА РЫНКА ПО ADX ---
-      adx_data = ta.adx(htf_data['high'], htf_data['low'], htf_data['close'], length=14)
-      last_adx = adx_data.iloc[-1, 0] if adx_data is not None and not adx_data.empty else 25
+      # Проверяем необходимость адаптации стратегий
+      await self.check_strategy_adaptation(symbol)
 
+      # 2. Получаем оптимальные параметры для режима
+      regime_params = self.market_regime_detector.get_regime_parameters(symbol)
+
+      # 3. Получаем данные для стратегий
+      htf_data = await self.data_fetcher.get_historical_candles(
+        symbol, Timeframe.ONE_HOUR, limit=300
+      )
+
+      unified_features = await unified_feature_engineer.get_unified_features(
+        symbol, htf_data, self.data_fetcher, include_multiframe=True
+      )
+
+      if htf_data.empty or len(htf_data) < 52:
+        return
+
+      # 4. Проверяем, стоит ли вообще торговать в этом режиме
+      if regime_characteristics.confidence < regime_params.min_signal_quality:
+        logger.info(f"Пропускаем {symbol}: низкая уверенность режима "
+                    f"({regime_characteristics.confidence:.2f} < {regime_params.min_signal_quality})")
+        return
+
+      # 5. Собираем сигналы от рекомендованных стратегий
+      signals = []
+
+      for strategy_name in regime_params.recommended_strategies:
+        # Проверяем флаги для ML стратегий
+        if strategy_name == "Live_ML_Strategy" and not self.use_base_ml:
+          continue
+
+        # Проверяем адаптивную активность стратегии
+        if not self.adaptive_selector.should_activate_strategy(
+            strategy_name, regime_characteristics.primary_regime.value
+        ):
+          logger.debug(f"Стратегия {strategy_name} отключена адаптивным селектором")
+          continue
+
+        # Пропускаем стратегии из avoided_strategies
+        if strategy_name in regime_params.avoided_strategies:
+          continue
+
+        try:
+          # Используем унифицированные признаки для ML стратегий
+          if "ML" in strategy_name:
+            signal = await self.strategy_manager.get_signal(symbol, unified_features, strategy_name)
+          else:
+            signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
+
+          if signal and signal.signal_type != SignalType.HOLD:
+            # Применяем адаптивный вес
+            weight = self.adaptive_selector.get_strategy_weight(
+              strategy_name, regime_characteristics.primary_regime.value
+            )
+            signal.confidence *= weight
+
+            signals.append((strategy_name, signal))
+            logger.info(f"Сигнал от {strategy_name} для {symbol}: {signal.signal_type.value}, "
+                        f"вес={weight:.2f}")
+        except Exception as e:
+          logger.error(f"Ошибка получения сигнала от {strategy_name}: {e}")
+
+      # 6. Используем Enhanced ML для финального решения (если включена)
       final_signal = None
 
-      # --- 2. ЛОГИКА ДЛЯ ТРЕНДОВОГО РЕЖИМА ---
-      if last_adx > 25:
-        logger.debug(f"Режим для {symbol}: ТРЕНД (ADX={last_adx:.2f}). Используем ансамбль трендовых стратегий.")
-        # В сильном тренде используем ML и подтверждающие
-        target_strategy_name = "Live_ML_Strategy"
-        # Но можно сначала проверить на сверхсильный импульс
-        impulse_signal = await self.strategy_manager.get_signal(symbol, htf_data, "Momentum_Spike")
-        if impulse_signal:
-          final_signal = impulse_signal
+      if self.use_enhanced_ml and self.enhanced_ml_model and signals:
+        try:
+          # Подготавливаем данные для enhanced модели
+          enhanced_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+
+          if enhanced_prediction:
+            proba, ml_prediction = enhanced_prediction
+
+            # Фильтруем сигналы на основе enhanced модели
+            for strategy_name, signal in signals:
+              if ml_prediction.signal_type == signal.signal_type:
+                final_signal = signal
+                # Корректируем уверенность
+                final_signal.confidence = min(0.95,
+                                              (signal.confidence + ml_prediction.probability) / 2)
+                logger.info(f"✅ Enhanced ML подтвердила сигнал {strategy_name} для {symbol}")
+                break
+        except Exception as e:
+          logger.error(f"Ошибка Enhanced ML для {symbol}: {e}")
+
+      # 7. Если Enhanced ML не используется или не дала результат
+      if not final_signal and signals:
+        best_signal = max(signals, key=lambda x: x[1].confidence)
+        final_signal = best_signal[1]
+        logger.info(f"Выбран сигнал от {best_signal[0]} для {symbol}")
+
+      # 8. Применяем параметры режима к сигналу
+      if final_signal:
+        # Корректируем на основе режима
+        original_confidence = final_signal.confidence
+        final_signal.confidence *= regime_params.position_size_multiplier
+
+        # Добавляем метаданные о режиме
+        final_signal.metadata = {
+          'regime': regime_characteristics.primary_regime.value,
+          'regime_confidence': regime_characteristics.confidence,
+          'regime_strength': self.market_regime_detector.get_regime_strength_score(regime_characteristics),
+          'use_limit_orders': regime_params.use_limit_orders,
+          'sl_multiplier': regime_params.stop_loss_multiplier,
+          'tp_multiplier': regime_params.take_profit_multiplier
+        }
+
+        logger.info(f"Финальный сигнал для {symbol}: {final_signal.signal_type.value}, "
+                    f"уверенность: {original_confidence:.2f} -> {final_signal.confidence:.2f} "
+                    f"(режим: {regime_characteristics.primary_regime.value})")
+
+        # Проверяем минимальную уверенность после корректировок
+        if final_signal.confidence >= regime_params.min_signal_quality:
+          await self._process_trading_signal(symbol, final_signal)
         else:
-
-          # Получаем базовый сигнал от ML-модели
-          ml_signal = await self.strategy_manager.get_signal(symbol, htf_data, "Live_ML_Strategy")
-          if ml_signal and ml_signal.signal_type != SignalType.HOLD:
-            # Используем Ichimoku и Dual Thrust как подтверждение
-            ichimoku_signal = await self.strategy_manager.get_signal(symbol, htf_data, "Ichimoku_Cloud")
-            dual_thrust_signal = await self.strategy_manager.get_signal(symbol, htf_data, "Dual_Thrust")
-
-            if (ichimoku_signal and ichimoku_signal.signal_type == ml_signal.signal_type) and \
-                (dual_thrust_signal and dual_thrust_signal.signal_type == ml_signal.signal_type):
-
-              logger.info(f"✅✅✅ ТРОЙНОЕ ПОДТВЕРЖДЕНИЕ для {symbol}! Сигнал: {ml_signal.signal_type.value}")
-              final_signal = ml_signal
-              final_signal.confidence = 0.95  # Повышаем уверенность до почти максимальной
-            else:
-              logger.info(f"Сигнал от ML для {symbol} не был подтвержден другими стратегиями. Вход отменен.")
-
-      # --- 3. ЛОГИКА ДЛЯ ФЛЭТОВОГО РЕЖИМА ---
-      elif last_adx < 20:
-        logger.debug(f"Режим для {symbol}: ФЛЭТ (ADX={last_adx:.2f}). Используем контртрендовую стратегию.")
-        final_signal = await self.strategy_manager.get_signal(symbol, htf_data, "Mean_Reversion_BB")
-
-      # --- 4. ЕСЛИ РЕЖИМ НЕОПРЕДЕЛЕННЫЙ, НИЧЕГО НЕ ДЕЛАЕМ ---
-      else:
-        logger.debug(f"Режим для {symbol}: НЕОПРЕДЕЛЕННЫЙ (ADX={last_adx:.2f}). Пропускаем.")
-        return
-
-      # --- 5. ЕСЛИ ПО ИТОГУ ЕСТЬ ОДОБРЕННЫЙ СИГНАЛ, ОБРАБАТЫВАЕМ ЕГО ---
-      if final_signal and final_signal.signal_type != SignalType.HOLD:
-        signal_logger.info(f"====== СИГНАЛ ДЛЯ {symbol} ПОЛУЧЕН ({final_signal.strategy_name}) ======")
-        signal_logger.info(
-          f"Тип: {final_signal.signal_type.value}, Уверенность: {final_signal.confidence:.2f}, Цена: {final_signal.price}")
-
-        # # --- НОВЫЙ БЛОК: ЦЕНТРАЛИЗОВАННЫЙ РАСЧЕТ SL/TP НА ОСНОВЕ ROI ---
-        # trade_settings = self.config.get('trade_settings', {})
-        # leverage = trade_settings.get('leverage', 10)
-        # sl_roi_pct = trade_settings.get('roi_stop_loss_pct', 5.0)
-        # tp_roi_pct = trade_settings.get('roi_take_profit_pct', 60.0)
-        # if leverage <= 0: leverage = 1
-        #
-        # sl_price_change_pct = (sl_roi_pct / 100.0) / leverage
-        # tp_price_change_pct = (tp_roi_pct / 100.0) / leverage
-        #
-        # current_price = final_signal.price
-        #
-        # if final_signal.signal_type == SignalType.BUY:
-        #   final_signal.stop_loss = current_price * (1 - sl_price_change_pct)
-        #   final_signal.take_profit = current_price * (1 + tp_price_change_pct)
-        # else:  # SELL
-        #   final_signal.stop_loss = current_price * (1 + sl_price_change_pct)
-        #   final_signal.take_profit = current_price * (1 - tp_price_change_pct)
-        #
-        # logger.info(
-        #   f"Для сигнала {final_signal.signal_type.value} по {symbol} рассчитаны SL={final_signal.stop_loss:.4f}, TP={final_signal.take_profit:.4f}")
-        # # --- КОНЕЦ НОВОГО БЛОКА ---
-
-
-
-        risk_decision = await self.risk_manager.validate_signal(
-          signal=final_signal, symbol=symbol, account_balance=self.account_balance.available_balance_usdt, market_data=htf_data
-        )
-        if not risk_decision.get('approved'):
-          logger.info(f"СИГНАЛ для {symbol} ОТКЛОНЕН риск-менеджером. Причины: {risk_decision.get('reasons')}")
-          signal_logger.warning(f"РИСК-МЕНЕДЖЕР: ОТКЛОНЕНО. Причины: {risk_decision.get('reasons')}")
-          return
-
-        # Ставим одобренный сигнал в очередь на поиск точки входа
-        pending_signals = self.state_manager.get_pending_signals()
-        signal_dict = final_signal.to_dict()
-        signal_dict['metadata']['approved_size'] = risk_decision.get('recommended_size', 0)
-        signal_dict['metadata']['signal_time'] = datetime.now().isoformat()
-        pending_signals[symbol] = signal_dict
-        self.state_manager.update_pending_signals(pending_signals)
-
-        logger.info(f"СИГНАЛ HTF для {symbol} ОДОБРЕН и поставлен в очередь на поиск точки входа.")
-        signal_logger.info(f"РИСК-МЕНЕДЖЕР: ОДОБРЕНО. Размер: {risk_decision.get('recommended_size'):.4f}")
-        signal_logger.info(f"====== СИГНАЛ ДЛЯ {symbol} ПОСТАВЛЕН В ОЧЕРЕДЬ ======\n")
+          logger.info(f"Сигнал отклонен: уверенность {final_signal.confidence:.2f} "
+                      f"< минимум {regime_params.min_signal_quality}")
 
     except Exception as e:
-      logger.error(f"Ошибка при поиске входа на HTF для {symbol}: {e}", exc_info=True)
+      logger.error(f"Ошибка мониторинга {symbol}: {e}", exc_info=True)
+
+  def get_regime_statistics_for_dashboard(self) -> Dict[str, Any]:
+    """Получает статистику режимов для отображения в дашборде"""
+    stats = {}
+
+    for symbol in self.active_symbols:
+      if symbol in self.market_regime_detector.current_regimes:
+        regime = self.market_regime_detector.current_regimes[symbol]
+        stats[symbol] = {
+          'regime': regime.primary_regime.value,
+          'confidence': regime.confidence,
+          'trend_strength': regime.trend_strength,
+          'volatility': regime.volatility_level,
+          'duration': str(regime.regime_duration)
+        }
+
+    return stats
 
   async def _monitor_symbol_for_entry_enhanced(self, symbol: str):
     """
-    Расширенная версия мониторинга с использованием Enhanced ML
+    ОБНОВЛЕННАЯ ВЕРСИЯ с полной интеграцией Shadow Trading
     """
-    logger.debug(f"Расширенный поиск сигнала для символа: {symbol}")
-    logger.info(f"🔍 Начало расширенного мониторинга для {symbol}")
+    logger.info(f"🔍 Поиск сигнала для {symbol}...")
+    signal_logger.info(f"====== НАЧАЛО ЦИКЛА ДЛЯ {symbol} ======")
+
     try:
-      # 1. Получаем данные HTF
+      # --- УРОВЕНЬ 1: ДЕТЕКЦИЯ РЕЖИМА РЫНКА ---
       htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=300)
       if htf_data.empty or len(htf_data) < 100:
+        logger.debug(f"Недостаточно данных для анализа {symbol}")
+        signal_logger.info(f"АНАЛИЗ: Пропущено - недостаточно данных.")
         return
 
-      # 2. Проверяем на аномалии
+      regime_characteristics = await self.get_market_regime(symbol, force_check=True)
+      if not regime_characteristics:
+        logger.warning(f"Не удалось определить режим для {symbol}")
+        signal_logger.warning(f"АНАЛИЗ: Не удалось определить режим.")
+        return
+
+      signal_logger.info(
+        f"РЕЖИМ: {regime_characteristics.primary_regime.value} (Уверенность: {regime_characteristics.confidence:.2f})")
+
       anomalies = await self._check_market_anomalies(symbol, htf_data)
-
-      # Блокируем торговлю при критических аномалиях
-      critical_anomalies = [a for a in anomalies if a.severity > 0.8]
-      if critical_anomalies:
-        logger.warning(f"Торговля {symbol} временно заблокирована из-за критических аномалий")
+      if any(a.severity > self.config.get('strategy_settings', {}).get('anomaly_severity_threshold', 0.8) for a in
+             anomalies):
+        logger.warning(f"Торговля по {symbol} заблокирована из-за критических аномалий.")
+        signal_logger.critical(f"АНОМАЛИЯ: Торговля заблокирована.")
         return
 
-      # 3. Получаем внешние данные для межрыночного анализа
-      external_data = {}
-      if symbol != "BTCUSDT":
-        btc_data = await self.data_fetcher.get_historical_candles("BTCUSDT", Timeframe.ONE_HOUR, limit=300)
-        if not btc_data.empty:
-          external_data['BTC'] = btc_data
+      # --- УРОВЕНЬ 2: ВЫБОР И ГЕНЕРАЦИЯ СИГНАЛОВ ОТ СТРАТЕГИЙ ---
+      await self.check_strategy_adaptation(symbol)
 
-      # Можно добавить индекс страха и жадности, данные о финансировании и т.д.
+      regime_params = self.market_regime_detector.get_regime_parameters(symbol)
+      if not regime_params.recommended_strategies or 'ALL' in regime_params.avoided_strategies:
+        logger.info(f"Торговля в режиме '{regime_characteristics.primary_regime.value}' не рекомендуется для {symbol}.")
+        signal_logger.info(f"РЕЖИМ: Торговля не рекомендуется.")
+        return
 
-      # 4. Используем Enhanced ML модель если доступна
-      if self.enhanced_ml_model and self.enhanced_ml_model.is_fitted:
-        try:
-          _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data, external_data)
+      # --- ПРИОРИТЕТНАЯ ПРОВЕРКА ДЛЯ СЕТОЧНОЙ СТРАТЕГИИ ---
+      active_strategies_from_dashboard = self.state_manager.get_custom_data('active_strategies') or {}
 
-          # Логируем детали предсказания
-          logger.info(f"Enhanced ML предсказание для {symbol}:")
-          logger.info(f"  Сигнал: {ml_prediction.signal_type.value}")
-          logger.info(f"  Вероятность: {ml_prediction.probability:.3f}")
-          logger.info(f"  Согласованность моделей: {ml_prediction.model_agreement:.3f}")
+      if "Grid_Trading" in regime_params.recommended_strategies and active_strategies_from_dashboard.get("Grid_Trading",
+                                                                                                         True):
+        logger.info(
+          f"Режим {regime_characteristics.primary_regime.value} подходит для сеточной торговли. Проверка GridStrategy...")
+        grid_signal = await self.strategy_manager.get_signal(symbol, htf_data, "Grid_Trading")
 
-          if ml_prediction.risk_assessment['anomaly_detected']:
-            logger.warning(f"  ⚠️ Обнаружена аномалия: {ml_prediction.risk_assessment['anomaly_type']}")
+        if isinstance(grid_signal, GridSignal):
+          logger.info(f"Получен сеточный сигнал для {symbol}. Отправка на исполнение...")
+          await self.trade_executor.execute_grid_trade(grid_signal)
+          return
+        else:
+          logger.info("GridStrategy не сгенерировала сигнал. Переход к стандартной логике.")
 
-          # Корректируем уверенность на основе аномалий
-          confidence_adjustment = 1.0
-          if anomalies:
-            max_severity = max(a.severity for a in anomalies)
-            confidence_adjustment = 1.0 - (max_severity * 0.5)  # Снижаем уверенность до 50%
+      candidate_signals: Dict[str, TradingSignal] = {}
+      for strategy_name in regime_params.recommended_strategies:
+        if strategy_name == "Grid_Trading":
+          continue
 
-          adjusted_confidence = ml_prediction.confidence * confidence_adjustment
+        if not active_strategies_from_dashboard.get(strategy_name, True):
+          logger.debug(f"Стратегия {strategy_name} отключена в дашборде, пропускаем.")
+          continue
 
-          # Создаем торговый сигнал
-          if ml_prediction.signal_type != SignalType.HOLD and adjusted_confidence > 0.6:
-            current_price = htf_data['close'].iloc[-1]
+        if not self.adaptive_selector.should_activate_strategy(strategy_name,
+                                                               regime_characteristics.primary_regime.value):
+          logger.debug(f"Стратегия {strategy_name} неактивна для {symbol}")
+          continue
 
-            trading_signal = TradingSignal(
+        signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
+        if signal and signal.signal_type != SignalType.HOLD:
+          weight = self.adaptive_selector.get_strategy_weight(strategy_name,
+                                                              regime_characteristics.primary_regime.value)
+          signal.confidence *= weight
+          candidate_signals[strategy_name] = signal
+          signal_logger.info(
+            f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, Уверенность: {signal.confidence:.2f}")
+
+      # --- УРОВЕНЬ 3: МЕТА-МОДЕЛЬ И ПРИНЯТИЕ РЕШЕНИЙ ---
+      final_signal: Optional[TradingSignal] = None
+      if self.enhanced_ml_model and self.use_enhanced_ml:
+        logger.debug(f"Использование EnhancedEnsembleModel как финального арбитра для {symbol}...")
+        _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+
+        if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
+          signal_logger.info(
+            f"МЕТА-МОДЕЛЬ: Предсказание {ml_prediction.signal_type.value}, Уверенность: {ml_prediction.confidence:.2f}")
+
+          if any(s.signal_type == ml_prediction.signal_type for s in candidate_signals.values()):
+            logger.info(f"Мета-модель подтверждена сигналом от другой стратегии для {symbol}.")
+            final_signal = TradingSignal(
               signal_type=ml_prediction.signal_type,
               symbol=symbol,
-              price=current_price,
-              confidence=adjusted_confidence,
-              strategy_name="Enhanced_ML_Strategy",
+              price=htf_data['close'].iloc[-1],
+              confidence=ml_prediction.confidence,
+              strategy_name="Ensemble_Confirmed",
               timestamp=datetime.now(),
-              metadata={
-                'ml_prediction': ml_prediction.__dict__,
-                'anomalies': [a.to_dict() for a in anomalies],
-                'feature_importance': ml_prediction.feature_importance
-              }
+              metadata={'ml_prediction': ml_prediction.metadata}
+            )
+            signal_logger.info(f"РЕШЕНИЕ: Сигнал мета-модели принят.")
+          else:
+            signal_logger.warning(f"РЕШЕНИЕ: Сигнал мета-модели отклонен - нет подтверждения.")
+        else:
+          signal_logger.info(f"РЕШЕНИЕ: Мета-модель предсказывает HOLD, сигнал не генерируется.")
+
+      # Если мета-модель не дала сигнал, выбираем лучший из кандидатов
+      if not final_signal and candidate_signals:
+        best_signal = max(candidate_signals.values(), key=lambda s: s.confidence)
+        if best_signal.confidence > regime_params.min_signal_quality:
+          final_signal = best_signal
+          signal_logger.info(f"РЕШЕНИЕ: Принят лучший сигнал от стратегии {best_signal.strategy_name}.")
+        else:
+          signal_logger.warning(f"РЕШЕНИЕ: Лучший сигнал ({best_signal.strategy_name}) отклонен - низкая уверенность.")
+
+      # ============ ИНТЕГРАЦИЯ SHADOW TRADING ============
+      if final_signal and final_signal.signal_type != SignalType.HOLD:
+        signal_logger.info(f"🎯 НОВЫЙ СИГНАЛ {symbol}: {final_signal.signal_type.value} @ {final_signal.price}")
+
+        # ЭТАП 1: Подготовка расширенных метаданных для Shadow Trading
+        signal_metadata = await self._prepare_signal_metadata(symbol, final_signal, htf_data)
+
+        # ЭТАП 2: Регистрация в Shadow Trading ДО фильтрации
+        shadow_signal_id = ""
+        if self.shadow_trading:
+          try:
+            shadow_signal_id = await self.shadow_trading.process_signal(
+              signal=final_signal,
+              metadata=signal_metadata,
+              was_filtered=False
             )
 
-            # Продолжаем стандартную обработку сигнала
-            # await self._process_trading_signal(trading_signal, symbol, htf_data)
-            await self._process_trading_signal_with_correlation_and_quality(trading_signal, symbol, htf_data)
+            if shadow_signal_id:
+              signal_logger.info(f"📊 Shadow ID: {shadow_signal_id}")
+              # Добавляем связь с Shadow Trading в метаданные сигнала
+              final_signal.metadata = final_signal.metadata or {}
+              final_signal.metadata['shadow_tracking_id'] = shadow_signal_id
 
-        except Exception as e:
-          logger.error(f"Ошибка Enhanced ML для {symbol}: {e}")
-          # Fallback на стандартные стратегии
-          await self._monitor_symbol_for_entry(symbol)
+          except Exception as shadow_error:
+            logger.warning(f"Ошибка регистрации в Shadow Trading: {shadow_error}")
+
+        # ЭТАП 3: Проверка риск-менеджером
+        risk_decision = await self.risk_manager.validate_signal(
+          signal=final_signal,
+          symbol=symbol,
+          account_balance=self.account_balance.available_balance_usdt,
+          market_data=htf_data
+        )
+
+        # ЭТАП 4: Обработка результата риск-менеджера
+        if not risk_decision.get('approved'):
+          rejection_reasons = risk_decision.get('reasons', [])
+          signal_logger.warning(f"🚫 СИГНАЛ {symbol} ОТКЛОНЕН: {rejection_reasons}")
+
+          # ВАЖНО: Отмечаем в Shadow Trading как отфильтрованный
+          if self.shadow_trading and shadow_signal_id:
+            try:
+              filter_reasons = self._convert_rejection_reasons_to_filter_reasons(rejection_reasons)
+              await self.shadow_trading.signal_tracker.mark_signal_filtered(
+                shadow_signal_id, filter_reasons
+              )
+              logger.debug(f"🚫 Сигнал {shadow_signal_id} помечен как отфильтрованный")
+            except Exception as filter_error:
+              logger.warning(f"Ошибка отметки фильтрации в Shadow Trading: {filter_error}")
+          return
+
+        # ЭТАП 5: Сигнал одобрен - исполняем
+        recommended_size = risk_decision.get('recommended_size')
+        signal_logger.info(f"✅ СИГНАЛ {symbol} ОДОБРЕН, размер: {recommended_size}")
+
+        success, order_data = await self.trade_executor.execute_trade(
+          final_signal, symbol, recommended_size
+        )
+
+        # ЭТАП 6: Обновление Shadow Trading по результату исполнения
+        if self.shadow_trading and shadow_signal_id:
+          try:
+            execution_result = {
+              'executed': success,
+              'execution_price': order_data.get('price') if order_data and success else final_signal.price,
+              'quantity': recommended_size,
+              'order_id': order_data.get('order_id') if order_data and success else None,
+              'execution_time': datetime.now().isoformat(),
+              'execution_success': success,
+              'risk_manager_data': {
+                'recommended_size': recommended_size,
+                'risk_level': risk_decision.get('risk_level'),
+                'position_impact': risk_decision.get('position_impact')
+              }
+            }
+
+            # Обновляем метаданные в Shadow Trading
+            tracked_signal = self.shadow_trading.signal_tracker.tracked_signals.get(shadow_signal_id)
+            if tracked_signal:
+              if not hasattr(tracked_signal, 'execution_data'):
+                tracked_signal.execution_data = {}
+              tracked_signal.execution_data.update(execution_result)
+              tracked_signal.updated_at = datetime.now()
+
+            if success:
+              signal_logger.info(f"✅ Исполнение {symbol} успешно, отслеживается в Shadow Trading")
+            else:
+              signal_logger.error(f"❌ Ошибка исполнения {symbol}, продолжаем отслеживание в Shadow Trading")
+
+          except Exception as execution_update_error:
+            logger.warning(f"Ошибка обновления исполнения в Shadow Trading: {execution_update_error}")
       else:
-        # Используем стандартный мониторинг
-        await self._monitor_symbol_for_entry(symbol)
+        logger.info(f"Для {symbol} не найдено подходящего сигнала в текущем режиме.")
+        signal_logger.info(f"ИТОГ: Сигнал не сформирован.")
 
     except Exception as e:
-      logger.error(f"Ошибка в расширенном мониторинге для {symbol}: {e}", exc_info=True)
+      logger.error(f"Критическая ошибка в _monitor_symbol_for_entry_enhanced для {symbol}: {e}", exc_info=True)
+      signal_logger.error(f"КРИТИЧЕСКАЯ ОШИБКА: {e}")
+    finally:
+      signal_logger.info(f"====== КОНЕЦ ЦИКЛА ДЛЯ {symbol} ======\n")
 
   async def _process_trading_signal(self, signal: TradingSignal, symbol: str, market_data: pd.DataFrame):
-      """
-      Обработка торгового сигнала с учетом аномалий
-      """
-      logger.info(f"⚠️ Используется старый метод обработки сигналов для {symbol}")
+    """
+    Обработка торгового сигнала с учетом аномалий
+    """
+    logger.info(
+      f"🔄 НАЧАЛО ОБРАБОТКИ СИГНАЛА для {symbol}: {signal.signal_type.value}, confidence={signal.confidence:.3f}")
 
-      # Стандартная фильтрация
-      is_approved, reason = await self.signal_filter.filter_signal(signal, market_data)
-      if not is_approved:
-        logger.info(f"Сигнал для {symbol} отклонен фильтром: {reason}")
-        return
+    # Стандартная фильтрация
+    logger.info(f"📋 Проверка сигнального фильтра...")
+    is_approved, reason = await self.signal_filter.filter_signal(signal, market_data)
+    if not is_approved:
+      logger.info(f"❌ Сигнал для {symbol} отклонен фильтром: {reason}")
+      return
+    logger.info(f"✅ Сигнальный фильтр пройден")
 
-      # Проверка рисков с учетом аномалий
-      await self.update_account_balance()
-      if not self.account_balance or self.account_balance.available_balance_usdt <= 0:
-        return
+    # Проверка рисков с учетом аномалий
+    logger.info(f"💰 Обновление баланса аккаунта...")
+    await self.update_account_balance()
+    if not self.account_balance or self.account_balance.available_balance_usdt <= 0:
+      logger.error(
+        f"❌ Недостаточный баланс: {self.account_balance.available_balance_usdt if self.account_balance else 'None'}")
+      return
+    logger.info(f"✅ Баланс проверен: {self.account_balance.available_balance_usdt:.2f} USDT")
 
-      # Корректируем размер позиции на основе обнаруженных аномалий
-      position_size_multiplier = 1.0
+    # Корректируем размер позиции на основе обнаруженных аномалий
+    position_size_multiplier = 1.0
 
-      if 'anomalies' in signal.metadata:
-        anomalies = signal.metadata['anomalies']
-        if anomalies:
-          # Уменьшаем размер позиции при аномалиях
-          max_severity = max(a['severity'] for a in anomalies)
-          position_size_multiplier = max(0.3, 1.0 - max_severity)
-          logger.info(f"Размер позиции скорректирован на {position_size_multiplier:.2f} из-за аномалий")
+    if 'anomalies' in signal.metadata:
+      anomalies = signal.metadata['anomalies']
+      if anomalies:
+        # Уменьшаем размер позиции при аномалиях
+        max_severity = max(a['severity'] for a in anomalies)
+        position_size_multiplier = max(0.3, 1.0 - max_severity)
+        logger.info(f"🔧 Размер позиции скорректирован на {position_size_multiplier:.2f} из-за аномалий")
 
-      # Валидация сигнала риск-менеджером
-      risk_decision = await self.risk_manager.validate_signal(
-        signal=signal,
-        symbol=symbol,
-        account_balance=self.account_balance.available_balance_usdt,
-        market_data=market_data
-      )
+    # Валидация сигнала риск-менеджером
+    logger.info(f"⚠️ Валидация риск-менеджером...")
+    risk_decision = await self.risk_manager.validate_signal(
+      signal=signal,
+      symbol=symbol,
+      account_balance=self.account_balance.available_balance_usdt,
+      market_data=market_data
+    )
 
-      if not risk_decision.get('approved'):
-        logger.info(f"Сигнал для {symbol} отклонен риск-менеджером: {risk_decision.get('reasons')}")
-        return
+    if not risk_decision.get('approved'):
+      logger.info(f"❌ Сигнал для {symbol} отклонен риск-менеджером: {risk_decision.get('reasons')}")
+      return
 
-      # Корректируем размер с учетом аномалий
-      final_size = risk_decision.get('recommended_size', 0) * position_size_multiplier
+    logger.info(f"✅ Риск-менеджер одобрил сигнал. Рекомендуемый размер: {risk_decision.get('recommended_size', 0):.6f}")
 
-      # Ставим в очередь на исполнение
-      pending_signals = self.state_manager.get_pending_signals()
-      signal_dict = signal.to_dict()
-      signal_dict['metadata']['approved_size'] = final_size
-      signal_dict['metadata']['signal_time'] = datetime.now().isoformat()
-      signal_dict['metadata']['position_size_multiplier'] = position_size_multiplier
+    # Корректируем размер с учетом аномалий
+    final_size = risk_decision.get('recommended_size', 0) * position_size_multiplier
+    logger.info(f"📊 Финальный размер позиции: {final_size:.6f}")
 
-      pending_signals[symbol] = signal_dict
-      self.state_manager.update_pending_signals(pending_signals)
+    # Ставим в очередь на исполнение
+    logger.info(f"📥 Постановка сигнала в очередь ожидания...")
+    pending_signals = self.state_manager.get_pending_signals()
+    signal_dict = signal.to_dict()
+    signal_dict['metadata']['approved_size'] = final_size
+    signal_dict['metadata']['signal_time'] = datetime.now().isoformat()
+    signal_dict['metadata']['position_size_multiplier'] = position_size_multiplier
 
-      logger.info(f"Enhanced сигнал для {symbol} одобрен и поставлен в очередь")
+    pending_signals[symbol] = signal_dict
+    self.state_manager.update_pending_signals(pending_signals)
+
+    logger.info(f"✅ Enhanced сигнал для {symbol} одобрен и поставлен в очередь")
+    signal_logger.info(f"====== ENHANCED СИГНАЛ ДЛЯ {symbol} ПОСТАВЛЕН В ОЧЕРЕДЬ ======")
 
   async def train_anomaly_detector(self, symbols: List[str], lookback_days: int = 45):
     """
@@ -505,9 +729,31 @@ class IntegratedTradingSystem:
 
   async def train_enhanced_ml_model(self, symbols: List[str], lookback_days: int = 60):
     """
-    Обучает расширенную ML модель
+    Обучает расширенную ML модель с правильным выравниванием данных
     """
     logger.info(f"Начало обучения Enhanced ML модели на {len(symbols)} символах...")
+
+    logger.info("=== ОТЛАДКА СОЗДАНИЯ ДАННЫХ ===")
+
+    # Тестируем на одном символе
+    test_symbol = symbols[0]
+    test_data = await self.data_fetcher.get_historical_candles(
+      test_symbol, Timeframe.ONE_HOUR, limit=100
+    )
+
+    logger.info(f"Тестовые данные {test_symbol}:")
+    logger.info(f"  Размер: {test_data.shape}")
+    logger.info(f"  Индекс: {type(test_data.index)}")
+    logger.info(f"  Колонки: {test_data.columns.tolist()}")
+
+    test_labels = self._create_ml_labels(test_data)
+    if test_labels is not None:
+      logger.info(f"Тестовые метки:")
+      logger.info(f"  Размер: {len(test_labels)}")
+      logger.info(f"  Индекс: {type(test_labels.index)}")
+      logger.info(f"  Распределение: {test_labels.value_counts().to_dict()}")
+
+    logger.info("=== КОНЕЦ ОТЛАДКИ ===")
 
     if not self.enhanced_ml_model:
       self.enhanced_ml_model = EnhancedEnsembleModel(self.anomaly_detector)
@@ -515,7 +761,7 @@ class IntegratedTradingSystem:
     all_features = []
     all_labels = []
 
-    for symbol in symbols[:20]:  # Ограничиваем для демонстрации
+    for symbol in symbols:  # Ограничиваем для демонстрации
       try:
         # Получаем данные
         data = await self.data_fetcher.get_historical_candles(
@@ -525,23 +771,67 @@ class IntegratedTradingSystem:
         )
 
         if data.empty or len(data) < 100:
+          logger.warning(f"Недостаточно данных для {symbol}: {len(data)} свечей")
           continue
 
-        # Создаем метки (пример - можно использовать вашу логику)
-        labels = self._create_ml_labels(data)
+        # Убеждаемся, что данные имеют datetime индекс
+        if not isinstance(data.index, pd.DatetimeIndex):
+          if 'timestamp' in data.columns:
+            data = data.set_index('timestamp')
+          else:
+            # Создаем datetime индекс
+            start_time = datetime.now() - timedelta(hours=len(data))
+            data.index = pd.date_range(start=start_time, periods=len(data), freq='1H')
 
-        if labels is not None and len(labels) > 100:
-          all_features.append(data)
-          all_labels.append(labels)
-          logger.info(f"Подготовлены данные для {symbol}")
+        # Создаем метки
+        labels = self._create_ml_labels(data)
+        if labels is None or len(labels) < 50:
+          logger.warning(f"Не удалось создать достаточно меток для {symbol}")
+          continue
+
+        # Убеждаемся, что данные и метки имеют пересекающиеся индексы
+        common_index = data.index.intersection(labels.index)
+        if len(common_index) < 50:
+          logger.warning(f"Мало общих временных точек для {symbol}: {len(common_index)}")
+          continue
+
+        # Берем только общие данные
+        data_aligned = data.loc[common_index]
+        labels_aligned = labels.loc[common_index]
+
+        # Добавляем символ к данным для идентификации
+        data_aligned = data_aligned.copy()
+        data_aligned['symbol'] = symbol
+
+        all_features.append(data_aligned)
+        all_labels.append(labels_aligned)
+
+        logger.info(f"Подготовлены данные для {symbol}: {len(data_aligned)} образцов")
 
       except Exception as e:
         logger.error(f"Ошибка подготовки данных для {symbol}: {e}")
+        continue
 
-    if all_features:
+    if not all_features:
+      logger.error("Нет данных для обучения Enhanced ML модели")
+      return
+
+    try:
       # Объединяем данные
-      combined_features = pd.concat(all_features, ignore_index=True)
-      combined_labels = pd.concat(all_labels, ignore_index=True)
+      combined_features = pd.concat(all_features, ignore_index=False)
+      combined_labels = pd.concat(all_labels, ignore_index=False)
+
+      # Сбрасываем индекс для избежания конфликтов при объединении
+      combined_features = combined_features.reset_index(drop=True)
+      combined_labels = combined_labels.reset_index(drop=True)
+
+      # Убеждаемся, что индексы соответствуют
+      if len(combined_features) != len(combined_labels):
+        min_len = min(len(combined_features), len(combined_labels))
+        combined_features = combined_features.iloc[:min_len]
+        combined_labels = combined_labels.iloc[:min_len]
+
+      logger.info(f"Финальные размеры данных: features={combined_features.shape}, labels={combined_labels.shape}")
 
       # Получаем внешние данные (BTC как пример)
       btc_data = await self.data_fetcher.get_historical_candles(
@@ -550,40 +840,161 @@ class IntegratedTradingSystem:
         limit=24 * lookback_days
       )
 
-      external_data = {'BTC': btc_data} if not btc_data.empty else None
+      external_data = None
+      if not btc_data.empty:
+        # Приводим BTC данные к тому же формату
+        if not isinstance(btc_data.index, pd.DatetimeIndex):
+          if 'timestamp' in btc_data.columns:
+            btc_data = btc_data.set_index('timestamp')
+          else:
+            start_time = datetime.now() - timedelta(hours=len(btc_data))
+            btc_data.index = pd.date_range(start=start_time, periods=len(btc_data), freq='1H')
 
-      # Обучаем модель
-      self.enhanced_ml_model.fit(
+        external_data = {'BTC': btc_data}
+
+      logger.info(f"Размеры данных перед обучением: features={combined_features.shape}, labels={combined_labels.shape}")
+      logger.info(f"Индексы: features={combined_features.index.min()} - {combined_features.index.max()}")
+      logger.info(f"Индексы: labels={combined_labels.index.min()} - {combined_labels.index.max()}")
+
+      # Убеждаемся, что индексы корректны
+      if not combined_features.index.equals(combined_labels.index):
+        logger.warning("Индексы признаков и меток не совпадают, выполняем выравнивание...")
+        common_idx = combined_features.index.intersection(combined_labels.index)
+        combined_features = combined_features.loc[common_idx]
+        combined_labels = combined_labels.loc[common_idx]
+        logger.info(f"После выравнивания: {len(common_idx)} общих образцов")
+
+      diagnosis = self.enhanced_ml_model.diagnose_training_issues(
         combined_features,
         combined_labels,
-        external_data=external_data,
-        optimize_features=True
+        )
+      try:
+        diagnosis_status = diagnosis.get('overall_status', 'НЕИЗВЕСТНО')
+        logger.info(f"Диагностика: {diagnosis_status}")
+
+        # Дополнительная информация
+        if diagnosis.get('issues_found'):
+          logger.warning(f"Обнаружено проблем: {len(diagnosis['issues_found'])}")
+          for issue in diagnosis['issues_found'][:3]:  # Показываем первые 3
+            logger.warning(f"  - {issue}")
+
+        if diagnosis.get('warnings'):
+          logger.info(f"Предупреждений: {len(diagnosis['warnings'])}")
+
+      except Exception as log_error:
+        logger.error(f"Ошибка логирования диагностики: {log_error}")
+
+      # Обучаем модель
+      # self.enhanced_ml_model.fit_with_diagnostics(
+      #   combined_features,
+      #   combined_labels,
+      #   external_data=external_data,
+      #   optimize_features=True,
+      #   verbose=True
+      # )
+      # self.enhanced_ml_model.print_training_report(combined_features,
+      #   combined_labels, diagnosis)
+
+      # Обучаем модель с использованием подбора гиперпараметров
+      logger.info("Запуск обучения с подбором гиперпараметров...")
+      self.enhanced_ml_model.fit_with_hyperparameter_tuning(
+        X_train_data=combined_features,  # Используем подготовленные данные
+        y_train_data=combined_labels,  # Используем подготовленные метки
+        external_data=external_data
       )
+
+      # Отчет можно оставить, он покажет результаты уже после тюнинга
+      self.enhanced_ml_model.print_training_report(combined_features,
+                                                   combined_labels, diagnosis)
+
+
+      health = self.enhanced_ml_model.get_model_health_status()
+      logger.info(f"Здоровье модели: {health['overall_health']}")
+
 
       # Сохраняем
       self.enhanced_ml_model.save("ml_models/enhanced_model.pkl")
 
       logger.info("Enhanced ML модель успешно обучена и сохранена")
-    else:
-      logger.error("Недостаточно данных для обучения Enhanced ML модели")
+
+    except Exception as e:
+      logger.error(f"Ошибка при финальном обучении модели: {e}")
+      raise
+
+  async def get_market_regime(self, symbol: str, force_check: bool = False) -> Optional[RegimeCharacteristics]:
+    """
+    Получает текущий рыночный режим для символа
+    """
+    try:
+      # Получаем данные для анализа
+      data = await self.data_fetcher.get_historical_candles(
+        symbol, Timeframe.ONE_HOUR, limit=200
+      )
+
+      if data.empty or len(data) < 50:
+        return None
+
+      # Используем существующий детектор
+      regime_characteristics = await self.market_regime_detector.detect_regime(symbol, data)
+
+      # Логируем с учетом аномалий
+      if self.anomaly_detector and regime_characteristics:
+        anomalies = self.anomaly_detector.detect_anomalies(data, symbol)
+        if anomalies:
+          logger.warning(f"⚠️ Режим {symbol}: {regime_characteristics.primary_regime.value} "
+                         f"+ обнаружены аномалии!")
+
+      return regime_characteristics
+
+    except Exception as e:
+      logger.error(f"Ошибка определения режима для {symbol}: {e}")
+      return None
+
 
   def _create_ml_labels(self, data: pd.DataFrame) -> Optional[pd.Series]:
     """
-    Создает метки для обучения ML
+    Создает метки для обучения ML с правильными индексами
     """
-    # Пример создания меток на основе будущих движений цены
-    future_returns = data['close'].pct_change(periods=10).shift(-10)
+    try:
+      # Убеждаемся, что данные имеют правильный индекс
+      if not isinstance(data.index, pd.DatetimeIndex):
+        if 'timestamp' in data.columns:
+          data = data.set_index('timestamp')
+        else:
+          # Создаем datetime индекс на основе позиции
+          start_time = datetime.now() - timedelta(hours=len(data))
+          data.index = pd.date_range(start=start_time, periods=len(data), freq='1H')
 
-    # Пороги для классификации
-    buy_threshold = 0.02  # 2% рост
-    sell_threshold = -0.02  # 2% падение
+      if 'close' not in data.columns:
+        logger.warning("Нет колонки 'close' для создания меток")
+        return None
 
-    labels = pd.Series(index=data.index, dtype=int)
-    labels[future_returns > buy_threshold] = 2  # BUY
-    labels[future_returns < sell_threshold] = 0  # SELL
-    labels[(future_returns >= sell_threshold) & (future_returns <= buy_threshold)] = 1  # HOLD
+      # Вычисляем будущие доходности
+      future_periods = 10  # Смотрим на 10 периодов вперед
+      future_returns = data['close'].pct_change(periods=future_periods).shift(-future_periods)
 
-    return labels.dropna()
+      # Пороги для классификации
+      buy_threshold = 0.02  # 2% рост
+      sell_threshold = -0.02  # 2% падение
+
+      # Создаем метки с тем же индексом, что и у данных
+      labels = pd.Series(index=data.index, dtype=int, name='labels')
+
+      # Заполняем метки
+      labels[future_returns > buy_threshold] = 2  # BUY
+      labels[future_returns < sell_threshold] = 0  # SELL
+      labels[(future_returns >= sell_threshold) & (future_returns <= buy_threshold)] = 1  # HOLD
+
+      # Удаляем NaN в конце (где нет будущих данных)
+      labels = labels.dropna()
+
+      logger.debug(f"Создано меток: {len(labels)}, распределение: {labels.value_counts().to_dict()}")
+
+      return labels
+
+    except Exception as e:
+      logger.error(f"Ошибка при создании меток: {e}")
+      return None
 
   async def get_system_health_report(self) -> Dict[str, Any]:
     """
@@ -628,70 +1039,6 @@ class IntegratedTradingSystem:
 
     return report
 
-  # async def _monitor_symbol_for_entry(self, symbol: str):
-  #   """
-  #   НОВАЯ ВЕРСИЯ: Ищет сигнал на ВЫСОКОМ таймфрейме (HTF) и, если он одобрен,
-  #   ставит его в очередь на ожидание точки входа на LTF.
-  #   """
-  #   logger.debug(f"Поиск сигнала на HTF для символа: {symbol}")
-  #   try:
-  #     # 1. Получаем данные HTF (1 час)
-  #     htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=300)
-  #     if htf_data.empty: return
-  #
-  #     # 2. Получаем и фильтруем сигнал
-  #     trading_signal = await self.strategy_manager.get_signal(symbol, htf_data)
-  #     if not trading_signal or trading_signal.signal_type == SignalType.HOLD:
-  #       return
-  #
-  #     is_approved, reason = await self.signal_filter.filter_signal(trading_signal, htf_data)
-  #     if not is_approved:
-  #       return
-  #
-  #     # 3. Проверяем риски
-  #     await self.update_account_balance()
-  #     if not self.account_balance or self.account_balance.available_balance_usdt <= 0:
-  #       return
-  #
-  #     risk_decision = await self.risk_manager.validate_signal(
-  #       signal=trading_signal,
-  #       symbol=symbol,
-  #       account_balance=self.account_balance.available_balance_usdt
-  #     )
-  #     if not risk_decision.get('approved'):
-  #       return
-  #
-  #     # 4. Если все проверки пройдены, НЕ ИСПОЛНЯЕМ, а ставим в ОЖИДАНИЕ
-  #     pending_signals = self.state_manager.get_pending_signals()
-  #
-  #     # Добавляем в сигнал доп. информацию, которая понадобится для исполнения
-  #     trading_signal.metadata['approved_size'] = risk_decision.get('recommended_size', 0)
-  #     trading_signal.metadata['signal_time'] = datetime.now().isoformat()
-  #
-  #     # Явно преобразуем TradingSignal в словарь с простыми типами
-  #     signal_dict = {
-  #       "signal_type": trading_signal.signal_type.value,
-  #       "symbol": trading_signal.symbol,
-  #       "price": trading_signal.price,
-  #       "confidence": trading_signal.confidence,
-  #       "strategy_name": trading_signal.strategy_name,
-  #       "timestamp": trading_signal.timestamp.isoformat(),
-  #       "stop_loss": trading_signal.stop_loss,
-  #       "take_profit": trading_signal.take_profit,
-  #       "metadata": {
-  #         'approved_size': risk_decision.get('recommended_size', 0),
-  #         'signal_time': datetime.now().isoformat()
-  #       }
-  #     }
-  #
-  #     pending_signals[symbol] = signal_dict  # Сохраняем как словарь
-  #     self.state_manager.update_pending_signals(pending_signals)
-  #
-  #     logger.info(f"СИГНАЛ HTF для {symbol} ОДОБРЕН и поставлен в очередь на поиск точки входа.")
-  #     signal_logger.info(f"====== СИГНАЛ ДЛЯ {symbol} ОДОБРЕН И ПОСТАВЛЕН В ОЧЕРЕДЬ ======")
-  #
-  #   except Exception as e:
-  #     logger.error(f"Ошибка при поиске входа на HTF для {symbol}: {e}", exc_info=True)
 
   async def initialize(self):
     """
@@ -723,6 +1070,15 @@ class IntegratedTradingSystem:
     logger.info(f"Активные символы для торговли ({len(self.active_symbols)}): {self.active_symbols}")
 
     await self.update_account_balance()
+
+    try:
+      # Инициализация Shadow Trading
+      self.shadow_trading = ShadowTradingManager(self.db_manager, self.data_fetcher)
+      await self.shadow_trading.start_enhanced_monitoring()
+      logger.info("✅ Shadow Trading система инициализирована и запущена")
+    except Exception as e:
+      logger.error(f"Ошибка инициализации Shadow Trading: {e}")
+      self.shadow_trading = None
 
     # Устанавливаем плечо для всех активных символов
     leverage = self.config.get('trade_settings', {}).get('leverage', 10)
@@ -877,8 +1233,463 @@ class IntegratedTradingSystem:
         self.state_manager.clear_command()
       # --- КОНЕЦ НОВОГО БЛОКА ---
 
+        if command_name == 'generate_report':
+          if self.retraining_manager:
+            self.retraining_manager.export_performance_report()
+
+        elif command_name == 'update_ml_models':
+          # Обновляем состояние ML моделей
+          ml_state = self.state_manager.get_custom_data('ml_models_state')
+          if ml_state:
+            self.use_enhanced_ml = ml_state.get('use_enhanced_ml', True)
+            self.use_base_ml = ml_state.get('use_base_ml', True)
+            logger.info(f"ML модели обновлены: Enhanced={self.use_enhanced_ml}, Base={self.use_base_ml}")
+
+        elif command_name == 'update_strategies':
+          # Обновляем активные стратегии
+          active_strategies = self.state_manager.get_custom_data('active_strategies')
+          if active_strategies and hasattr(self, 'adaptive_selector'):
+            for strategy_name, is_active in active_strategies.items():
+              self.adaptive_selector.active_strategies[strategy_name] = is_active
+            logger.info(f"Стратегии обновлены: {active_strategies}")
+
+        elif command_name == 'retrain_model':
+          # Запускаем переобучение
+          if self.retraining_manager:
+            asyncio.create_task(self.retraining_manager.retrain_model(
+              self.active_symbols, timeframe=Timeframe.ONE_HOUR
+            ))
+            logger.info("Запущено переобучение модели")
+
       interval = self.config.get('general_settings', {}).get('monitoring_interval_seconds', 30)
       await asyncio.sleep(interval)
+
+  async def _prepare_signal_metadata(self, symbol: str, signal: TradingSignal, data: pd.DataFrame) -> Dict[str, Any]:
+      """Подготовка метаданных сигнала для Shadow Trading"""
+      try:
+        metadata = {
+          'source': self._determine_signal_source(signal),
+          'indicators_triggered': self._get_triggered_indicators(symbol, data),
+          'market_regime': self._determine_market_regime(data),
+          'volatility_level': self._determine_volatility_level(data),
+          'confidence_score': signal.confidence,
+          'strategy_name': signal.strategy_name,
+          'volume': float(data['volume'].iloc[-1]) if 'volume' in data.columns else 0,
+          'price_action_score': self._calculate_price_action_score(data),
+          'market_session': self._determine_market_session(),
+          'correlation_data': await self._get_correlation_data(symbol),
+          'liquidity_score': self._calculate_liquidity_score(data)
+        }
+
+        # ML данные если доступны
+        if hasattr(signal, 'metadata') and signal.metadata:
+          metadata['ml_prediction_data'] = signal.metadata
+
+        # Добавляем технические уровни
+        metadata['technical_levels'] = self._get_technical_levels(data)
+
+        return metadata
+
+      except Exception as e:
+        logger.warning(f"Ошибка подготовки метаданных для {symbol}: {e}")
+        return {'source': 'unknown', 'error': str(e)}
+
+  def _determine_signal_source(self, signal: TradingSignal) -> str:
+    """Определить источник сигнала"""
+    strategy_name = getattr(signal, 'strategy_name', '').lower()
+
+    if 'ml' in strategy_name or 'ensemble' in strategy_name or 'enhanced' in strategy_name:
+      return 'ml_model'
+    elif 'reversal' in strategy_name or 'mean_reversion' in strategy_name:
+      return 'mean_reversion'
+    elif 'breakout' in strategy_name or 'momentum' in strategy_name:
+      return 'breakout'
+    elif 'scalping' in strategy_name:
+      return 'scalping'
+    elif 'swing' in strategy_name:
+      return 'swing'
+    elif 'arbitrage' in strategy_name:
+      return 'arbitrage'
+    else:
+      return 'technical_indicators'
+
+  def _get_triggered_indicators(self, symbol: str, data: pd.DataFrame) -> List[str]:
+    """Получить список сработавших индикаторов"""
+    triggered = []
+
+    try:
+      latest = data.iloc[-1]
+
+      # RSI анализ
+      if 'rsi_14' in data.columns:
+        rsi = latest['rsi_14']
+        if rsi > 70:
+          triggered.append('rsi_overbought')
+        elif rsi < 30:
+          triggered.append('rsi_oversold')
+        elif 50 < rsi < 60:
+          triggered.append('rsi_bullish_zone')
+        elif 40 < rsi < 50:
+          triggered.append('rsi_bearish_zone')
+
+      # MACD анализ
+      if all(col in data.columns for col in ['macd', 'macd_signal', 'macd_histogram']):
+        macd = latest['macd']
+        macd_signal = latest['macd_signal']
+        macd_hist = latest['macd_histogram']
+
+        if macd > macd_signal:
+          triggered.append('macd_bullish')
+        else:
+          triggered.append('macd_bearish')
+
+        if macd_hist > 0 and data['macd_histogram'].iloc[-2] <= 0:
+          triggered.append('macd_histogram_cross_up')
+        elif macd_hist < 0 and data['macd_histogram'].iloc[-2] >= 0:
+          triggered.append('macd_histogram_cross_down')
+
+      # Bollinger Bands
+      if all(col in data.columns for col in ['bb_upper', 'bb_lower', 'bb_middle']):
+        price = latest['close']
+        bb_upper = latest['bb_upper']
+        bb_lower = latest['bb_lower']
+        bb_middle = latest['bb_middle']
+
+        if price > bb_upper:
+          triggered.append('bb_upper_breach')
+        elif price < bb_lower:
+          triggered.append('bb_lower_breach')
+        elif price > bb_middle:
+          triggered.append('bb_above_middle')
+        else:
+          triggered.append('bb_below_middle')
+
+      # Moving Averages
+      if all(col in data.columns for col in ['ema_20', 'ema_50']):
+        ema_20 = latest['ema_20']
+        ema_50 = latest['ema_50']
+        price = latest['close']
+
+        if ema_20 > ema_50:
+          triggered.append('ema_bullish_alignment')
+        else:
+          triggered.append('ema_bearish_alignment')
+
+        if price > ema_20:
+          triggered.append('price_above_ema20')
+        if price > ema_50:
+          triggered.append('price_above_ema50')
+
+      # Volume анализ
+      if 'volume' in data.columns:
+        volume = latest['volume']
+        avg_volume = data['volume'].rolling(20).mean().iloc[-1]
+
+        if volume > avg_volume * 1.5:
+          triggered.append('high_volume')
+        elif volume < avg_volume * 0.5:
+          triggered.append('low_volume')
+
+      # ADX для определения тренда
+      if 'adx' in data.columns:
+        adx = latest['adx']
+        if adx > 25:
+          triggered.append('strong_trend')
+        elif adx < 20:
+          triggered.append('weak_trend')
+
+      # Stochastic
+      if all(col in data.columns for col in ['stoch_k', 'stoch_d']):
+        stoch_k = latest['stoch_k']
+        stoch_d = latest['stoch_d']
+
+        if stoch_k > 80 and stoch_d > 80:
+          triggered.append('stoch_overbought')
+        elif stoch_k < 20 and stoch_d < 20:
+          triggered.append('stoch_oversold')
+
+        if stoch_k > stoch_d:
+          triggered.append('stoch_bullish_cross')
+        else:
+          triggered.append('stoch_bearish_cross')
+
+    except Exception as e:
+      logger.warning(f"Ошибка анализа индикаторов для {symbol}: {e}")
+      triggered.append('indicator_analysis_error')
+
+    return triggered
+
+  def _determine_market_regime(self, data: pd.DataFrame) -> str:
+    """Определить рыночный режим"""
+    try:
+      latest = data.iloc[-1]
+
+      # ADX для силы тренда
+      if 'adx' in data.columns:
+        adx = latest['adx']
+
+        if adx > 30:
+          # Определяем направление тренда по DMI
+          if 'dm_plus' in data.columns and 'dm_minus' in data.columns:
+            dm_plus = latest['dm_plus']
+            dm_minus = latest['dm_minus']
+
+            if dm_plus > dm_minus:
+              return 'strong_uptrend'
+            else:
+              return 'strong_downtrend'
+          else:
+            return 'trending'
+        elif adx > 20:
+          return 'weak_trend'
+        else:
+          return 'sideways'
+
+      # Fallback: анализ по Moving Averages
+      if all(col in data.columns for col in ['ema_20', 'ema_50', 'ema_200']):
+        ema_20 = latest['ema_20']
+        ema_50 = latest['ema_50']
+        ema_200 = latest['ema_200']
+
+        if ema_20 > ema_50 > ema_200:
+          return 'uptrend'
+        elif ema_20 < ema_50 < ema_200:
+          return 'downtrend'
+        else:
+          return 'consolidation'
+
+    except Exception as e:
+      logger.warning(f"Ошибка определения рыночного режима: {e}")
+
+    return 'unknown'
+
+  def _determine_volatility_level(self, data: pd.DataFrame) -> str:
+    """Определить уровень волатильности"""
+    try:
+      latest = data.iloc[-1]
+
+      if 'atr' in data.columns:
+        atr = latest['atr']
+        price = latest['close']
+        atr_pct = (atr / price) * 100
+
+        if atr_pct > 4:
+          return 'very_high'
+        elif atr_pct > 2.5:
+          return 'high'
+        elif atr_pct > 1.5:
+          return 'normal'
+        elif atr_pct > 0.8:
+          return 'low'
+        else:
+          return 'very_low'
+
+      # Fallback: анализ по Bollinger Bands
+      if all(col in data.columns for col in ['bb_upper', 'bb_lower']):
+        bb_width = (latest['bb_upper'] - latest['bb_lower']) / latest['close'] * 100
+
+        if bb_width > 5:
+          return 'high'
+        elif bb_width > 2:
+          return 'normal'
+        else:
+          return 'low'
+
+    except Exception as e:
+      logger.warning(f"Ошибка определения волатильности: {e}")
+
+    return 'unknown'
+
+  def _calculate_price_action_score(self, data: pd.DataFrame) -> float:
+    """Рассчитать оценку price action"""
+    try:
+      # Анализ последних 10 свечей
+      recent_data = data.tail(10)
+      score = 0.0
+
+      # Анализ паттернов свечей
+      for i in range(len(recent_data)):
+        candle = recent_data.iloc[i]
+
+        # Размер тела свечи
+        body_size = abs(candle['close'] - candle['open']) / candle['open']
+
+        # Размер теней
+        upper_shadow = candle['high'] - max(candle['open'], candle['close'])
+        lower_shadow = min(candle['open'], candle['close']) - candle['low']
+        total_range = candle['high'] - candle['low']
+
+        if total_range > 0:
+          upper_shadow_pct = upper_shadow / total_range
+          lower_shadow_pct = lower_shadow / total_range
+
+          # Оценка силы свечи
+          if body_size > 0.02:  # Сильное тело
+            score += 0.3
+
+          # Доджи или spinning top
+          if body_size < 0.005:
+            score += 0.1
+
+          # Hammer/Shooting star patterns
+          if lower_shadow_pct > 0.6 and upper_shadow_pct < 0.2:
+            score += 0.2  # Hammer
+          elif upper_shadow_pct > 0.6 and lower_shadow_pct < 0.2:
+            score += 0.2  # Shooting star
+
+      # Нормализуем к диапазону 0-1
+      return min(score / len(recent_data), 1.0)
+
+    except Exception as e:
+      logger.warning(f"Ошибка расчета price action score: {e}")
+      return 0.0
+
+  def _determine_market_session(self) -> str:
+    """Определить текущую торговую сессию"""
+    try:
+      current_hour = datetime.now().hour
+
+      # UTC время сессий
+      if 22 <= current_hour or current_hour < 8:
+        return 'asian'
+      elif 8 <= current_hour < 16:
+        return 'european'
+      elif 16 <= current_hour < 22:
+        return 'american'
+      else:
+        return 'overnight'
+
+    except Exception as e:
+      logger.warning(f"Ошибка определения сессии: {e}")
+      return 'unknown'
+
+  async def _get_correlation_data(self, symbol: str) -> Dict[str, float]:
+    """Получить данные корреляции с основными активами"""
+    try:
+      correlation_data = {}
+
+      # Получаем данные BTC для корреляции
+      if symbol != "BTCUSDT":
+        try:
+          btc_data = await self.data_fetcher.get_historical_candles(
+            "BTCUSDT", Timeframe.ONE_HOUR, limit=100
+          )
+
+          symbol_data = await self.data_fetcher.get_historical_candles(
+            symbol, Timeframe.ONE_HOUR, limit=100
+          )
+
+          if not btc_data.empty and not symbol_data.empty:
+            # Выравниваем данные по времени
+            btc_returns = btc_data['close'].pct_change().dropna()
+            symbol_returns = symbol_data['close'].pct_change().dropna()
+
+            if len(btc_returns) > 10 and len(symbol_returns) > 10:
+              # Обрезаем до одинакового размера
+              min_length = min(len(btc_returns), len(symbol_returns))
+              btc_returns = btc_returns.tail(min_length)
+              symbol_returns = symbol_returns.tail(min_length)
+
+              correlation = btc_returns.corr(symbol_returns)
+              if not np.isnan(correlation):
+                correlation_data['btc_correlation'] = float(correlation)
+
+        except Exception as corr_error:
+          logger.debug(f"Ошибка расчета корреляции с BTC: {corr_error}")
+
+      return correlation_data
+
+    except Exception as e:
+      logger.warning(f"Ошибка получения данных корреляции: {e}")
+      return {}
+
+  def _calculate_liquidity_score(self, data: pd.DataFrame) -> float:
+    """Рассчитать оценку ликвидности"""
+    try:
+      if 'volume' not in data.columns:
+        return 0.0
+
+      # Анализ объемов за последние 20 периодов
+      recent_volumes = data['volume'].tail(20)
+
+      # Средний объем
+      avg_volume = recent_volumes.mean()
+
+      # Стабильность объемов (низкая волатильность = хорошая ликвидность)
+      volume_std = recent_volumes.std()
+      volume_cv = volume_std / avg_volume if avg_volume > 0 else 1.0
+
+      # Текущий объем относительно среднего
+      current_volume = recent_volumes.iloc[-1]
+      volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0.0
+
+      # Оценка ликвидности (0-1)
+      liquidity_score = min(volume_ratio * (1 - min(volume_cv, 1.0)), 2.0) / 2.0
+
+      return float(liquidity_score)
+
+    except Exception as e:
+      logger.warning(f"Ошибка расчета ликвидности: {e}")
+      return 0.0
+
+  def _get_technical_levels(self, data: pd.DataFrame) -> Dict[str, float]:
+    """Получить технические уровни поддержки/сопротивления"""
+    try:
+      levels = {}
+      latest = data.iloc[-1]
+      current_price = latest['close']
+
+      # Pivot Points
+      if len(data) >= 2:
+        prev_candle = data.iloc[-2]
+        high = prev_candle['high']
+        low = prev_candle['low']
+        close = prev_candle['close']
+
+        pivot = (high + low + close) / 3
+        levels['pivot_point'] = float(pivot)
+
+        # Уровни поддержки и сопротивления
+        levels['resistance_1'] = float(2 * pivot - low)
+        levels['support_1'] = float(2 * pivot - high)
+        levels['resistance_2'] = float(pivot + (high - low))
+        levels['support_2'] = float(pivot - (high - low))
+
+      # Простые уровни на основе максимумов/минимумов
+      if len(data) >= 20:
+        recent_data = data.tail(20)
+        levels['recent_high'] = float(recent_data['high'].max())
+        levels['recent_low'] = float(recent_data['low'].min())
+
+      return levels
+
+    except Exception as e:
+      logger.warning(f"Ошибка получения технических уровней: {e}")
+      return {}
+
+  def _convert_rejection_reasons_to_filter_reasons(self, reasons: List[str]) -> List[FilterReason]:
+    """Конвертировать причины отклонения в причины фильтрации"""
+    filter_reasons = []
+
+    for reason in reasons:
+      reason_lower = reason.lower()
+
+      if any(word in reason_lower for word in ['confidence', 'уверенность', 'certainty']):
+        filter_reasons.append(FilterReason.LOW_CONFIDENCE)
+      elif any(word in reason_lower for word in ['risk', 'риск', 'exposure']):
+        filter_reasons.append(FilterReason.RISK_MANAGER)
+      elif any(word in reason_lower for word in ['market', 'рынок', 'condition', 'условия']):
+        filter_reasons.append(FilterReason.MARKET_CONDITIONS)
+      elif any(word in reason_lower for word in ['position', 'позиция', 'limit', 'лимит']):
+        filter_reasons.append(FilterReason.POSITION_LIMIT)
+      elif any(word in reason_lower for word in ['correlation', 'корреляция']):
+        filter_reasons.append(FilterReason.CORRELATION_FILTER)
+      elif any(word in reason_lower for word in ['volatility', 'волатильность', 'волат']):
+        filter_reasons.append(FilterReason.VOLATILITY_FILTER)
+      else:
+        filter_reasons.append(FilterReason.RISK_MANAGER)  # По умолчанию
+
+    return filter_reasons if filter_reasons else [FilterReason.RISK_MANAGER]
 
   async def initialize_symbols_if_empty(self):
     if not self.active_symbols:
@@ -888,6 +1699,27 @@ class IntegratedTradingSystem:
         logger.info(f"Символы успешно реинициализированы: {self.active_symbols}")
       else:
         logger.warning("Не удалось реинициализировать символы.")
+
+  async def periodic_regime_analysis(self):
+    """Периодический анализ и экспорт статистики режимов"""
+    while self.is_running:
+      try:
+        await asyncio.sleep(3600 * 4)  # Каждые 4 часа
+
+        # Экспортируем статистику
+        await self.export_regime_statistics()
+
+        # Анализируем эффективность режимов
+        for symbol in self.active_symbols:
+          stats = self.market_regime_detector.get_regime_statistics(symbol)
+          if stats and stats.get('total_observations', 0) > 100:
+            logger.info(f"Статистика режимов для {symbol}:")
+            logger.info(f"  Распределение: {stats.get('regime_distribution')}")
+            logger.info(f"  Средние метрики: {stats.get('average_metrics')}")
+
+      except Exception as e:
+        logger.error(f"Ошибка периодического анализа режимов: {e}")
+
 
   async def start(self):
     if self.is_running:
@@ -919,7 +1751,44 @@ class IntegratedTradingSystem:
     self._retraining_task = self.retraining_manager.start_scheduled_retraining(
       self.active_symbols, timeframe=Timeframe.ONE_HOUR)
     self._time_sync_task = asyncio.create_task(self._time_sync_loop())
+    self.is_running = True
+    self._monitoring_task = asyncio.create_task(self._monitoring_loop())
+
+    # Добавить задачу проверки ROI
+    self._roi_check_task = asyncio.create_task(self.periodic_roi_check())
+
+    try:
+      from analytics.roi_analytics import ROIAnalytics
+      roi_analytics = ROIAnalytics(self.db_manager)
+
+      logger.info("=== АНАЛИТИКА ROI НАСТРОЕК ===")
+
+      # Анализ за последние 7 дней
+      weekly_analysis = await roi_analytics.analyze_roi_performance(days=7)
+      if 'error' not in weekly_analysis:
+        logger.info(f"📊 Статистика за 7 дней:")
+        logger.info(f"  Сделок: {weekly_analysis['total_trades']}")
+        logger.info(f"  Винрейт: {weekly_analysis['win_rate']:.1f}%")
+        logger.info(f"  Общий PnL: {weekly_analysis['total_pnl']:.2f}")
+        logger.info(f"  SL срабатываний: {weekly_analysis['sl_hit_rate']:.1f}%")
+        logger.info(f"  TP достижений: {weekly_analysis['tp_hit_rate']:.1f}%")
+        logger.info(f"  💡 {weekly_analysis['recommendation']}")
+
+    except Exception as analytics_error:
+      logger.warning(f"Не удалось загрузить ROI аналитику: {analytics_error}")
+
+    # Запускаем синхронизацию времени
+    self._time_sync_task = asyncio.create_task(self._periodic_time_sync())
+
+    # Запускаем периодическую оценку стратегий
+    self._evaluation_task = asyncio.create_task(self.periodic_strategy_evaluation())
+
+    await self.periodic_regime_analysis()
+
     logger.info("Торговая система и планировщик переобучения успешно запущены.")
+    logger.info("✅ Система успешно запущена")
+    return True
+
 
   async def stop(self):
     if not self.is_running:
@@ -951,14 +1820,49 @@ class IntegratedTradingSystem:
       with suppress(asyncio.CancelledError):
         await self._retraining_task
 
+    if self._evaluation_task:
+      self._evaluation_task.cancel()
+      with suppress(asyncio.CancelledError):
+        await self._evaluation_task
+
     if self._time_sync_task:
       self._time_sync_task.cancel()
       with suppress(asyncio.CancelledError):
         await self._time_sync_task
 
+    if self.shadow_trading:
+      try:
+        # Генерируем финальный отчет
+        final_report = await self.shadow_trading.force_comprehensive_report()
+        logger.info("📊 === ФИНАЛЬНЫЙ ОТЧЕТ SHADOW TRADING ===")
+        logger.info(final_report)
+
+        # Генерируем финальный отчет
+        final_report = await self.shadow_trading.generate_daily_report()
+        logger.info("📊 === ФИНАЛЬНЫЙ ОТЧЕТ SHADOW TRADING ===")
+
+        overall = final_report.get('overall_performance', {})
+        if overall and 'error' not in overall:
+          logger.info(f"🎯 Всего сигналов: {overall.get('total_signals', 0)}")
+          logger.info(f"✅ Win Rate: {overall.get('win_rate_pct', 0)}%")
+          logger.info(f"💰 Общий P&L: {overall.get('total_pnl_pct', 0):+.2f}%")
+          logger.info(f"⚖️ Profit Factor: {overall.get('profit_factor', 0)}")
+
+        logger.info("=" * 50)
+        await self.shadow_trading.stop_shadow_trading()
+        logger.info("🌟 Shadow Trading система остановлена")
+
+      except Exception as e:
+        logger.error(f"Ошибка остановки Shadow Trading: {e}")
+
     # Закрываем соединения коннектора
     if self.connector:
       await self.connector.close()
+    # Экспортируем финальную статистику
+    if hasattr(self, 'adaptive_selector'):
+      self.adaptive_selector.export_adaptation_history(
+        f"logs/final_adaptation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+      )
 
     logger.info("Торговая система остановлена.")
 
@@ -1542,7 +2446,27 @@ class IntegratedTradingSystem:
           await self._log_performance_stats()
 
         if self._monitoring_cycles % 20 == 0:
-          await self.display_quality_statistics()
+          await self.display_ml_statistics()
+
+          # ======================= ИСПРАВЛЕНИЕ ЗДЕСЬ =======================
+          # Этот блок был добавлен, чтобы правильно обрабатывать команды
+        command_data = self.state_manager.get_command()
+        if command_data:
+          command_name = command_data.get('name')
+          logger.info(f"Получена новая команда из дашборда: {command_name}")
+          if command_name == 'export_regime_statistics':
+            await self.export_regime_statistics()
+          elif command_name == 'get_regime_statistics':
+            symbol = command_data.get('data', {}).get('symbol')
+            if symbol:
+              stats = self.market_regime_detector.get_regime_statistics(symbol)
+              self.state_manager.set_custom_data(f"regime_stats_{symbol}", stats)
+          # Добавьте обработку других команд по аналогии, если необходимо
+          # elif command_name == 'another_command':
+          #    ...
+          # Очищаем команду после выполнения
+          self.state_manager.clear_command()
+        # ================================================================
 
         # Ожидание перед следующим циклом
         await asyncio.sleep(monitoring_interval)
@@ -1736,6 +2660,16 @@ class IntegratedTradingSystem:
       # Синхронизация времени
       await self.connector.sync_time()
 
+      # Инициализация БД
+      await self.db_manager._create_tables_if_not_exist()
+
+      # Проверяем БД перед запуском
+      health = await self.db_monitor.check_database_health()
+      if health['status'] != 'healthy':
+        logger.warning(f"БД не в оптимальном состоянии при запуске: {health}")
+      else:
+        logger.info("✅ БД проверена, состояние нормальное")
+
       # Установка плеча для всех символов параллельно
       leverage = self.config.get('trade_settings', {}).get('leverage', 10)
       logger.info(f"Установка плеча {leverage} для {len(self.active_symbols)} символов...")
@@ -1776,8 +2710,41 @@ class IntegratedTradingSystem:
 
       self._correlation_task = asyncio.create_task(self._update_portfolio_correlations())
 
+      # Запускаем периодическую оценку стратегий
+      self._evaluation_task = asyncio.create_task(self.periodic_strategy_evaluation())
+
+      await self.periodic_regime_analysis()
+
       # Обновление статуса
       self.state_manager.set_status('running')
+
+      # Добавить задачу проверки ROI
+      self._roi_check_task = asyncio.create_task(self.periodic_roi_check())
+
+      monitoring_task = asyncio.create_task(self._database_monitoring_loop())
+      self._monitoring_tasks.append(monitoring_task)
+
+      logger.info("🚀 Система запущена с мониторингом БД")
+
+      try:
+        from analytics.roi_analytics import ROIAnalytics
+        roi_analytics = ROIAnalytics(self.db_manager)
+
+        logger.info("=== АНАЛИТИКА ROI НАСТРОЕК ===")
+
+        # Анализ за последние 7 дней
+        weekly_analysis = await roi_analytics.analyze_roi_performance(days=7)
+        if 'error' not in weekly_analysis:
+          logger.info(f"📊 Статистика за 7 дней:")
+          logger.info(f"  Сделок: {weekly_analysis['total_trades']}")
+          logger.info(f"  Винрейт: {weekly_analysis['win_rate']:.1f}%")
+          logger.info(f"  Общий PnL: {weekly_analysis['total_pnl']:.2f}")
+          logger.info(f"  SL срабатываний: {weekly_analysis['sl_hit_rate']:.1f}%")
+          logger.info(f"  TP достижений: {weekly_analysis['tp_hit_rate']:.1f}%")
+          logger.info(f"  💡 {weekly_analysis['recommendation']}")
+
+      except Exception as analytics_error:
+        logger.warning(f"Не удалось загрузить ROI аналитику: {analytics_error}")
 
       logger.info("✅ Торговая система успешно запущена в оптимизированном режиме")
 
@@ -1785,6 +2752,55 @@ class IntegratedTradingSystem:
       logger.critical(f"Критическая ошибка при запуске системы: {e}", exc_info=True)
       self.is_running = False
       raise
+
+  async def _database_monitoring_loop(self):
+      """Цикл мониторинга БД"""
+      while self.is_running:
+        try:
+          await asyncio.sleep(300)  # Проверка каждые 5 минут
+
+          health = await self.db_monitor.check_database_health()
+
+          # Логируем статистику
+          stats = health.get('stats', {})
+          if stats.get('total_operations', 0) > 0:
+            error_rate = (stats.get('failed_operations', 0) / stats['total_operations']) * 100
+            lock_rate = (stats.get('lock_errors', 0) / stats['total_operations']) * 100
+
+            logger.info(f"📊 Статистика БД: операций={stats['total_operations']}, "
+                        f"ошибок={error_rate:.1f}%, блокировок={lock_rate:.1f}%")
+
+          # Алерты при проблемах
+          if health['status'] != 'healthy':
+            logger.warning(f"⚠️ Проблемы с БД: {health['message']}")
+
+          if stats.get('lock_errors', 0) > 50:
+            logger.error(f"🚨 Критическое количество блокировок БД: {stats['lock_errors']}")
+
+        except Exception as e:
+          logger.error(f"Ошибка в цикле мониторинга БД: {e}")
+          await asyncio.sleep(60)
+
+  async def get_system_health(self) -> Dict[str, Any]:
+    """Получить общее состояние системы включая БД"""
+    try:
+      db_health = await self.db_monitor.check_database_health()
+
+      return {
+        'system_status': 'running' if self.is_running else 'stopped',
+        'database': db_health,
+        'uptime_seconds': time.time() - self.start_time if hasattr(self, 'start_time') else 0,
+        'active_components': {
+          'data_fetcher': hasattr(self, 'data_fetcher'),
+          'trade_executor': hasattr(self, 'trade_executor'),
+          'risk_manager': hasattr(self, 'risk_manager'),
+          'shadow_trading': hasattr(self, 'shadow_trading')
+        }
+      }
+
+    except Exception as e:
+      logger.error(f"Ошибка получения состояния системы: {e}")
+      return {'error': str(e)}
 
   async def _check_market_anomalies(self, symbol: str, data: pd.DataFrame) -> List[AnomalyReport]:
     """
@@ -1904,6 +2920,28 @@ class IntegratedTradingSystem:
     """
     Обработка торгового сигнала с учетом аномалий, корреляций и качества
     """
+    # --- НОВЫЙ БЛОК: ИНФОРМАЦИОННОЕ ЛОГИРОВАНИЕ ROI ЦЕЛЕЙ ---
+    try:
+      signal_logger.info(f"====== СИГНАЛ ДЛЯ {symbol} ПОЛУЧЕН ({signal.strategy_name}) ======")
+      signal_logger.info(f"Тип: {signal.signal_type.value}, Уверенность: {signal.confidence:.2f}, Цена: {signal.price}")
+
+      roi_targets = self.risk_manager.convert_roi_to_price_targets(
+        entry_price=signal.price,
+        signal_type=signal.signal_type
+      )
+      if roi_targets:
+        signal_logger.info(f"ROI ЦЕЛИ для {symbol}:")
+        signal_logger.info(
+          f"  SL: {roi_targets['stop_loss']['price']:.6f} (ROI: {roi_targets['stop_loss']['roi_pct']:.1f}%)")
+        signal_logger.info(
+          f"  TP: {roi_targets['take_profit']['price']:.6f} (ROI: {roi_targets['take_profit']['roi_pct']:.1f}%)")
+        signal_logger.info(f"  Risk/Reward: 1:{roi_targets['risk_reward_ratio']:.2f}")
+
+    except Exception as roi_error:
+      logger.warning(f"Ошибка получения ROI информации для {symbol}: {roi_error}")
+    # --- КОНЕЦ НОВОГО БЛОКА ---
+
+
     # 1. Оценка качества сигнала
     logger.info(f"Оценка качества сигнала для {symbol}...")
     signal_logger.info(f"КАЧЕСТВО: Начата оценка сигнала {symbol}")
@@ -2051,7 +3089,7 @@ class IntegratedTradingSystem:
     good_wr = results.get('good', {}).get('win_rate', 0)
     fair_wr = results.get('fair', {}).get('win_rate', 0)
 
-    recommendations = []
+    recommendations: list[str] = []
 
     if excellent_wr > 70:
       recommendations.append("Отличные сигналы показывают высокую эффективность - увеличьте размеры позиций для них")
@@ -2063,23 +3101,46 @@ class IntegratedTradingSystem:
     if avg_wr < 50:
       recommendations.append("Общий win rate ниже 50% - рекомендуется повысить минимальный порог качества")
 
-    return " | ".join(recommendations) if recommendations else "Система работает в нормальном режиме рекомендации на основе анализа качества"""
+    # Анализируем проблемы и даем рекомендации
+    if any("отсутствующих значений" in issue for issue in results):
+      recommendations.append(
+        "• Рассмотрите использование более продвинутых методов заполнения пропусков "
+        "(интерполяция, forward-fill с ограничением)"
+      )
 
-  if not results:
-    return 'Недостаточно данных для рекомендаций'
+    if any("дубликатов" in issue for issue in results):
+      recommendations.append(
+        "• Проверьте источник данных на предмет дублирования при загрузке"
+      )
 
-    # Анализируем win rate по категориям
-  excellent_wr = results.get('excellent', {}).get('win_rate', 0)
-  good_wr = results.get('good', {}).get('win_rate', 0)
-  fair_wr = results.get('fair', {}).get('win_rate', 0)
+    if any("выбросов" in issue for issue in results):
+      recommendations.append(
+        "• Примените робастное масштабирование или винсоризацию для уменьшения влияния выбросов"
+      )
 
-  recommendations = []
+    if any("объем данных" in issue.lower() for issue in results):
+      recommendations.append(
+        "• Увеличьте период загрузки исторических данных или добавьте больше символов"
+      )
 
-  if excellent_wr > 70:
-    recommendations.append("Отличные сигналы показывают высокую эффективность - увеличьте размеры позиций для них")
+    if any("несбалансированность" in issue for issue in results):
+      recommendations.append(
+        "• Используйте техники балансировки классов (SMOTE, undersampling) или "
+        "настройте веса классов в модели"
+      )
 
-  if fair_wr > good_wr:
-    recommendations.append(f"⚠️ Сигналы среднего качества работают лучше хороших - проверьте настройки о {logger.info({category} : {count}) сигналов
+    # Общие рекомендации
+    recommendations.extend([
+      "• Проверьте корректность временных меток и отсутствие пропусков во временном ряде",
+      "• Убедитесь, что все технические индикаторы рассчитаны корректно",
+      "• Рассмотрите добавление дополнительных признаков для улучшения качества модели"
+    ])
+
+    if recommendations:
+      return "Рекомендации по улучшению данных:\n" + "\n".join(recommendations)
+    else:
+      return "Система работает в нормальном режиме. Рекомендации на основе анализа качества."
+
 
   def set_quality_thresholds(self, min_score: float = 0.6,
                                quality_weights: Optional[Dict[str, float]] = None):
@@ -2167,9 +3228,218 @@ class IntegratedTradingSystem:
     from core.signal_quality_analyzer import SignalQualityAnalyzer, QualityScore
 
     # В методе __init__ добавьте инициализацию после correlation_manager:
-          # Инициализация анализатора качества сигналов
-          self.signal_quality_analyzer = SignalQualityAnalyzer(self.data_fetcher, self.db_manager)
-          self.min_quality_score = 0.6  # Минимальный балл качества для исполнения
+    # Инициализация анализатора качества сигналов
+    self.signal_quality_analyzer = SignalQualityAnalyzer(self.data_fetcher, self.db_manager)
+    self.min_quality_score = 0.6  # Минимальный балл качества для исполнения
 
     # Обновите метод _process_trading_signal_with_correlation, добавив оценку качества:
+
+  async def process_trade_feedback(self, symbol: str, trade_id: int, trade_result: Dict[str, Any]):
+      """
+      Обрабатывает обратную связь после закрытия сделки
+
+      Args:
+          symbol: Торговый символ
+          trade_id: ID сделки
+          trade_result: Результаты сделки (profit_loss, strategy_name, etc.)
+      """
+      try:
+        strategy_name = trade_result.get('strategy_name')
+
+        # 1. Обновляем производительность стратегии
+        if hasattr(self, 'adaptive_selector'):
+          self.adaptive_selector.update_strategy_performance(strategy_name, trade_result)
+
+        # 2. Сохраняем данные для переобучения ML
+        if self.retraining_manager:
+          await self.retraining_manager.record_trade_result(symbol, trade_result)
+
+        # 3. Обновляем веса в Enhanced ML (если используется)
+        if self.use_enhanced_ml and self.enhanced_ml_model:
+          # Сохраняем результат для будущего переобучения
+          feedback_data = {
+            'symbol': symbol,
+            'timestamp': datetime.now(),
+            'features': trade_result.get('entry_features', {}),
+            'actual_outcome': 1 if trade_result['profit_loss'] > 0 else 0,
+            'predicted_outcome': trade_result.get('predicted_signal'),
+            'confidence': trade_result.get('confidence')
+          }
+
+          # Можно сохранить в отдельную таблицу для анализа
+          self._save_ml_feedback(feedback_data)
+
+        # 4. Адаптируем параметры риска на основе результатов
+        await self._adapt_risk_parameters(symbol, trade_result)
+
+        logger.info(f"Обработана обратная связь для сделки {trade_id}: "
+                    f"стратегия={strategy_name}, результат={trade_result['profit_loss']:.2f}")
+
+      except Exception as e:
+        logger.error(f"Ошибка обработки обратной связи для сделки {trade_id}: {e}")
+
+  def _save_ml_feedback(self, feedback_data: Dict[str, Any]):
+    """Сохраняет обратную связь для ML моделей"""
+    try:
+      # Создаем таблицу если не существует
+      self.db_manager.conn.execute("""
+              CREATE TABLE IF NOT EXISTS ml_feedback (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  symbol TEXT NOT NULL,
+                  timestamp DATETIME NOT NULL,
+                  features TEXT,
+                  actual_outcome INTEGER,
+                  predicted_outcome INTEGER,
+                  confidence REAL,
+                  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+              )
+          """)
+
+      self.db_manager.conn.execute("""
+              INSERT INTO ml_feedback 
+              (symbol, timestamp, features, actual_outcome, predicted_outcome, confidence)
+              VALUES (?, ?, ?, ?, ?, ?)
+          """, (
+        feedback_data['symbol'],
+        feedback_data['timestamp'],
+        json.dumps(feedback_data['features']),
+        feedback_data['actual_outcome'],
+        feedback_data['predicted_outcome'],
+        feedback_data['confidence']
+      ))
+
+      self.db_manager.conn.commit()
+
+    except Exception as e:
+      logger.error(f"Ошибка сохранения ML feedback: {e}")
+
+  async def _adapt_risk_parameters(self, symbol: str, trade_result: Dict[str, Any]):
+    """Адаптирует параметры риска на основе результатов"""
+    # Анализируем результаты последних N сделок
+    recent_trades = self.db_manager.get_recent_closed_trades(symbol, limit=20)
+
+    if len(recent_trades) >= 10:
+      wins = sum(1 for t in recent_trades if t['profit_loss'] > 0)
+      win_rate = wins / len(recent_trades)
+
+      # Адаптируем max_positions на основе win rate
+      current_max_positions = self.config.get('risk_management', {}).get('max_positions_per_symbol', 3)
+
+      if win_rate > 0.65:  # Хорошая производительность
+        new_max_positions = min(current_max_positions + 1, 5)
+      elif win_rate < 0.35:  # Плохая производительность
+        new_max_positions = max(current_max_positions - 1, 1)
+      else:
+        new_max_positions = current_max_positions
+
+      if new_max_positions != current_max_positions:
+        self.config['risk_management']['max_positions_per_symbol'] = new_max_positions
+        logger.info(f"Адаптирован max_positions для {symbol}: {current_max_positions} -> {new_max_positions}")
+
+  async def periodic_strategy_evaluation(self):
+    """Периодическая оценка и адаптация стратегий"""
+    while self.is_running:
+      try:
+        await asyncio.sleep(3600)  # Каждый час
+
+        if hasattr(self, 'adaptive_selector'):
+          # Отключаем плохо работающие стратегии
+          self.adaptive_selector.disable_poorly_performing_strategies()
+
+          # Получаем сводку производительности
+          performance = self.adaptive_selector.get_performance_summary()
+
+          logger.info("Периодическая оценка стратегий:")
+          for strategy, metrics in performance.items():
+            logger.info(f"  {strategy}: активна={metrics['active']}, "
+                        f"вес={metrics['weight']:.2f}, WR={metrics['win_rate']:.2f}")
+
+            # Экспортируем историю адаптаций
+            self.adaptive_selector.export_adaptation_history(
+              f"logs/adaptation_history_{datetime.now().strftime('%Y%m%d')}.csv"
+            )
+
+      except Exception as e:
+        logger.error(f"Ошибка периодической оценки стратегий: {e}")
+
+
+  async def check_strategy_adaptation(self, symbol: str):
+      """Проверяет необходимость адаптации стратегий для символа"""
+      if not hasattr(self, 'market_regime_detector'):
+        return
+
+      # Получаем предыдущий режим из истории
+      previous_regime = None
+      if symbol in self.market_regime_detector.regime_history:
+        history = list(self.market_regime_detector.regime_history[symbol])
+        if len(history) >= 2:
+          previous_regime = history[-2].primary_regime
+
+      # Проверяем необходимость адаптации
+      should_adapt, reason = self.market_regime_detector.should_adapt_strategy(
+        symbol, previous_regime
+      )
+
+      if should_adapt:
+        logger.info(f"Адаптация стратегий для {symbol}: {reason}")
+
+        # Получаем статистику режимов
+        stats = self.market_regime_detector.get_regime_statistics(symbol)
+
+        # Корректируем веса стратегий на основе статистики
+        if hasattr(self, 'adaptive_selector') and stats:
+          regime_distribution = stats.get('regime_distribution', {})
+          # Увеличиваем вес стратегий, которые хорошо работают в частых режимах
+          for regime_name, count in regime_distribution.items():
+            if count > 10:  # Если режим встречался часто
+              recommended_strategies = self.market_regime_detector.regime_parameters.get(
+                MarketRegime(regime_name),
+                self.market_regime_detector.regime_parameters[MarketRegime.RANGING]
+              ).recommended_strategies
+
+              for strategy in recommended_strategies:
+                if strategy in self.adaptive_selector.strategy_performance:
+                  self.adaptive_selector._adapt_strategy_weight(strategy)
+
+  async def export_regime_statistics(self):
+    """Экспортирует статистику режимов для всех символов"""
+    export_dir = "logs/regime_statistics"
+    os.makedirs(export_dir, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    for symbol in self.active_symbols:
+      if symbol in self.market_regime_detector.regime_history:
+        filepath = f"{export_dir}/{symbol}_regimes_{timestamp}.csv"
+        self.market_regime_detector.export_regime_data(symbol, filepath)
+
+    logger.info(f"Статистика режимов экспортирована в {export_dir}")
+
+  async def periodic_roi_check(self):
+    """
+    Периодическая проверка ROI настроек (каждые 24 часа)
+    """
+    while self.is_running:
+      try:
+        await asyncio.sleep(24 * 60 * 60)  # 24 часа
+
+        logger.info("=== ПЕРИОДИЧЕСКАЯ ПРОВЕРКА ROI НАСТРОЕК ===")
+
+        # Проверяем актуальность настроек
+        validation = self.risk_manager.validate_roi_parameters()
+
+        if validation['warnings']:
+          logger.warning("Обнаружены предупреждения в ROI настройках:")
+          for warning in validation['warnings']:
+            logger.warning(f"  ⚠️  {warning}")
+
+        # Выводим краткий отчет
+        roi_report = self.risk_manager.get_roi_summary_report()
+        logger.info("Текущие ROI настройки:")
+        for line in roi_report.split('\n')[:10]:  # Первые 10 строк
+          if line.strip():
+            logger.info(line)
+
+      except Exception as e:
+        logger.error(f"Ошибка периодической проверки ROI: {e}")
 

@@ -1,4 +1,6 @@
+import asyncio
 from datetime import datetime, timezone
+from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Any, Tuple, Optional
 
 import ccxt
@@ -7,7 +9,7 @@ import config
 from core.bybit_connector import BybitConnector
 from core.enums import Timeframe, SignalType
 # from core.integrated_system import IntegratedTradingSystem
-from core.schemas import TradingSignal
+from core.schemas import TradingSignal, GridSignal
 from data.database_manager import AdvancedDatabaseManager
 
 from utils.logging_config import setup_logging, get_logger
@@ -19,16 +21,40 @@ logger = get_logger(__name__)
 
 
 class TradeExecutor:
-  def __init__(self, connector: BybitConnector, db_manager: AdvancedDatabaseManager,data_fetcher: DataFetcher,settings: Dict[str, Any] ):
+  def __init__(self, connector: BybitConnector, db_manager: AdvancedDatabaseManager, data_fetcher: DataFetcher,settings: Dict[str, Any],risk_manager=None ):
     """
 
     """
     self.connector = connector
     self.db_manager = db_manager
+    self.risk_manager = risk_manager
     # self.telegram_bot = telegram_bot
     self.data_fetcher = data_fetcher
     self.config = settings
     # self.trading_system = IntegratedTradingSystem(db_manager=db_manager)
+    self.pending_orders = {}
+    self.execution_stats = {
+      'orders_placed': 0,
+      'orders_filled': 0,
+      'orders_failed': 0,
+      'total_slippage': 0.0
+    }
+
+  async def _get_roi_details(self, symbol: str, signal: TradingSignal) -> Optional[Dict]:
+    """Получает детали ROI для сигнала"""
+    try:
+      # ИСПРАВЛЕНИЕ: Проверяем наличие risk_manager
+      if not self.risk_manager:
+        logger.warning(f"Risk manager не настроен для получения ROI деталей {symbol}")
+        return None
+
+      # Получаем детали через risk_manager
+      roi_details = await self.risk_manager.calculate_roi_details(symbol, signal)
+      return roi_details
+
+    except Exception as e:
+      logger.error(f"Ошибка получения ROI деталей для {symbol}: {e}")
+      return None
 
   async def execute_trade(self, signal: TradingSignal, symbol: str, quantity: float) -> Tuple[bool, Optional[Dict]]:
     """
@@ -36,11 +62,27 @@ class TradeExecutor:
     """
     logger.info(
       f"ИСПОЛНИТЕЛЬ для {symbol}: Получена команда на реальное исполнение. Сигнал: {signal.signal_type.value}, Кол-во: {quantity:.5f}")
+    logger.info(
+        f"Стратегия: {signal.strategy_name}")
 
     try:
       # 1. Получаем настройки торговли из сохраненного конфига
       trade_settings = self.config.get('trade_settings', {})
       leverage = trade_settings.get('leverage', 10)
+
+      balance_data = await self.connector.get_account_balance(account_type="UNIFIED", coin="USDT")
+      if balance_data and 'coin' in balance_data and balance_data['coin']:
+        available_balance = float(balance_data.get('totalAvailableBalance', 0))
+        leverage = self.config.get('trade_settings', {}).get('leverage', 10)
+        cost_of_trade = (signal.price * quantity) / leverage
+
+        if cost_of_trade > available_balance:
+          logger.error(
+            f"ФИНАЛЬНАЯ ПРОВЕРКА: Недостаточно средств для {symbol}. Требуется: {cost_of_trade:.2f}, доступно: {available_balance:.2f}")
+          signal_logger.error("ИСПОЛНИТЕЛЬ: ОТКЛОНЕНО. Недостаточно средств.")
+          return False, None
+      else:
+        logger.warning("Не удалось выполнить финальную проверку баланса. Продолжаем с осторожностью.")
 
 
       # 1. Формируем параметры для ордера
@@ -48,7 +90,8 @@ class TradeExecutor:
         'symbol': symbol,
         'side': 'Buy' if signal.signal_type == SignalType.BUY else 'Sell',
         'orderType': 'Market',
-        'qty': str(quantity)
+        'qty': str(quantity),
+        'positionIdx': 0
       }
 
       # Bybit API требует, чтобы SL/TP были строками
@@ -58,6 +101,22 @@ class TradeExecutor:
         params['takeProfit'] = str(abs(signal.take_profit))
 
       # leverage = self.config.get('trade_settings', {}).get('leverage', 10)
+
+      try:
+        roi_info = self.risk_manager.convert_roi_to_price_targets(
+          entry_price=signal.price,
+          signal_type=signal.signal_type
+        )
+
+        logger.info(f"ROI ДЕТАЛИ СДЕЛКИ для {symbol}:")
+        logger.info(f"  Цена входа: {signal.price:.6f}")
+        logger.info(f"  SL: {signal.stop_loss:.6f} (ROI: {roi_info['stop_loss']['roi_pct']:.1f}%)")
+        logger.info(f"  TP: {signal.take_profit:.6f} (ROI: {roi_info['take_profit']['roi_pct']:.1f}%)")
+        logger.info(f"  Потенциальная потеря: ${roi_info['stop_loss']['distance_abs'] * quantity:.2f}")
+        logger.info(f"  Потенциальная прибыль: ${roi_info['take_profit']['distance_abs'] * quantity:.2f}")
+
+      except Exception as roi_error:
+        logger.warning(f"Не удалось получить ROI детали для {symbol}: {roi_error}")
 
       # 2. Отправляем ордер на биржу
       logger.info(f"Отправка ордера на открытие: {params}")
@@ -78,42 +137,22 @@ class TradeExecutor:
         # Возвращаем успех и детали сделки
         return True, trade_details
       else:
-        ret_msg = order_response.get('retMsg', 'Нет сообщения') if order_response else 'Нет ответа'
-        logger.error(
-          f"❌ Не удалось разместить ордер на открытие для {symbol}. Причина: {ret_msg}. Ответ биржи: {order_response}")
-        signal_logger.error(f"ИСПОЛНИТЕЛЬ: ОШИБКА. Ордер не принят. Ответ: {order_response}")
+        if order_response:
+          # Если ответ есть, но в нем ошибка
+          ret_msg = order_response.get('retMsg', 'Неизвестная ошибка API')
+          logger.error(f"❌ Не удалось разместить ордер для {symbol}. Причина: {ret_msg}. Ответ биржи: {order_response}")
+          signal_logger.error(f"ИСПОЛНИТЕЛЬ: ОШИБКА. Ордер не принят. Ответ: {ret_msg}")
+        else:
+          # Если ответа нет совсем (например, таймаут сети)
+          logger.error(f"❌ Не удалось разместить ордер для {symbol}. Нет ответа от биржи.")
+          signal_logger.error("ИСПОЛНИТЕЛЬ: ОШИБКА. Нет ответа от биржи.")
+
         signal_logger.info(f"====== ЦИКЛ СИГНАЛА ДЛЯ {symbol} ЗАВЕРШЕН ======\n")
         return False, None
 
     except Exception as e:
       logger.error(f"Критическая ошибка при исполнении сделки {symbol}: {e}", exc_info=True)
       return False, None
-
-
-  # async def execute_trade(self, signal: TradingSignal, symbol: str, quantity: float):
-  #   """Исполняет торговый сигнал через интегрированную систему"""
-  #   logger.info(f"ИСПОЛНИТЕЛЬ для {symbol}: Получена команда на исполнение сделки. Сигнал: {signal.signal_type.value}, Кол-во: {quantity:.4f}")
-  #
-  #   try:
-  #     # Создаем order_id
-  #     order_id = f"{symbol}_{int(datetime.now().timestamp())}"
-  #
-  #     # Добавляем сделку через AdvancedDatabaseManager
-  #     trade_id = await self.db_manager.add_trade_with_signal(
-  #       signal=signal,
-  #       order_id=order_id,
-  #       quantity=quantity,
-  #       leverage=DEFAULT_LEVERAGE
-  #     )
-  #
-  #     if trade_id:
-  #       # Логируем исполненный сигнал
-  #       await self.db_manager.log_signal(signal, symbol, executed=True)
-  #       return True
-  #     return False
-  #   except Exception as e:
-  #     logger.error(f"Ошибка исполнения сделки: {e}")
-  #     return False
 
   async def close_position(self, symbol: str) -> bool:
     """
@@ -160,7 +199,8 @@ class TradeExecutor:
         'side': close_side,
         'orderType': 'Market',
         'qty': str(float(pos_size_str)),
-        'reduceOnly': True
+        'reduceOnly': True,
+        'positionIdx': 0
       }
       # 4. Отправляем ордер
       order_response = await self.connector.place_order(**params)
@@ -174,6 +214,8 @@ class TradeExecutor:
         # в отдельном процессе, который отслеживает исполнение ордеров.
 
         return True
+
+
       else:
         logger.error(f"❌ Не удалось разместить ордер на закрытие для {symbol}. Ответ биржи: {order_response}")
         return False
@@ -418,3 +460,98 @@ class TradeExecutor:
       # Можно проверить, есть ли он в нашей БД как открытый и пометить его как "потерянный" или "ошибка".
     except Exception as e:
       logger.error(f"Ошибка при обновлении статуса ордера {order_id} ({symbol}): {e}", exc_info=True)
+
+  async def execute_grid_trade(self, grid_signal: GridSignal) -> bool:
+    """
+    ИСПОЛНЯЕТ СЕТОЧНЫЙ СИГНАЛ С ПРОВЕРКОЙ БАЛАНСА И КОНТРОЛЕМ ЧАСТОТЫ ЗАПРОСОВ.
+    """
+    logger.info(f"ИСПОЛНИТЕЛЬ для {grid_signal.symbol}: Получена команда на развертывание СЕТКИ.")
+    signal_logger.info(
+      f"СЕТКА: Валидация для {grid_signal.symbol}. Buy: {len(grid_signal.buy_orders)}, Sell: {len(grid_signal.sell_orders)} уровней.")
+
+    try:
+      # --- ШАГ 1: Проверка на минимальные требования и баланс ПЕРЕД отправкой ---
+
+      # Получаем настройки из конфига
+      trade_settings = self.config.get('trade_settings', {})
+      total_allocation_usdt = trade_settings.get('grid_total_usdt_allocation', 50.0)
+      min_order_value_usdt = trade_settings.get('min_order_value_usdt', 5.5)
+
+      # Рассчитываем размер ОДНОГО ордера в сетке
+      num_buy_orders = len(grid_signal.buy_orders)
+      num_sell_orders = len(grid_signal.sell_orders)
+
+      if num_buy_orders == 0 or num_sell_orders == 0:
+        logger.warning("Сетка не может быть развернута: нет ордеров на покупку или продажу.")
+        signal_logger.warning("СЕТКА: Отклонено - нет уровней.")
+        return False
+
+      # Размер одного ордера на покупку и продажу
+      buy_order_size_usdt = total_allocation_usdt / num_buy_orders
+      sell_order_size_usdt = total_allocation_usdt / num_sell_orders
+
+      # Проверяем, соответствует ли размер ОДНОГО ордера минимальным требованиям биржи
+      if buy_order_size_usdt < min_order_value_usdt or sell_order_size_usdt < min_order_value_usdt:
+        logger.error(
+          f"Невозможно развернуть сетку: расчетный размер ордера ({buy_order_size_usdt:.2f} USDT) меньше минимального ({min_order_value_usdt} USDT).")
+        signal_logger.error(f"СЕТКА: Отклонено - размер ордера слишком мал.")
+        logger.info("РЕКОМЕНДАЦИЯ: Увеличьте 'grid_total_usdt_allocation' или уменьшите 'grid_levels' в настройках.")
+        return False
+
+      # --- ШАГ 2: Последовательное размещение ордеров с задержкой ---
+
+      instrument_info = await self.data_fetcher.get_instrument_info(grid_signal.symbol)
+      lot_size_filter = instrument_info.get('lotSizeFilter', {})
+      qty_step_str = lot_size_filter.get('qtyStep', '1')
+
+      all_orders_params = []
+
+      # Подготовка параметров для ордеров на покупку
+      for order in grid_signal.buy_orders:
+        qty = (buy_order_size_usdt / order.price) if order.price > 0 else 0
+        adjusted_qty = float(
+          (Decimal(str(qty)) / Decimal(qty_step_str)).to_integral_value(rounding=ROUND_DOWN) * Decimal(qty_step_str))
+        if adjusted_qty > 0:
+          all_orders_params.append(
+            {'symbol': grid_signal.symbol, 'side': 'Buy', 'orderType': 'Limit', 'qty': str(adjusted_qty),
+             'price': str(order.price),'positionIdx': 0})
+
+      # Подготовка параметров для ордеров на продажу
+      for order in grid_signal.sell_orders:
+        qty = (sell_order_size_usdt / order.price) if order.price > 0 else 0
+        adjusted_qty = float(
+          (Decimal(str(qty)) / Decimal(qty_step_str)).to_integral_value(rounding=ROUND_DOWN) * Decimal(qty_step_str))
+        if adjusted_qty > 0:
+          all_orders_params.append(
+            {'symbol': grid_signal.symbol, 'side': 'Sell', 'orderType': 'Limit', 'qty': str(adjusted_qty),
+             'price': str(order.price)})
+
+      if not all_orders_params:
+        logger.warning("Нет ордеров для размещения после корректировки количества.")
+        return False
+
+      logger.info(f"Размещение {len(all_orders_params)} лимитных ордеров для сетки {grid_signal.symbol} с задержкой...")
+
+      success_count = 0
+      # Размещаем ордера ПО ОДНОМУ с задержкой, чтобы не превысить rate limit
+      for params in all_orders_params:
+        try:
+          result = await self.connector.place_order(**params)
+          if result and result.get('orderId'):
+            success_count += 1
+            logger.debug(f"Успешно размещен ордер: {params}")
+          else:
+            logger.error(f"Ошибка размещения ордера в сетке: {result.get('retMsg', 'Нет ответа')}")
+
+          # --- Контроль частоты запросов ---
+          await asyncio.sleep(0.3)  # Задержка 120 мс (8 запросов/сек)
+        except Exception as e:
+          logger.error(f"Исключение при размещении ордера {params}: {e}")
+
+      logger.info(f"Успешно размещено {success_count} из {len(all_orders_params)} ордеров сетки.")
+      signal_logger.info(f"СЕТКА: Успешно размещено {success_count}/{len(all_orders_params)} ордеров.")
+      return success_count > 0
+
+    except Exception as e:
+      logger.error(f"Критическая ошибка при исполнении сетки {grid_signal.symbol}: {e}", exc_info=True)
+      return False

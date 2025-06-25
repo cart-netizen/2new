@@ -309,100 +309,106 @@ class BybitConnector:
       # Применяем rate limiting для конкретного endpoint
       endpoint_limiter = self.endpoint_limiters.get(endpoint, self.rate_limiter)
 
-      async with endpoint_limiter:
-        async with self.semaphore:
-          url = self.base_url + endpoint
+      max_retries = 3
+      base_delay = 1  # Задержка в секундах
 
-          # Обновляем статистику
-          self.request_stats[endpoint] += 1
+      for attempt in range(max_retries):
+        async with endpoint_limiter:
+          async with self.semaphore:
+            url = self.base_url + endpoint
 
-          # Автоматическая синхронизация времени при необходимости
-          if not is_retry:
-            await self.sync_time()
+            # Обновляем статистику
+            self.request_stats[endpoint] += 1
 
-          timestamp = str(int((time.time() + self.time_offset / 1000) * 1000))
-
-          headers = {
-            'X-BAPI-API-KEY': self.api_key,
-            'X-BAPI-TIMESTAMP': timestamp,
-            'X-BAPI-RECV-WINDOW': str(self.recv_window),
-            'Content-Type': 'application/json'
-          }
-
-          # Подготовка параметров
-          if params is None:
-            params = {}
-
-          # Генерация подписи
-          if method == 'GET':
-            # Для GET запросов НЕ сортируем, сохраняем порядок как в оригинале
-            query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
-            param_str = f"{timestamp}{self.api_key}{self.recv_window}{query_string}"
-          else:  # POST
-            # Для POST запросов используем JSON без сортировки
-            body_str = json.dumps(params) if params else ""
-            param_str = f"{timestamp}{self.api_key}{self.recv_window}{body_str}"
-
-          signature = self._generate_signature(param_str)
-          headers['X-BAPI-SIGN'] = signature
-
-          try:
-            session = await self.optimized_session.get_session()
-
-            # Выполнение запроса с оптимизированными таймаутами
-            request_timeout = aiohttp.ClientTimeout(total=10, connect=3)
-
-            if method == 'GET':
-              async with session.get(url, params=params, headers=headers, timeout=request_timeout) as response:
-                data = await response.json()
-            else:  # POST
-              async with session.post(url, json=params, headers=headers, timeout=request_timeout) as response:
-                data = await response.json()
-
-            ret_code = data.get('retCode', -1)
-
-            if ret_code == 0 or ret_code in treat_as_success:
-              result = data.get('result', {})
-
-              # Кэшируем успешный результат
-              if cache_key and use_cache:
-                self._set_cache(cache_key, result)
-
-              return result
-
-            # Обработка ошибок
-            self.error_stats[f"API Error {ret_code}"] += 1
-
-            if ret_code == 10002 and not is_retry:
-              logger.warning(f"Ошибка времени для {endpoint}. Запуск принудительной ресинхронизации...")
-              await self.sync_time(force=True)
-              logger.info("Повторная отправка запроса после ресинхронизации...")
-              return await self._make_request(method, endpoint, params, treat_as_success, is_retry=True,
-                                              use_cache=use_cache)
-
-            logger.error(
-              f"Ошибка API Bybit (HTTP: {response.status}, Код: {ret_code} для {endpoint}): {data.get('retMsg')}")
-            return None
-
-          except asyncio.TimeoutError:
-            self.error_stats["Timeout"] += 1
-            logger.error(f"Таймаут запроса к {endpoint}")
-            return None
-
-          except aiohttp.ClientConnectionError as e:
-            self.error_stats["Connection Error"] += 1
-            logger.error(f"Ошибка соединения: {e}")
-
+            # Автоматическая синхронизация времени при необходимости
             if not is_retry:
-              await asyncio.sleep(1)
-              return await self._make_request(method, endpoint, params, treat_as_success, is_retry=True,
-                                              use_cache=use_cache)
-            return None
+              await self.sync_time()
 
-          except Exception as e:
-            self.error_stats["Unknown Error"] += 1
-            logger.error(f"Непредвиденная ошибка в _make_request при запросе к {endpoint}: {e}", exc_info=True)
-            return None
+            timestamp = str(int((time.time() + self.time_offset / 1000) * 1000))
+
+            headers = {
+              'X-BAPI-API-KEY': self.api_key,
+              'X-BAPI-TIMESTAMP': timestamp,
+              'X-BAPI-RECV-WINDOW': str(self.recv_window),
+              'Content-Type': 'application/json'
+            }
+
+            # Подготовка параметров
+            if params is None:
+              params = {}
+
+            # Генерация подписи
+            if method == 'GET':
+              # Для GET запросов НЕ сортируем, сохраняем порядок как в оригинале
+              query_string = '&'.join([f"{k}={v}" for k, v in params.items()])
+              param_str = f"{timestamp}{self.api_key}{self.recv_window}{query_string}"
+            else:  # POST
+              # Для POST запросов используем JSON без сортировки
+              body_str = json.dumps(params) if params else ""
+              param_str = f"{timestamp}{self.api_key}{self.recv_window}{body_str}"
+
+            signature = self._generate_signature(param_str)
+            headers['X-BAPI-SIGN'] = signature
+
+            try:
+              session = await self.optimized_session.get_session()
+
+              # Выполнение запроса с оптимизированными таймаутами
+              request_timeout = aiohttp.ClientTimeout(total=20, connect=5)
+
+              if method == 'GET':
+                async with session.get(url, params=params, headers=headers, timeout=request_timeout) as response:
+                  data = await response.json()
+              else:  # POST
+                async with session.post(url, json=params, headers=headers, timeout=request_timeout) as response:
+                  data = await response.json()
+
+              ret_code = data.get('retCode', -1)
+
+              if ret_code == 0 or ret_code in treat_as_success:
+                result = data.get('result', {})
+
+                # Кэшируем успешный результат
+                if cache_key and use_cache:
+                  self._set_cache(cache_key, result)
+
+                return result
+
+              # Обработка ошибок
+              self.error_stats[f"API Error {ret_code}"] += 1
+
+              if ret_code == 10002 and not is_retry:
+                logger.warning(f"Ошибка времени для {endpoint}. Запуск принудительной ресинхронизации...")
+                await self.sync_time(force=True)
+                logger.info("Повторная отправка запроса после ресинхронизации...")
+                return await self._make_request(method, endpoint, params, treat_as_success, is_retry=True,
+                                                use_cache=use_cache)
+
+              logger.error(
+                f"Ошибка API Bybit (HTTP: {response.status}, Код: {ret_code} для {endpoint}): {data.get('retMsg')}")
+              return None
+
+            except asyncio.TimeoutError:
+              self.error_stats["Timeout"] += 1
+              logger.error(f"Таймаут запроса к {endpoint}")
+              return None
+
+            except aiohttp.ClientConnectionError as e:
+              self.error_stats["Connection Error"] += 1
+              logger.error(f"Ошибка соединения: {e}")
+
+              if not is_retry:
+                await asyncio.sleep(1)
+                return await self._make_request(method, endpoint, params, treat_as_success, is_retry=True,
+                                                use_cache=use_cache)
+              return None
+
+            except Exception as e:
+              self.error_stats["Unknown Error"] += 1
+              logger.error(f"Непредвиденная ошибка в _make_request при запросе к {endpoint}: {e}", exc_info=True)
+              return None
+
+      return None  # Возврат None, если все попытки провалились
 
   async def get_usdt_perpetual_contracts(self) -> List[Dict[str, Any]]:
     """Получает список всех бессрочных USDT контрактов с кэшированием"""

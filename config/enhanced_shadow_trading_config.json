@@ -1,0 +1,94 @@
+{
+  "enhanced_shadow_trading": {
+    "enabled": true,
+    "version": "2.0.0",
+
+    "monitoring": {
+      "price_update_interval_seconds": 30,
+      "signal_tracking_duration_hours": 24,
+      "auto_finalize_expired_signals": true,
+      "max_concurrent_tracking": 1000
+    },
+
+    "analytics": {
+      "advanced_patterns_enabled": true,
+      "anomaly_detection_enabled": true,
+      "ml_features_enabled": true,
+      "correlation_analysis_enabled": true,
+      "min_signals_for_pattern_analysis": 10,
+      "confidence_levels": [0.5, 0.6, 0.7, 0.8, 0.9, 0.95],
+      "lookback_periods": [1, 3, 7, 14, 30, 90]
+    },
+
+    "performance_thresholds": {
+      "target_win_rate_pct": 60,
+      "min_profit_factor": 1.5,
+      "max_drawdown_pct": 15,
+      "min_signals_per_day": 1,
+      "max_signals_per_day": 20,
+      "confidence_threshold": 0.6
+    },
+
+    "alerts": {
+      "enabled": true,
+      "telegram_integration": false,
+      "email_integration": false,
+      "cooldown_minutes": 60,
+
+      "thresholds": {
+        "low_win_rate_pct": 40,
+        "high_filter_rate_pct": 80,
+        "low_profit_factor": 1.2,
+        "high_loss_streak": 5,
+        "low_daily_signals": 0.5,
+        "high_daily_signals": 15,
+        "anomaly_score_threshold": -0.5
+      }
+    },
+
+    "optimization": {
+      "auto_optimization_enabled": true,
+      "optimization_frequency_hours": 24,
+      "min_data_points": 50,
+      "confidence_adjustment_step": 0.05,
+      "max_confidence_threshold": 0.95,
+      "min_confidence_threshold": 0.5
+    },
+
+    "reporting": {
+      "auto_reports_enabled": true,
+      "daily_summary_time_utc": 9,
+      "weekly_report_day": "monday",
+      "save_reports_to_file": true,
+      "reports_directory": "reports/shadow_trading",
+
+      "report_sections": {
+        "performance_summary": true,
+        "source_analysis": true,
+        "symbol_analysis": true,
+        "time_analysis": true,
+        "pattern_analysis": true,
+        "filter_analysis": true,
+        "optimization_recommendations": true
+      }
+    },
+
+    "database": {
+      "cleanup_old_signals_days": 180,
+      "backup_frequency_hours": 24,
+      "max_price_tracking_points": 1440,
+      "compress_old_data": true
+    },
+
+    "metadata_collection": {
+      "technical_indicators": true,
+      "market_regime_analysis": true,
+      "volatility_analysis": true,
+      "correlation_data": true,
+      "volume_analysis": true,
+      "system_metrics": true,
+      "ml_predictions": true,
+      "execution_data": true
+    }
+  }
+}

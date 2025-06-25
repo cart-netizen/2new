@@ -129,9 +129,10 @@ class MarketRegimeDetector:
     self.regime_accuracy = {}
     self.false_signals = deque(maxlen=100)
 
+
   def _initialize_regime_parameters(self) -> Dict[MarketRegime, RegimeParameters]:
     """Инициализирует оптимальные параметры для каждого режима"""
-    return {
+    regime_parameters = {
       MarketRegime.STRONG_TREND_UP: RegimeParameters(
         recommended_strategies=['Momentum_Spike', 'Dual_Thrust', 'Live_ML_Strategy'],
         avoided_strategies=['Mean_Reversion_BB'],
@@ -171,7 +172,7 @@ class MarketRegimeDetector:
       ),
 
       MarketRegime.RANGING: RegimeParameters(
-        recommended_strategies=['Mean_Reversion_BB', 'Live_ML_Strategy'],
+        recommended_strategies=['Mean_Reversion_BB', 'Live_ML_Strategy','Grid_Trading'],
         avoided_strategies=['Momentum_Spike', 'Dual_Thrust'],
         position_size_multiplier=0.8,
         stop_loss_multiplier=0.8,  # Узкие стопы в боковике
@@ -209,8 +210,8 @@ class MarketRegimeDetector:
       ),
 
       MarketRegime.QUIET: RegimeParameters(
-        recommended_strategies=[],  # Избегаем торговли
-        avoided_strategies=['ALL'],
+        recommended_strategies=['Grid_Trading'],  # Избегаем торговли
+        avoided_strategies=['Momentum_Spike', 'Dual_Thrust', 'Mean_Reversion_BB'],
         position_size_multiplier=0.3,
         stop_loss_multiplier=0.5,
         take_profit_multiplier=0.8,
@@ -270,11 +271,11 @@ class MarketRegimeDetector:
     for regime in [MarketRegime.TREND_DOWN, MarketRegime.STRONG_TREND_DOWN,
                    MarketRegime.WEAK_TREND_UP, MarketRegime.WEAK_TREND_DOWN,
                    MarketRegime.REVERSAL]:
-      if regime not in self.regime_parameters:
+      if regime not in regime_parameters:
         # Копируем похожие параметры
         if 'DOWN' in regime.value:
-          base = self.regime_parameters.get(MarketRegime.TREND_UP)
-          self.regime_parameters[regime] = RegimeParameters(
+          base = regime_parameters.get(MarketRegime.TREND_UP)
+          regime_parameters[regime] = RegimeParameters(
             recommended_strategies=base.recommended_strategies,
             avoided_strategies=base.avoided_strategies,
             position_size_multiplier=base.position_size_multiplier,
@@ -293,9 +294,9 @@ class MarketRegimeDetector:
             correlation_filter_strict=base.correlation_filter_strict
           )
         else:
-          self.regime_parameters[regime] = self.regime_parameters[MarketRegime.RANGING]
+          regime_parameters[regime] = regime_parameters[MarketRegime.RANGING]
 
-    return self.regime_parameters
+    return regime_parameters
 
   async def detect_regime(self, symbol: str, market_data: pd.DataFrame,
                           additional_timeframes: Optional[
@@ -313,7 +314,7 @@ class MarketRegimeDetector:
           return cached
 
       # 1. Извлекаем признаки режима
-      features = self._extract_regime_features(market_data)
+      features = self._extract_regime_features(market_data, additional_timeframes)
 
       # 2. Основное определение режима
       primary_regime = self._determine_primary_regime(features, market_data)
@@ -365,7 +366,8 @@ class MarketRegimeDetector:
       logger.error(f"Ошибка определения режима для {symbol}: {e}")
       return self._get_default_regime()
 
-  def _extract_regime_features(self, data: pd.DataFrame) -> Dict[str, Any]:
+  def _extract_regime_features(self, data: pd.DataFrame,
+                               additional_timeframes: Optional[Dict[Timeframe, pd.DataFrame]] = None) -> Dict[str, Any]:
     """Извлекает признаки для определения режима"""
     features = {}
 
@@ -392,6 +394,23 @@ class MarketRegimeDetector:
         features['trend_strength'] = np.clip(price_position * 10 + trend_alignment * 0.3, -1, 1)
       else:
         features['trend_strength'] = 0
+
+      if additional_timeframes:
+        # Анализ старших таймфреймов для подтверждения тренда
+        if Timeframe.FOUR_HOURS in additional_timeframes:
+          h4_data = additional_timeframes[Timeframe.FOUR_HOURS]
+          if len(h4_data) >= 20:
+            h4_sma20 = h4_data['close'].rolling(20).mean()
+            h4_trend = 1 if h4_data['close'].iloc[-1] > h4_sma20.iloc[-1] else -1
+            features['h4_trend_alignment'] = h4_trend
+
+        if Timeframe.ONE_DAY in additional_timeframes:
+          d1_data = additional_timeframes[Timeframe.ONE_DAY]
+          if len(d1_data) >= 10:
+            d1_high = d1_data['high'].max()
+            d1_low = d1_data['low'].min()
+            current_price = data['close'].iloc[-1]
+            features['d1_position'] = (current_price - d1_low) / (d1_high - d1_low + 1e-9)
 
       # 2. Волатильность
       returns = closes.pct_change()

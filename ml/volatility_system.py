@@ -449,28 +449,47 @@ class VolatilityPredictor:
     Returns:
         Прогноз волатильности
     """
+    # if not self.is_fitted:
+    #   raise ValueError("Модель не обучена. Сначала вызовите fit()")
+    #
+    # # Извлекаем признаки
+    # df_features = self.feature_calculator.extract_features(data)
+    #
+    # # Берем последнее наблюдение
+    # last_features = df_features.iloc[-1]
+    #
+    # feature_columns = [
+    #   'volatility_5', 'volatility_10', 'volatility_20', 'volatility_50',
+    #   'vol_ratio_5_20', 'vol_ratio_10_20', 'vol_ratio_20_50',
+    #   'vol_sma_5', 'vol_sma_10', 'vol_ema_5', 'vol_ema_10',
+    #   'vol_std_20', 'vol_skew_20', 'vol_kurt_20',
+    #   'price_change_1', 'price_change_5', 'price_change_20',
+    #   'volume_volatility_20', 'volume_price_correlation_20',
+    #   'rsi_14', 'bb_position', 'atr_14',
+    #   'hour_of_day', 'day_of_week', 'is_weekend'
+    # ]
+    #
+    # X = last_features[feature_columns].values.reshape(1, -1)
+    # current_volatility = last_features['volatility_20']
     if not self.is_fitted:
       raise ValueError("Модель не обучена. Сначала вызовите fit()")
 
-    # Извлекаем признаки
+      # Извлекаем все возможные признаки
     df_features = self.feature_calculator.extract_features(data)
+    last_features_row = df_features.iloc[-1:]  # Берем последнюю строку как DataFrame
 
-    # Берем последнее наблюдение
-    last_features = df_features.iloc[-1]
+    # --- ИСПРАВЛЕНИЕ: Используем сохраненный список признаков ---
+    # Проверяем, что все нужные колонки есть, и выставляем их в правильном порядке
+    # Отсутствующие колонки (если есть) будут заполнены NaN
+    X_df = last_features_row.reindex(columns=self.feature_names_in_)
 
-    feature_columns = [
-      'volatility_5', 'volatility_10', 'volatility_20', 'volatility_50',
-      'vol_ratio_5_20', 'vol_ratio_10_20', 'vol_ratio_20_50',
-      'vol_sma_5', 'vol_sma_10', 'vol_ema_5', 'vol_ema_10',
-      'vol_std_20', 'vol_skew_20', 'vol_kurt_20',
-      'price_change_1', 'price_change_5', 'price_change_20',
-      'volume_volatility_20', 'volume_price_correlation_20',
-      'rsi_14', 'bb_position', 'atr_14',
-      'hour_of_day', 'day_of_week', 'is_weekend'
-    ]
+    # Заполняем возможные пропуски, которые могли появиться после reindex
+    X_df.fillna(method='ffill', inplace=True)
+    X_df.fillna(method='bfill', inplace=True)
+    X_df.fillna(0, inplace=True)
 
-    X = last_features[feature_columns].values.reshape(1, -1)
-    current_volatility = last_features['volatility_20']
+    X = X_df.values.reshape(1, -1)
+    current_volatility = last_features_row['volatility_20'].iloc[0]
 
     predictions = {}
 
@@ -857,82 +876,21 @@ class VolatilityPredictionSystem:
     if self.auto_retrain and self.monitor.should_retrain():
       self.monitor.retrain_model(self.data_history)
 
-  # def get_volatility_prediction(self, current_data: pd.DataFrame) -> VolatilityPrediction:
-  #   """
-  #   Получение прогноза волатильности
-  #
-  #   Args:
-  #       current_data: Текущие рыночные данные
-  #
-  #   Returns:
-  #       Прогноз волатильности
-  #   """
-  #   if not self.predictor.is_fitted:
-  #     raise ValueError("Система не инициализирована. Вызовите initialize() сначала")
-  #
-  #   return self.predictor.predict(current_data)
-
   def get_prediction(self, market_data: pd.DataFrame) -> Optional[VolatilityPrediction]:
-    """Получает прогноз волатильности"""
+    """
+    Получает прогноз волатильности, делегируя вызов обученному предиктору.
+    """
     if not self.predictor.is_fitted:
-      logger.warning("Предиктор волатильности не обучен")
+      logger.warning("Предиктор волатильности не обучен. Прогноз невозможен.")
       return None
 
     try:
-      # Создаем признаки
-      features = self._create_features(market_data)
-      if features is None or features.empty:
-        return None
-
-      # Проверяем количество признаков
-      expected_features = self.scaler.n_features_in_
-      actual_features = len(features.columns)
-
-      if actual_features != expected_features:
-        logger.warning(
-          f"Несоответствие признаков: получено {actual_features}, "
-          f"ожидалось {expected_features}. Используем только совпадающие."
-        )
-
-        # Пытаемся использовать только те признаки, которые есть в обученной модели
-        if hasattr(self, 'feature_names'):
-          common_features = [f for f in self.feature_names if f in features.columns]
-          if len(common_features) > 0:
-            features = features[common_features]
-            # Добавляем недостающие признаки как нули
-            for missing_feature in self.feature_names:
-              if missing_feature not in features.columns:
-                features[missing_feature] = 0
-            # Переупорядочиваем колонки
-            features = features[self.feature_names]
-          else:
-            logger.error("Нет общих признаков между моделью и данными")
-            return None
-        else:
-          logger.error("Список признаков модели не сохранен")
-          return None
-
-      # Масштабируем признаки
-      features_scaled = self.scaler.transform(features)
-
-      # Получаем предсказание
-      prediction = self.predictor.predict(features_scaled)[0]
-
-      # Определяем режим волатильности
-      regime = self._classify_volatility_regime(prediction)
-
-      return VolatilityPrediction(
-        timestamp=datetime.now(),
-        symbol=market_data.index[-1] if hasattr(market_data.index[-1], '__str__') else "UNKNOWN",
-        predicted_volatility=prediction,
-        confidence=0.8,  # Можно добавить расчет уверенности
-        volatility_regime=regime,
-        horizon_minutes=60
-      )
-
+      # Просто вызываем метод predict у предиктора, который содержит всю логику
+      return self.predictor.predict(market_data)
     except Exception as e:
       logger.error(f"Ошибка при получении прогноза волатильности: {e}")
       return None
+
 
   def _classify_volatility_regime(self, volatility: float) -> VolatilityRegime:
     """Классифицирует режим волатильности на основе значения"""

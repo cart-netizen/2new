@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from core.enums import SignalType
 
 @dataclass
@@ -63,3 +63,20 @@ class RiskMetrics: # Сильно упрощено для начала
     current_daily_loss_usdt: float = 0.0
     max_position_size_pct: float = 0.10 # 10%
     realized_pnl_total: float = 0.0
+
+# --- НАЧАЛО НОВОГО КОДА ---
+@dataclass
+class GridOrder:
+    """Описывает один лимитный ордер в сетке."""
+    price: float
+    qty: float # Количество будет рассчитано позже
+
+@dataclass
+class GridSignal:
+    """Описывает сигнал на развертывание торговой сетки."""
+    symbol: str
+    buy_orders: List[GridOrder]
+    sell_orders: List[GridOrder]
+    strategy_name: str = "Grid_Trading"
+    timestamp: datetime = field(default_factory=datetime.now)
+# --- КОНЕЦ НОВОГО КОДА ---

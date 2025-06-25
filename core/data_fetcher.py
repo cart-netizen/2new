@@ -357,3 +357,24 @@ class DataFetcher:
     logger.info(f"Предзагрузка завершена: {successful}/{len(tasks)} успешно")
 
     return successful
+
+  async def get_current_price_safe(self, symbol: str) -> Optional[float]:
+    """Безопасное получение текущей цены"""
+    try:
+      # Используем существующий метод get_candles
+      from core.enums import Timeframe
+      df = await self.data_fetcher.get_historical_candles(
+        symbol=symbol,
+        timeframe=Timeframe.ONE_MINUTE,
+        limit=1
+      )
+
+      if not df.empty:
+        return float(df['close'].iloc[-1])
+
+      return None
+
+    except Exception as e:
+      logger.error(f"Ошибка получения цены для {symbol}: {e}")
+      return None
+

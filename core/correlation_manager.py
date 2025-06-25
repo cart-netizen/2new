@@ -461,7 +461,7 @@ class CorrelationManager:
     """
     Корректирует размеры позиций с учетом корреляций
     """
-    if not self.correlation_matrix or self.correlation_matrix.empty:
+    if self.correlation_matrix is None or self.correlation_matrix.empty:
       logger.warning("Нет данных о корреляциях для корректировки позиций")
       return {symbol: signal.get('size', 0) for symbol, signal in signals.items()}
 

@@ -1,0 +1,27 @@
+{
+  "shadow_trading": {
+    "enabled": true,
+    "monitoring_interval_seconds": 30,
+    "price_tracking_duration_hours": 24,
+    "auto_finalize_expired_signals": true,
+    "performance_analysis": {
+      "min_signals_for_stats": 5,
+      "confidence_levels": [0.5, 0.6, 0.7, 0.8, 0.9],
+      "default_stop_loss_pct": -2.0,
+      "default_take_profit_pct": 3.0
+    },
+    "reporting": {
+      "hourly_reports": true,
+      "daily_summary": true,
+      "weekly_analysis": true,
+      "performance_alerts": {
+        "low_win_rate_threshold": 40,
+        "high_filter_rate_threshold": 80
+      }
+    },
+    "database": {
+      "cleanup_old_signals_days": 90,
+      "backup_frequency_hours": 24
+    }
+  }
+}

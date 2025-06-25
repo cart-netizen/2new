@@ -20,6 +20,52 @@ except ImportError:
 warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API")
 # --- КОНЕЦ БЛОКА --
 
+async def generate_shadow_trading_reports(trading_system):
+  """Генерация и вывод отчетов Shadow Trading"""
+
+  if not trading_system.shadow_trading:
+    return
+
+  try:
+    # Ежедневный отчет
+    daily_report = await trading_system.shadow_trading.generate_daily_report()
+
+    if 'error' not in daily_report:
+      logger.info("📊 === ЕЖЕДНЕВНЫЙ ОТЧЕТ SHADOW TRADING ===")
+
+      overall = daily_report.get('overall_performance', {})
+      if overall:
+        logger.info(f"🎯 Сигналов за день: {overall.get('total_signals', 0)}")
+        logger.info(f"✅ Win Rate: {overall.get('win_rate_pct', 0)}%")
+        logger.info(f"💰 Общий P&L: {overall.get('total_pnl_pct', 0):+.2f}%")
+        logger.info(f"📈 Средняя прибыль: +{overall.get('avg_win_pct', 0)}%")
+        logger.info(f"📉 Средний убыток: {overall.get('avg_loss_pct', 0)}%")
+        logger.info(f"⚖️ Profit Factor: {overall.get('profit_factor', 0)}")
+        logger.info(f"🚫 Отфильтровано: {overall.get('filtered_signals', 0)}")
+
+      # Топ источники
+      sources = daily_report.get('performance_by_source', [])
+      if sources:
+        logger.info("🏆 Лучшие источники сигналов:")
+        for source in sources[:3]:
+          logger.info(f"  • {source['source']}: WR {source['win_rate_pct']}% "
+                      f"({source['total_signals']} сигналов, P&L: {source['total_pnl_pct']:+.1f}%)")
+
+      # Рекомендации
+      recommendations = await trading_system.shadow_trading.performance_analyzer.generate_optimization_recommendations(
+        1)
+      if 'error' not in recommendations:
+        high_priority_recs = [r for r in recommendations.get('recommendations', []) if r['priority'] == 'high']
+        if high_priority_recs:
+          logger.info("🔴 ВАЖНЫЕ РЕКОМЕНДАЦИИ:")
+          for rec in high_priority_recs[:2]:  # Топ 2
+            logger.info(f"  • {rec['message']}")
+            logger.info(f"    💡 {rec['suggested_action']}")
+
+      logger.info("=" * 50)
+
+  except Exception as e:
+    logger.error(f"Ошибка генерации отчетов Shadow Trading: {e}")
 
 logger = get_logger(__name__)
 
@@ -39,17 +85,17 @@ async def main():
     logger.info("Обучение детектора аномалий...")
     # Получаем топ символы для обучения
     await trading_system.connector.sync_time()
-    symbols = await trading_system.data_fetcher.get_active_symbols_by_volume(10)
+    symbols = await trading_system.data_fetcher.get_active_symbols_by_volume(200)
     if symbols:
-      await trading_system.train_anomaly_detector(symbols[:5], lookback_days=7)
+      await trading_system.train_anomaly_detector(symbols[:100], lookback_days=60)
 
   if not os.path.exists("ml_models/enhanced_model.pkl"):
     logger.info("Обучение Enhanced ML модели...")
     # Получаем топ символы для обучения
     await trading_system.connector.sync_time()
-    symbols = await trading_system.data_fetcher.get_active_symbols_by_volume(10)
+    symbols = await trading_system.data_fetcher.get_active_symbols_by_volume(200)
     if symbols:
-      await trading_system.train_enhanced_ml_model(symbols[:5], lookback_days=7)
+      await trading_system.train_enhanced_ml_model(symbols[:150], lookback_days=60)
 
   def signal_handler():
     logger.info("Получен сигнал остановки. Завершение работы...")
@@ -67,6 +113,20 @@ async def main():
     # Используем оптимизированный запуск
     await trading_system.start_optimized()  # Вместо start()
 
+    # НОВОЕ: Периодическая генерация отчетов Shadow Trading
+    async def periodic_shadow_reports():
+      while not stop_event.is_set():
+        try:
+          await asyncio.sleep(3600)  # Каждый час
+          await generate_shadow_trading_reports(trading_system)
+        except Exception as e:
+          logger.error(f"Ошибка периодических отчетов: {e}")
+
+    # Запускаем отчеты в фоне
+    asyncio.create_task(periodic_shadow_reports())
+
+    # Основной цикл торговли
+    report_counter = 0
     while not stop_event.is_set() and trading_system.is_running:
       trading_system.display_balance()
       trading_system.display_active_symbols()
@@ -74,6 +134,11 @@ async def main():
       # Выводим статистику производительности
       if hasattr(trading_system, '_monitoring_cycles') and trading_system._monitoring_cycles % 10 == 0:
         await trading_system._log_performance_stats()
+      # Периодический отчет Shadow Trading (каждые 30 минут)
+      report_counter += 1
+      if report_counter % 30 == 0:  # Каждые 30 минут
+        await generate_shadow_trading_reports(trading_system)
+
 
       try:
         await asyncio.wait_for(stop_event.wait(), timeout=60)

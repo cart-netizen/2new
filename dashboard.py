@@ -150,7 +150,7 @@ get_shadow_trading_initialized()
 if 'bot_process' not in st.session_state:
     st.session_state.bot_process = None
 
-is_bot_running = st.session_state.bot_process and st.session_state.bot_process.poll() is None
+# is_bot_running = st.session_state.bot_process and st.session_state.bot_process.poll() is None
 
 def get_shadow_trading_today_stats() -> dict:
   """Получает статистику Shadow Trading за сегодня"""
@@ -413,19 +413,36 @@ def display_simple_shadow_metrics():
 #     return None
 def get_bot_pid():
   """Читает PID из файла состояния."""
-  return state_manager.get_custom_data('bot_pid')
+  status = state_manager.get_status()
+  if status and status.get('status') == 'running':
+    return status.get('pid')
+  return None
 
-def is_bot_running():
+def is_bot_run():
   """Проверяет, запущен ли процесс бота по PID из файла состояния."""
-  pid = get_bot_pid()
-  if pid:
-    return psutil.pid_exists(pid)
-  return False
+  try:
+    status = state_manager.get_status()
+    if status and status.get('status') == 'running':
+      pid = status.get('pid')
+      if pid and psutil.pid_exists(pid):
+        # Дополнительная проверка, что это действительно наш процесс
+        try:
+          process = psutil.Process(pid)
+          # Проверяем, что процесс связан с Python и main.py
+          cmdline = process.cmdline()
+          if cmdline and any('main.py' in arg for arg in cmdline):
+            return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+          pass
+    return False
+  except Exception as e:
+    print(f"Ошибка проверки статуса бота: {e}")
+    return False
 
 
 def start_bot():
   """Запускает main.py как отдельный процесс и сохраняет его PID."""
-  if is_bot_running():
+  if is_bot_run():
     st.toast("⚠️ Бот уже запущен.")
     return
 
@@ -454,7 +471,7 @@ def start_bot():
 def stop_bot():
   """Находит и принудительно завершает процесс бота."""
   pid = get_bot_pid()
-  if not pid or not is_bot_running():
+  if not pid or not is_bot_run():
     st.toast("⚠️ Бот не запущен.")
     state_manager.set_status('stopped', None)
     st.session_state.bot_process = None
@@ -1190,12 +1207,7 @@ if st.checkbox("🔄 Автообновление (30 сек)", value=False):
 with st.sidebar:
   st.title("🕹️ Управление ботом")
 
-  # Показываем текущий статус
-  if is_bot_running():
-    pid = get_bot_pid()
-    st.success(f"✅ Бот работает (PID: {pid})")
-  else:
-    st.warning("❌ Бот остановлен")
+
 
   col1, col2 = st.columns(2)
 
@@ -1210,6 +1222,13 @@ with st.sidebar:
       stop_bot()
       time.sleep(1)
       st.rerun()
+
+  # Показываем текущий статус
+  if is_bot_run():
+    pid = get_bot_pid()
+    st.success(f"✅ Бот работает (PID: {pid})")
+  else:
+    st.warning("❌ Бот остановлен")
 
   st.divider()
   # --- УПРОЩЕННАЯ КНОПКА SHADOW TRADING ---
@@ -1301,7 +1320,7 @@ strategy_cfg = current_config.get('strategy_settings', {})
 col_status, col_ml = st.columns([3, 1])
 
 with col_status:
-  if ():
+  if is_bot_run():
     # Используем функцию get_bot_pid() для получения PID из файла состояния
     pid = get_bot_pid()
     st.success(f"🟢 **Статус: Бот работает** (PID: {pid})")
@@ -2343,7 +2362,7 @@ with col2:
 
 with col3:
   # is_bot_running = st.session_state.bot_process and st.session_state.bot_process.poll() is None
-  if is_bot_running():
+  if is_bot_run():
     st.caption("🟢 Бот активен")
   else:
     st.caption("🔴 Бот остановлен")

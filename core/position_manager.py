@@ -38,56 +38,65 @@ class PositionManager:
     self.config = self.config_manager.load_config()
     # self.integrated_system: Optional[IntegratedTradingSystem] = None
 
-
   async def load_open_positions(self):
     """
     Синхронизирует состояние открытых позиций.
-    Сначала получает РЕАЛЬНЫЕ позиции с биржи, а затем дополняет их данными из нашей БД.
+    Получает ВСЕ позиции с биржи, а не только по топовым символам.
     """
     logger.info("Синхронизация открытых позиций с биржей...")
     self.open_positions = {}  # Очищаем старый кэш
 
     try:
-      # 1. Получаем все активные символы, которыми мы в принципе торгуем
-      all_managed_symbols = await self.data_fetcher.get_active_symbols_by_volume(limit=200)  # Берем с запасом
+      # НОВЫЙ ПОДХОД: Получаем ВСЕ позиции сразу одним запросом
+      endpoint = "/v5/position/list"
+      params = {
+        'category': 'linear',
+        'settleCoin': 'USDT'  # Только USDT позиции
+      }
 
-      # 2. Для каждого символа запрашиваем реальную позицию на бирже
-      for symbol in all_managed_symbols:
-        positions_on_exchange = await self.connector.fetch_positions(symbol)
+      # Запрашиваем напрямую все позиции
+      result = await self.connector._make_request('GET', endpoint, params, use_cache=False)
 
-        # Ищем позицию с ненулевым размером
-        active_position = next((pos for pos in positions_on_exchange if float(pos.get('size', 0)) > 0), None)
+      if result and result.get('list'):
+        all_positions = result.get('list', [])
+        logger.info(f"Получено {len(all_positions)} позиций с биржи")
 
-        if active_position:
-          logger.info(f"На бирже найдена активная позиция по {symbol}. Размер: {active_position.get('size')}")
-          # 3. Теперь ищем соответствующую запись в нашей локальной БД, чтобы получить детали (цену входа, SL/TP)
-          local_trade_data = await self.db_manager.get_open_trade_by_symbol(symbol)
+        # Обрабатываем только позиции с ненулевым размером
+        for position in all_positions:
+          size = float(position.get('size', 0))
+          if size > 0:
+            symbol = position.get('symbol')
+            logger.info(f"На бирже найдена активная позиция по {symbol}. Размер: {size}")
 
-          if local_trade_data:
-            # Если нашли, объединяем данные от биржи и из нашей БД
-            logger.info(f"Найдена соответствующая запись в локальной БД для {symbol}. Синхронизация...")
-            # Обновляем кэш, используя данные из нашей БД, т.к. они более полные
-            self.open_positions[symbol] = local_trade_data
-          else:
-            # Если в нашей БД записи нет (например, позиция открыта вручную)
-            logger.warning(
-              f"Позиция по {symbol} существует на бирже, но отсутствует в локальной БД. Создание заглушки...")
-            # Создаем "заглушку" в кэше, чтобы бот мог ее закрыть
-            self.open_positions[symbol] = {
-              'symbol': symbol,
-              'side': active_position.get('side').upper(),
-              'open_price': float(active_position.get('avgPrice', 0)),
-              'quantity': float(active_position.get('size', 0)),
-              'stop_loss': None,
-              'take_profit': None,
-              'id': -1  # Указываем, что это "неизвестная" сделка
-            }
+            # Ищем соответствующую запись в локальной БД
+            local_trade_data = await self.db_manager.get_open_trade_by_symbol(symbol)
+
+            if local_trade_data:
+              # Если нашли, используем данные из БД
+              logger.info(f"Найдена соответствующая запись в локальной БД для {symbol}")
+              self.open_positions[symbol] = local_trade_data
+            else:
+              # Если в БД нет, создаем заглушку из данных биржи
+              logger.warning(f"Позиция по {symbol} существует на бирже, но отсутствует в локальной БД")
+              self.open_positions[symbol] = {
+                'symbol': symbol,
+                'side': position.get('side', 'Buy').upper(),
+                'open_price': float(position.get('avgPrice', 0)),
+                'quantity': size,
+                'stop_loss': float(position.get('stopLoss', 0)) if position.get('stopLoss') else None,
+                'take_profit': float(position.get('takeProfit', 0)) if position.get('takeProfit') else None,
+                'unrealizedPnl': float(position.get('unrealisedPnl', 0)),
+                'leverage': int(position.get('leverage', 1)),
+                'id': -1  # Указываем, что это "неизвестная" сделка
+              }
+      else:
+        logger.info("Не получено позиций с биржи")
 
     except Exception as e:
       logger.error(f"Критическая ошибка при синхронизации позиций с биржей: {e}", exc_info=True)
 
     if self.open_positions:
-      logger.info(f"Синхронизация завершена. Активные отслеживаемые позиции: {list(self.open_positions.keys())}")
+      logger.info(f"Синхронизация завершена. Активные позиции: {list(self.open_positions.keys())}")
     else:
       logger.info("Синхронизация завершена. Активных позиций на бирже не найдено.")
 
@@ -224,6 +233,9 @@ class PositionManager:
         ФИНАЛЬНАЯ ВЕРСИЯ: Сверяет исполненные ордера, корректно рассчитывая PnL
         с учетом комиссий и обрабатывая закрытия по TP/SL.
         """
+        # all_positions = await self.connector.fetch_positions_batch()
+        # active_symbols = {pos['symbol'] for pos in all_positions if float(pos.get('size', 0)) > 0}
+
         # Получаем из БД все сделки, которые у нас числятся как "OPEN"
         open_trades_in_db = await self.db_manager.get_all_open_trades()
         if not open_trades_in_db:

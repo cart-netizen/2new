@@ -174,14 +174,7 @@ def train_worker_function(features: pd.DataFrame, labels: pd.Series, model_save_
 # ШАГ 2: КЛАСС ModelRetrainingManager ТЕПЕРЬ ТОЛЬКО УПРАВЛЯЕТ ЗАДАЧАМИ
 # -------------------------------------------------------------------------------------
 class ModelRetrainingManager:
-  # def __init__(self, data_fetcher, model_save_path: str = "ml_models/"):
-  #   self.data_fetcher = data_fetcher
-  #   self.model_save_path = Path(model_save_path)
-  #   self.model_save_path.mkdir(exist_ok=True, parents=True)
-  #   self.process_pool = ProcessPoolExecutor()
-  #   self.last_retrain_time = None
-  #   self.is_running = False
-  #   logger.info("ModelRetrainingManager (для мультипроцессинга) инициализирован.")
+
 
   def __init__(self, data_fetcher, model_save_path: str = "ml_models/"):
     self.data_fetcher = data_fetcher
@@ -222,67 +215,114 @@ class ModelRetrainingManager:
 
     return pd.concat(all_data_frames, ignore_index=True)
 
-  # async def retrain_model(self, symbols: List[str],
-  #                         timeframe: Timeframe = Timeframe.ONE_HOUR,
-  #                         limit: int = 1000,
-  #                         force_retrain: bool = False) -> Tuple[bool, str]:
-  #   """
-  #   Основная АСИНХРОННАЯ функция, которая передает тяжелую работу в пул процессов.
-  #   """
-  #   try:
-  #     loop = asyncio.get_running_loop()
-  #     logger.info(f"Начинаем переобучение модели для символов: {symbols}")
-  #     logger.info("Создание мультитаймфрейм-признаков для обучения...")
-  #     all_features = []
-  #     all_labels = []
-  #     for symbol in symbols:
-  #       features, labels = await feature_engineer.create_multi_timeframe_features(symbol, self.data_fetcher)
-  #       if features is not None and labels is not None:
-  #         all_features.append(features)
-  #         all_labels.append(labels)
-  #
-  #     if not all_features:
-  #       return False, "Не удалось создать признаки ни для одного символа"
-  #
-  #     combined_features = pd.concat(all_features)
-  #     combined_labels = pd.concat(all_labels)
-  #
-  #     # Передаем уже готовые признаки в воркер
-  #     success, message = await loop.run_in_executor(
-  #       self.process_pool,
-  #       train_worker_function,
-  #       combined_features,
-  #       combined_labels,
-  #       self.model_save_path
-  #     )
-  #     logger.info("Получение обучающих данных...")
-  #     raw_data = await self._get_training_data(symbols, timeframe, limit)
-  #     if raw_data is None or raw_data.empty:
-  #       return False, "Не удалось получить данные для обучения"
-  #
-  #     loop = asyncio.get_running_loop()
-  #     logger.info("Передача задачи на обучение в пул процессов...")
-  #
-  #     # Вызываем нашу новую НЕЗАВИСИМУЮ функцию
-  #     success, message = await loop.run_in_executor(
-  #       self.process_pool,
-  #       train_worker_function,  # <-- какую функцию запустить
-  #       raw_data,  # <-- 1-й аргумент для нее
-  #       self.model_save_path  # <-- 2-й аргумент для нее
-  #     )
-  #
-  #     if success:
-  #       logger.info(f"Переобучение успешно: {message}")
-  #       self.last_retrain_time = datetime.now()
-  #     else:
-  #       logger.error(f"Ошибка переобучения: {message}")
-  #
-  #     logger.info(f"Результат из дочернего процесса: {message}")
-  #     return success, message
-  #
-  #   except Exception as e:
-  #     logger.error(f"Критическая ошибка в `retrain_model`: {e}", exc_info=True)
-  #     return False, f"Критическая ошибка: {e}"
+  async def record_trade_result(self, symbol: str, trade_result: Dict[str, Any]):
+    """
+    Записывает результат сделки для будущего переобучения модели
+
+    Args:
+        symbol: Торговый символ
+        trade_result: Результаты сделки
+    """
+    try:
+      # Создаем таблицу для хранения результатов если не существует
+      await self._ensure_trade_results_table()
+
+      # Сохраняем результат сделки
+      await self._save_trade_result(symbol, trade_result)
+
+      # Проверяем, не пора ли переобучить модель
+      await self._check_retraining_trigger(symbol)
+
+    except Exception as e:
+      logger.error(f"Ошибка записи результата сделки для {symbol}: {e}")
+
+  async def _ensure_trade_results_table(self):
+      """Создает таблицу для хранения результатов сделок если не существует"""
+      try:
+        # Используем db_manager из data_fetcher если доступен
+        if hasattr(self.data_fetcher, 'db_manager'):
+          db_manager = self.data_fetcher.db_manager
+          await db_manager._execute("""
+                  CREATE TABLE IF NOT EXISTS ml_trade_results (
+                      id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      symbol TEXT NOT NULL,
+                      timestamp DATETIME NOT NULL,
+                      strategy_name TEXT,
+                      profit_loss REAL,
+                      entry_price REAL,
+                      exit_price REAL,
+                      confidence REAL,
+                      features TEXT,
+                      regime TEXT,
+                      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                  )
+              """)
+
+          # Создаем индекс для быстрого поиска
+          await db_manager._execute("""
+                  CREATE INDEX IF NOT EXISTS idx_ml_trade_symbol_time 
+                  ON ml_trade_results(symbol, timestamp)
+              """)
+      except Exception as e:
+        logger.error(f"Ошибка создания таблицы ml_trade_results: {e}")
+
+  async def _save_trade_result(self, symbol: str, trade_result: Dict[str, Any]):
+    """Сохраняет результат сделки в БД"""
+    try:
+      if hasattr(self.data_fetcher, 'db_manager'):
+        db_manager = self.data_fetcher.db_manager
+
+        await db_manager._execute("""
+                  INSERT INTO ml_trade_results 
+                  (symbol, timestamp, strategy_name, profit_loss, entry_price, 
+                   exit_price, confidence, features, regime)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              """, (
+          symbol,
+          datetime.now(),
+          trade_result.get('strategy_name', 'Unknown'),
+          trade_result.get('profit_loss', 0),
+          trade_result.get('entry_price', 0),
+          trade_result.get('exit_price', 0),
+          trade_result.get('confidence', 0),
+          json.dumps(trade_result.get('entry_features', {})),
+          trade_result.get('regime', 'unknown')
+        ))
+
+        logger.debug(f"Результат сделки для {symbol} сохранен")
+
+    except Exception as e:
+      logger.error(f"Ошибка сохранения результата сделки: {e}")
+
+  async def _check_retraining_trigger(self, symbol: str):
+    """Проверяет необходимость переобучения модели"""
+    try:
+      if not hasattr(self.data_fetcher, 'db_manager'):
+        return
+
+      db_manager = self.data_fetcher.db_manager
+
+      # Получаем последние результаты
+      recent_results = await db_manager._execute("""
+              SELECT COUNT(*) as total, 
+                     SUM(CASE WHEN profit_loss > 0 THEN 1 ELSE 0 END) as wins
+              FROM ml_trade_results
+              WHERE symbol = ? AND timestamp >= datetime('now', '-7 days')
+          """, (symbol,), fetch='one')
+
+      if recent_results and recent_results['total'] >= 20:
+        win_rate = recent_results['wins'] / recent_results['total']
+
+        # Если win rate упал ниже 45%, инициируем переобучение
+        if win_rate < 0.45:
+          logger.warning(f"Win rate для {symbol} упал до {win_rate:.2%}. "
+                         f"Рекомендуется переобучение модели.")
+
+          # Можно добавить автоматическое переобучение
+          # await self.retrain_model([symbol], Timeframe.HOUR_1, 1000)
+
+    except Exception as e:
+      logger.error(f"Ошибка проверки триггера переобучения: {e}")
 
   async def retrain_model(self, symbols: List[str],
                           timeframe: Timeframe = Timeframe.ONE_HOUR,
@@ -900,43 +940,6 @@ class ModelRetrainingManager:
     except Exception as e:
       logger.error(f"Ошибка анализа важности признаков: {e}")
 
-  # async def retrain_model(self, symbols: List[str],
-  #                         timeframe: Timeframe = Timeframe.ONE_HOUR,
-  #                         limit: int = 1000,
-  #                         force_retrain: bool = False) -> Tuple[bool, str]:
-  #   """
-  #   Основная АСИНХРОННАЯ функция, которая передает тяжелую работу в пул процессов.
-  #   """
-  #   try:
-  #     logger.info(f"Начинаем переобучение модели для символов: {symbols}")
-  #
-  #     # 1. Получаем данные (эта операция остается в основном потоке, т.к. она асинхронная)
-  #     logger.info("Получение обучающих данных...")
-  #     raw_data = await self._get_training_data(symbols, timeframe, limit)
-  #     if raw_data is None or raw_data.empty:
-  #       return False, "Не удалось получить данные для обучения"
-  #
-  #     # --- ЗАПУСК ТЯЖЕЛОЙ ЗАДАЧИ В ОТДЕЛЬНОМ ПРОЦЕССЕ ---
-  #     loop = asyncio.get_running_loop()
-  #     logger.info("Передача задачи на обучение и оценку в пул процессов...")
-  #
-  #     # Запускаем нашу синхронную "рабочую" функцию в другом процессе
-  #     # и ждем результата, не блокируя основной поток.
-  #     success, message = await loop.run_in_executor(
-  #       self.process_pool,  # <-- в каком пуле выполнять
-  #       self._train_and_evaluate_model_sync,  # <-- какую функцию запустить
-  #       raw_data  # <-- аргументы для этой функции
-  #     )
-  #
-  #     if success:
-  #       self.last_retrain_time = datetime.now()
-  #
-  #     logger.info(f"Результат из дочернего процесса: {message}")
-  #     return success, message
-  #
-  #   except Exception as e:
-  #     logger.error(f"Критическая ошибка в `retrain_model`: {e}", exc_info=True)
-  #     return False, f"Критическая ошибка: {e}"
 
   async def schedule_retraining(self, symbols: List[str],
                                   timeframe: Timeframe = Timeframe.ONE_HOUR,

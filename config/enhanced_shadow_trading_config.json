@@ -10,6 +10,7 @@
       "max_concurrent_tracking": 1000
     },
 
+
     "analytics": {
       "advanced_patterns_enabled": true,
       "anomaly_detection_enabled": true,

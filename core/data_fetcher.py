@@ -363,7 +363,7 @@ class DataFetcher:
     try:
       # Используем существующий метод get_candles
       from core.enums import Timeframe
-      df = await self.data_fetcher.get_historical_candles(
+      df = await self.get_historical_candles(
         symbol=symbol,
         timeframe=Timeframe.ONE_MINUTE,
         limit=1

@@ -33,6 +33,8 @@ class TradeExecutor:
     self.config = settings
     # self.trading_system = IntegratedTradingSystem(db_manager=db_manager)
     self.pending_orders = {}
+    self.shadow_trading = None
+
     self.execution_stats = {
       'orders_placed': 0,
       'orders_filled': 0,
@@ -134,6 +136,20 @@ class TradeExecutor:
           quantity=quantity,
           leverage=leverage
         )
+        if hasattr(signal, 'metadata') and signal.metadata:
+          shadow_id = signal.metadata.get('shadow_tracking_id')
+          if shadow_id and hasattr(self, 'shadow_trading') and self.shadow_trading:
+            try:
+              await self.shadow_trading.signal_tracker.mark_signal_executed(
+                shadow_id,
+                order_id,
+                quantity,
+                leverage
+              )
+            except Exception as e:
+              logger.warning(f"Ошибка обновления Shadow Trading: {e}")
+
+        return True, trade_details
         # Возвращаем успех и детали сделки
         return True, trade_details
       else:

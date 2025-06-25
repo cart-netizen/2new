@@ -56,7 +56,7 @@ class RequestBatcher:
 class OptimizedSession:
   """Оптимизированная сессия с переиспользованием соединений"""
 
-  def __init__(self, connector_limit: int = 100, timeout: int = 30):
+  def __init__(self, connector_limit: int = 100, timeout: int = 60):
     self.connector = aiohttp.TCPConnector(
       limit=connector_limit,
       limit_per_host=30,

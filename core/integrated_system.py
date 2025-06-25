@@ -147,8 +147,17 @@ class IntegratedTradingSystem:
     # --- КОНЕЦ БЛОКА ---
 
     #ДОБАВИТЬ: Enhanced Shadow Trading
+    # self.shadow_trading = None
+    # self.shadow_trading_enabled = True  # Можно вынести в конфиг
+
     self.shadow_trading = None
-    self.shadow_trading_enabled = True  # Можно вынести в конфиг
+    if self.config.get('enhanced_shadow_trading', {}).get('enabled', False):
+      try:
+        self.shadow_trading = ShadowTradingManager(self.db_manager, self.data_fetcher)
+        logger.info("✅ Shadow Trading система инициализирована")
+      except Exception as e:
+        logger.error(f"Ошибка инициализации Shadow Trading: {e}")
+
 
     self.risk_manager = AdvancedRiskManager(
       db_manager=self.db_manager,
@@ -165,6 +174,8 @@ class IntegratedTradingSystem:
       risk_manager=self.risk_manager
     )
     self.trade_executor.integrated_system = self
+    if self.shadow_trading:
+      self.trade_executor.shadow_trading = self.shadow_trading
 
     self.signal_filter = SignalFilter(
       settings=strategy_settings,
@@ -1133,35 +1144,71 @@ class IntegratedTradingSystem:
 
   async def update_account_balance(self):
     logger.info("Запрос баланса аккаунта...")
+    # Запрашиваем баланс для UNIFIED аккаунта по USDT
     balance_data = await self.connector.get_account_balance(account_type="UNIFIED", coin="USDT")
 
-    # ИСПРАВЛЕННАЯ ЛОГИКА: Проверяем наличие ключа 'coin', и что это непустой список
-    if (balance_data
-        and 'coin' in balance_data
-        and isinstance(balance_data.get('coin'), list)
-        and len(balance_data['coin']) > 0):
+    # >>> НАЧАЛО ПАТЧА <<<
+    # Новая, более надежная логика обработки ответа
+    if balance_data and balance_data.get('coin'):
+      coin_data_list = balance_data.get('coin', [])
+      if coin_data_list:
+        coin_data = coin_data_list[0]
+        try:
+          self.account_balance = RiskMetrics(
+            total_balance_usdt=float(coin_data.get('walletBalance', 0)),
+            available_balance_usdt=float(balance_data.get('totalAvailableBalance', 0)),
+            unrealized_pnl_total=float(coin_data.get('unrealisedPnl', 0)),
+            realized_pnl_total=float(coin_data.get('cumRealisedPnl', 0))
+          )
+          # После успешного обновления баланса, обновляем state_manager
+          self.state_manager.update_metrics(self.account_balance)
 
-      # Данные по конкретной монете (USDT) находятся внутри первого элемента списка 'coin'
-      coin_data = balance_data['coin'][0]
+          logger.info(f"Баланс обновлен: Всего={self.account_balance.total_balance_usdt:.2f} USDT, "
+                      f"Доступно={self.account_balance.available_balance_usdt:.2f} USDT")
+          return  # Явный выход после успеха
 
-      self.account_balance = RiskMetrics(
-        # Общий баланс кошелька берем из данных по конкретной монете
-        total_balance_usdt=float(coin_data.get('walletBalance', 0)),
-
-        # Доступный баланс надежнее брать из общего поля 'totalAvailableBalance'
-        available_balance_usdt=float(balance_data.get('totalAvailableBalance', 0)),
-
-        # Нереализованный и реализованный PnL берем из данных по монете
-        unrealized_pnl_total=float(coin_data.get('unrealisedPnl', 0)),
-        realized_pnl_total=float(coin_data.get('cumRealisedPnl', 0))
-      )
-      logger.info(f"Баланс обновлен: Всего={self.account_balance.total_balance_usdt:.2f} USDT, "
-                  f"Доступно={self.account_balance.available_balance_usdt:.2f} USDT, "
-                  f"Нереализ. PNL={self.account_balance.unrealized_pnl_total:.2f} USDT, "
-                  f"Реализ. PNL={self.account_balance.realized_pnl_total:.2f} USDT")
+        except (ValueError, TypeError) as e:
+          logger.error(f"Ошибка преобразования данных баланса: {e}. Ответ: {coin_data}")
+          self.account_balance = self.account_balance or RiskMetrics()  # Сохраняем старое значение, если есть
+      else:
+        logger.error(f"Список 'coin' в ответе о балансе пуст. Ответ: {balance_data}")
+        self.account_balance = self.account_balance or RiskMetrics()
     else:
       logger.error(f"Не удалось получить или распарсить данные о балансе. Ответ: {balance_data}")
-      self.account_balance = RiskMetrics()
+      # Если не удалось обновить, оставляем старое значение, чтобы не обнулять баланс
+      self.account_balance = self.account_balance or RiskMetrics()
+    # >>> КОНЕЦ ПАТЧА <<<
+  # async def update_account_balance(self):
+  #   logger.info("Запрос баланса аккаунта...")
+  #   balance_data = await self.connector.get_account_balance(account_type="UNIFIED", coin="USDT")
+  #
+  #   # ИСПРАВЛЕННАЯ ЛОГИКА: Проверяем наличие ключа 'coin', и что это непустой список
+  #   if (balance_data
+  #       and 'coin' in balance_data
+  #       and isinstance(balance_data.get('coin'), list)
+  #       and len(balance_data['coin']) > 0):
+  #
+  #     # Данные по конкретной монете (USDT) находятся внутри первого элемента списка 'coin'
+  #     coin_data = balance_data['coin'][0]
+  #
+  #     self.account_balance = RiskMetrics(
+  #       # Общий баланс кошелька берем из данных по конкретной монете
+  #       total_balance_usdt=float(coin_data.get('walletBalance', 0)),
+  #
+  #       # Доступный баланс надежнее брать из общего поля 'totalAvailableBalance'
+  #       available_balance_usdt=float(balance_data.get('totalAvailableBalance', 0)),
+  #
+  #       # Нереализованный и реализованный PnL берем из данных по монете
+  #       unrealized_pnl_total=float(coin_data.get('unrealisedPnl', 0)),
+  #       realized_pnl_total=float(coin_data.get('cumRealisedPnl', 0))
+  #     )
+  #     logger.info(f"Баланс обновлен: Всего={self.account_balance.total_balance_usdt:.2f} USDT, "
+  #                 f"Доступно={self.account_balance.available_balance_usdt:.2f} USDT, "
+  #                 f"Нереализ. PNL={self.account_balance.unrealized_pnl_total:.2f} USDT, "
+  #                 f"Реализ. PNL={self.account_balance.realized_pnl_total:.2f} USDT")
+  #   else:
+  #     logger.error(f"Не удалось получить или распарсить данные о балансе. Ответ: {balance_data}")
+  #     self.account_balance = RiskMetrics()
 
   async def set_leverage_for_symbol(self, symbol: str, leverage: int) -> bool:
     """ИСПРАВЛЕНО: Обновлен для работы с новым методом connector.set_leverage"""
@@ -2396,6 +2443,8 @@ class IntegratedTradingSystem:
         # Обновляем баланс один раз за цикл
         await self.update_account_balance()
 
+
+
         # Разбиваем символы на батчи для параллельной обработки
         for i in range(0, len(self.active_symbols), batch_size):
           if not self.is_running:
@@ -2435,6 +2484,13 @@ class IntegratedTradingSystem:
             for result in results:
               if isinstance(result, Exception):
                 logger.error(f"Ошибка в мониторинге: {result}")
+
+        # # Управляем открытыми позициями
+        # await self.position_manager.manage_open_positions(self.account_balance)
+        # Сверяем закрытые сделки
+        await self.position_manager.reconcile_filled_orders()
+        # Обновляем состояние для дашборда
+        self.state_manager.update_open_positions(self.position_manager.open_positions)
 
         # Выводим статистику производительности каждые 10 циклов
         if hasattr(self, '_monitoring_cycles'):
@@ -3250,7 +3306,7 @@ class IntegratedTradingSystem:
         if hasattr(self, 'adaptive_selector'):
           self.adaptive_selector.update_strategy_performance(strategy_name, trade_result)
 
-        # 2. Сохраняем данные для переобучения ML
+        # # 2. Сохраняем данные для переобучения ML
         if self.retraining_manager:
           await self.retraining_manager.record_trade_result(symbol, trade_result)
 

@@ -458,6 +458,24 @@ class SignalTracker:
     except Exception as e:
       logger.error(f"Ошибка отметки фильтрации сигнала {signal_id}: {e}")
 
+  async def mark_signal_executed(self, signal_id: str, order_id: str, quantity: float, leverage: int):
+    """Отметить сигнал как исполненный"""
+    try:
+      if signal_id in self.tracked_signals:
+        analysis = self.tracked_signals[signal_id]
+        analysis.was_executed = True
+        analysis.order_id = order_id
+        analysis.executed_quantity = quantity
+        analysis.executed_leverage = leverage
+        analysis.execution_time = datetime.now()
+        analysis.updated_at = datetime.now()
+
+        await self._update_signal_in_db(analysis)
+        logger.info(f"✅ Сигнал {signal_id} исполнен с OrderID: {order_id}")
+
+    except Exception as e:
+      logger.error(f"Ошибка отметки исполнения сигнала {signal_id}: {e}")
+
   async def update_price_tracking(self, signal_id: str, current_price: float, timestamp: datetime):
     """Обновить отслеживание цены для сигнала"""
     try:
@@ -646,6 +664,7 @@ class PriceMonitor:
     self.data_fetcher = data_fetcher
     self.monitoring_symbols: Dict[str, List[str]] = {}  # symbol -> list of signal_ids
     self.is_running = False
+    self.price_update_interval = 30
 
   async def start_monitoring(self):
     """Запуск мониторинга цен"""
@@ -683,51 +702,125 @@ class PriceMonitor:
       if not self.monitoring_symbols[symbol]:
         del self.monitoring_symbols[symbol]
 
+  # async def _monitoring_loop(self):
+  #   """Основной цикл мониторинга"""
+  #   while self.is_running:
+  #     try:
+  #       if not self.monitoring_symbols:
+  #         await asyncio.sleep(10)
+  #         continue
+  #
+  #       # Получаем текущие цены для всех отслеживаемых символов
+  #       for symbol in list(self.monitoring_symbols.keys()):
+  #         try:
+  #           # ИСПРАВЛЕНИЕ: Используем существующий метод get_candles
+  #           # Получаем последнюю свечу как текущую цену
+  #           from core.enums import Timeframe
+  #           df = await self.data_fetcher.get_historical_candles(
+  #             symbol=symbol,
+  #             timeframe=Timeframe.ONE_MINUTE,
+  #             limit=1
+  #           )
+  #
+  #           if df.empty:
+  #             logger.warning(f"Не удалось получить данные для {symbol}")
+  #             continue
+  #
+  #           current_price = float(df['close'].iloc[-1])
+  #           timestamp = datetime.now()
+  #
+  #           # Обновляем отслеживание для всех сигналов этого символа
+  #           for signal_id in self.monitoring_symbols[symbol]:
+  #             await self.signal_tracker.update_price_tracking(
+  #               signal_id, current_price, timestamp
+  #             )
+  #
+  #         except Exception as e:
+  #           logger.error(f"Ошибка мониторинга {symbol}: {e}")
+  #
+  #         # Пауза между циклами мониторинга
+  #       await asyncio.sleep(30)  # Обновляем каждые 30 секунд
+  #
+  #     except asyncio.CancelledError:
+  #       logger.info("Цикл мониторинга цен отменен")
+  #       break
+  #     except Exception as e:
+  #       logger.error(f"Ошибка в цикле мониторинга цен: {e}")
+  #       await asyncio.sleep(60)  # Больше пауза при ошибке
   async def _monitoring_loop(self):
-    """Основной цикл мониторинга"""
+    """Основной цикл мониторинга цен"""
     while self.is_running:
       try:
         if not self.monitoring_symbols:
           await asyncio.sleep(10)
           continue
 
-        # Получаем текущие цены для всех отслеживаемых символов
-        for symbol in list(self.monitoring_symbols.keys()):
+        # Обновляем цены для всех отслеживаемых символов
+        for symbol, signal_ids in list(self.monitoring_symbols.items()):
           try:
-            # ИСПРАВЛЕНИЕ: Используем существующий метод get_candles
-            # Получаем последнюю свечу как текущую цену
-            from core.enums import Timeframe
-            df = await self.data_fetcher.get_candles(
-              symbol=symbol,
-              timeframe=Timeframe.ONE_MINUTE,
-              limit=1
-            )
-
-            if df.empty:
-              logger.warning(f"Не удалось получить данные для {symbol}")
+            # Получаем текущую цену
+            current_price = await self.data_fetcher.get_current_price_safe(symbol)
+            if not current_price:
               continue
 
-            current_price = float(df['close'].iloc[-1])
-            timestamp = datetime.now()
+            current_time = datetime.now()
 
-            # Обновляем отслеживание для всех сигналов этого символа
-            for signal_id in self.monitoring_symbols[symbol]:
+            # Обновляем для каждого сигнала
+            for signal_id in signal_ids[:]:  # Копия списка для безопасного удаления
               await self.signal_tracker.update_price_tracking(
-                signal_id, current_price, timestamp
+                signal_id, current_price, current_time
               )
 
+              # Проверяем, не пора ли прекратить отслеживание
+              signal_info = self.signal_tracker.tracked_signals.get(signal_id)
+              if signal_info:
+                hours_elapsed = (current_time - signal_info.entry_time).total_seconds() / 3600
+                if hours_elapsed > 24:  # 24 часа отслеживания
+                  signal_ids.remove(signal_id)
+                  await self.signal_tracker.finalize_signal(signal_id, current_price)
+
           except Exception as e:
-            logger.error(f"Ошибка мониторинга {symbol}: {e}")
+            logger.error(f"Ошибка обновления цен для {symbol}: {e}")
 
-          # Пауза между циклами мониторинга
-        await asyncio.sleep(30)  # Обновляем каждые 30 секунд
+        await asyncio.sleep(getattr(self, 'price_update_interval', 30))
 
-      except asyncio.CancelledError:
-        logger.info("Цикл мониторинга цен отменен")
-        break
       except Exception as e:
         logger.error(f"Ошибка в цикле мониторинга цен: {e}")
-        await asyncio.sleep(60)  # Больше пауза при ошибке
+        await asyncio.sleep(60)
+
+  async def finalize_signal(self, signal_id: str, final_price: float):
+    """Финализировать отслеживание сигнала"""
+    try:
+      if signal_id not in self.tracked_signals:
+        return
+
+      analysis = self.tracked_signals[signal_id]
+      analysis.exit_price = final_price
+      analysis.exit_time = datetime.now()
+
+      # Рассчитываем результат
+      if analysis.signal_type == SignalType.BUY:
+        analysis.profit_loss_pct = ((final_price - analysis.entry_price) / analysis.entry_price) * 100
+      else:
+        analysis.profit_loss_pct = ((analysis.entry_price - final_price) / analysis.entry_price) * 100
+
+      # Определяем исход
+      if analysis.profit_loss_pct > 0.5:
+        analysis.outcome = SignalOutcome.PROFITABLE
+      elif analysis.profit_loss_pct < -0.5:
+        analysis.outcome = SignalOutcome.LOSS
+      else:
+        analysis.outcome = SignalOutcome.BREAKEVEN
+
+      analysis.updated_at = datetime.now()
+      await self._update_signal_in_db(analysis)
+
+      # Удаляем из отслеживания
+      del self.tracked_signals[signal_id]
+      logger.info(f"📊 Сигнал {signal_id} финализирован с результатом: {analysis.profit_loss_pct:.2f}%")
+
+    except Exception as e:
+      logger.error(f"Ошибка финализации сигнала {signal_id}: {e}")
 
   async def _check_signal_completion(self, signal_id: str, current_price: float, timestamp: datetime):
     """Проверка условий завершения сигнала"""

@@ -1410,8 +1410,9 @@ with tabs[0]:
         return ''
 
 
-      styled_df = df_display.style.applymap(color_pnl, subset=['current_pnl',
-                                                               'current_pnl_pct'] if 'current_pnl' in df_display.columns else [])
+      # styled_df = df_display.style.applymap(color_pnl, subset=['current_pnl',
+      #                                                          'current_pnl_pct'] if 'current_pnl' in df_display.columns else [])
+      styled_df = df_display.style.map(lambda x: 'color: green' if x > 0 else 'color: red',subset=['profit_pct', 'profit_usd'])
       st.dataframe(styled_df, use_container_width=True)
     else:
       st.info("Нет активных позиций")
@@ -1598,7 +1599,8 @@ with tabs[2]:
     "Dual_Thrust",
     "Mean_Reversion_BB",
     "Momentum_Spike",
-    "Grid_Trading"
+    "Grid_Trading",
+    'Stop_and_Reverse'
   ]
 
   # Активные стратегии
@@ -1718,7 +1720,7 @@ with tabs[3]:
       return ''
 
 
-    styled_regimes = df_regimes.style.applymap(color_regime, subset=['Режим'])
+    styled_regimes = df_regimes.style.map(color_regime, subset=['Режим'])
     st.dataframe(styled_regimes, use_container_width=True, hide_index=True)
 
     # Статистика режимов
@@ -2366,6 +2368,219 @@ with col3:
     st.caption("🟢 Бот активен")
   else:
     st.caption("🔴 Бот остановлен")
+
+with st.expander("🎯 Stop-and-Reverse Strategy Settings", expanded=False):
+    st.header("🎯 Настройки стратегии Stop-and-Reverse")
+
+    # Загружаем текущую конфигурацию SAR
+    try:
+      current_config = config_manager.load_config()
+      sar_config = current_config.get('stop_and_reverse_strategy', {})
+
+      if not sar_config:
+        st.warning("⚠️ Конфигурация SAR стратегии не найдена в config.json")
+        st.stop()
+
+      col1, col2 = st.columns(2)
+
+      with col1:
+        st.subheader("🚦 Фильтры режимов")
+
+        # Фильтры режимов
+        chop_threshold = st.slider(
+          "Choppiness Index порог",
+          min_value=20,
+          max_value=60,
+          value=sar_config.get('chop_threshold', 40),
+          help="Рынки с CHOP > этого значения будут избегаться"
+        )
+
+        adx_threshold = st.slider(
+          "ADX минимум для тренда",
+          min_value=15,
+          max_value=35,
+          value=sar_config.get('adx_threshold', 25),
+          help="Минимальная сила тренда для торговли"
+        )
+
+        atr_multiplier = st.slider(
+          "ATR множитель волатильности",
+          min_value=1.0,
+          max_value=2.0,
+          value=sar_config.get('atr_multiplier', 1.25),
+          step=0.05,
+          help="Текущая волатильность должна быть выше среднего в X раз"
+        )
+
+        st.subheader("📊 PSAR настройки")
+
+        psar_start = st.slider(
+          "PSAR начальный шаг",
+          min_value=0.01,
+          max_value=0.05,
+          value=sar_config.get('psar_start', 0.02),
+          step=0.001,
+          format="%.3f"
+        )
+
+        psar_step = st.slider(
+          "PSAR приращение",
+          min_value=0.01,
+          max_value=0.05,
+          value=sar_config.get('psar_step', 0.02),
+          step=0.001,
+          format="%.3f"
+        )
+
+        psar_max = st.slider(
+          "PSAR максимум",
+          min_value=0.1,
+          max_value=0.3,
+          value=sar_config.get('psar_max', 0.2),
+          step=0.01
+        )
+
+      with col2:
+        st.subheader("🎯 Система оценок")
+
+        min_signal_score = st.slider(
+          "Минимальный балл сигнала",
+          min_value=2,
+          max_value=8,
+          value=sar_config.get('min_signal_score', 4),
+          help="Минимальная сумма баллов для генерации сигнала"
+        )
+
+        st.subheader("💰 Управление рисками")
+
+        min_daily_volume = st.number_input(
+          "Мин. дневной объем (USD)",
+          min_value=100000,
+          max_value=10000000,
+          value=sar_config.get('min_daily_volume_usd', 1000000),
+          step=100000,
+          help="Минимальный дневной объем торгов для символа"
+        )
+
+        max_monitored_symbols = st.number_input(
+          "Макс. отслеживаемых символов",
+          min_value=10,
+          max_value=100,
+          value=sar_config.get('max_monitored_symbols', 50),
+          step=5
+        )
+
+        st.subheader("🔧 Интеграции")
+
+        use_shadow_system = st.checkbox(
+          "Использовать Shadow System",
+          value=sar_config.get('shadow_system_integration', {}).get('use_shadow_system', True),
+          help="Интеграция с системой теневой торговли"
+        )
+
+        use_ml_confirmation = st.checkbox(
+          "Использовать ML подтверждение",
+          value=sar_config.get('ml_integration', {}).get('use_ml_confirmation', False),
+          help="Дополнительное подтверждение от ML моделей"
+        )
+
+      # Кнопка сохранения настроек
+      if st.button("💾 Сохранить настройки SAR", type="primary"):
+        try:
+          # Обновляем конфигурацию
+          updated_sar_config = sar_config.copy()
+          updated_sar_config.update({
+            'chop_threshold': chop_threshold,
+            'adx_threshold': adx_threshold,
+            'atr_multiplier': atr_multiplier,
+            'psar_start': psar_start,
+            'psar_step': psar_step,
+            'psar_max': psar_max,
+            'min_signal_score': min_signal_score,
+            'min_daily_volume_usd': min_daily_volume,
+            'max_monitored_symbols': max_monitored_symbols,
+          })
+
+          # Обновляем интеграции
+          updated_sar_config['shadow_system_integration']['use_shadow_system'] = use_shadow_system
+          updated_sar_config['ml_integration']['use_ml_confirmation'] = use_ml_confirmation
+
+          # Сохраняем в основную конфигурацию
+          current_config['stop_and_reverse_strategy'] = updated_sar_config
+          config_manager.save_config(current_config)
+
+          # Уведомляем систему об изменениях
+          state_manager.set_command('reload_sar_config')
+
+          st.success("✅ Настройки SAR стратегии сохранены!")
+          st.info("ℹ️ Изменения вступят в силу при следующем обновлении системы")
+
+        except Exception as e:
+          st.error(f"❌ Ошибка сохранения настроек: {e}")
+
+      # Статус стратегии
+      st.divider()
+      st.subheader("📈 Статус стратегии")
+
+      try:
+        # Получаем статус SAR стратегии из состояния
+        sar_status = state_manager.get_custom_data('sar_strategy_status')
+
+        if sar_status:
+          col1, col2, col3 = st.columns(3)
+
+          with col1:
+            st.metric(
+              "Отслеживаемые символы",
+              sar_status.get('monitored_symbols_count', 0)
+            )
+
+          with col2:
+            st.metric(
+              "Активные позиции",
+              sar_status.get('current_positions_count', 0)
+            )
+
+          with col3:
+            last_update = sar_status.get('last_symbol_update')
+            if last_update:
+              from datetime import datetime
+
+              last_update_dt = datetime.fromisoformat(last_update)
+              time_diff = datetime.now() - last_update_dt
+              st.metric(
+                "Последнее обновление",
+                f"{time_diff.seconds // 60} мин назад"
+              )
+
+          # Список отслеживаемых символов
+          monitored_symbols = sar_status.get('monitored_symbols', [])
+          if monitored_symbols:
+            st.subheader("📋 Отслеживаемые символы")
+
+            # Разбиваем символы на колонки для компактного отображения
+            cols = st.columns(4)
+            for i, symbol in enumerate(monitored_symbols):
+              col_idx = i % 4
+              with cols[col_idx]:
+                st.write(f"• {symbol}")
+
+          # Текущие позиции
+          current_positions = sar_status.get('current_positions', [])
+          if current_positions:
+            st.subheader("💼 Текущие позиции SAR")
+            for position in current_positions:
+              st.write(f"🔹 {position}")
+
+        else:
+          st.info("ℹ️ Статус SAR стратегии пока недоступен")
+
+      except Exception as e:
+        st.error(f"❌ Ошибка получения статуса SAR: {e}")
+
+    except Exception as e:
+      st.error(f"❌ Ошибка загрузки настроек SAR: {e}")
+
 
 # --- Автообновление ---
 auto_refresh = st.sidebar.checkbox("🔄 Автообновление (30 сек)", value=True)

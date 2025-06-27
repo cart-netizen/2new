@@ -316,6 +316,15 @@ class PositionManager:
                   except Exception as e:
                     logger.error(f"Ошибка отправки обратной связи: {e}")
 
+                if hasattr(self, 'integrated_system') and self.integrated_system and hasattr(self.integrated_system,
+                                                                                             'sar_strategy'):
+                  if self.integrated_system.sar_strategy and symbol in self.integrated_system.sar_strategy.current_positions:
+                    await self.integrated_system.sar_strategy.handle_position_update(symbol, {
+                      'profit_loss': net_pnl,
+                      'close_price': close_price,
+                      'close_timestamp': close_timestamp
+                    })
+
                 # Удаляем из кэша, если она там была
                 if symbol in self.open_positions:
                   del self.open_positions[symbol]
@@ -338,7 +347,6 @@ class PositionManager:
   #     logger.info(f"Новая позиция по {symbol} добавлена в кэш PositionManager.")
   #   else:
   #     logger.error("Попытка добавить в кэш сделку без ключа 'symbol'.")
-
   async def _check_reversal_exit(self, position: Dict, ltf_data: pd.DataFrame) -> Optional[TradingSignal]:
     """
     Проверяет сигнал на разворот и возвращает ГОТОВЫЙ СИГНАЛ для новой сделки, если разворот оправдан.
@@ -348,28 +356,87 @@ class PositionManager:
     if open_price == 0: return None
 
     pnl_multiplier = 1 if position.get('side') == 'BUY' else -1
-    unrealized_pnl_pct = ((current_price - open_price) / open_price) * pnl_multiplier
+    unrealized_pnl_pct = ((current_price - open_price) / open_price) * pnl_multiplier * 100  # В процентах
 
-    if unrealized_pnl_pct <= 0.005: return None
+    # ИЗМЕНИТЬ: Снизить порог для обнаружения разворота
+    if unrealized_pnl_pct <= -1.0:  # Если убыток больше 1%
+      logger.info(f"Позиция {position['symbol']} в убытке {unrealized_pnl_pct:.2f}%, проверяем разворот")
+    else:
+      return None
 
     opposite_signal_type = SignalType.SELL if position.get('side') == 'BUY' else SignalType.BUY
+
+    # ДОБАВИТЬ: Дополнительные проверки для подтверждения разворота
+    # Проверяем EMA кроссовер
+    if 'ema_12' not in ltf_data.columns:
+      ltf_data['ema_12'] = ta.ema(ltf_data['close'], length=12)
+      ltf_data['ema_26'] = ta.ema(ltf_data['close'], length=26)
+
+    ema_12 = ltf_data['ema_12'].iloc[-1]
+    ema_26 = ltf_data['ema_26'].iloc[-1]
+
+    # Подтверждаем разворот через EMA
+    if position.get('side') == 'BUY' and ema_12 < ema_26:
+      logger.info(f"EMA подтверждает разворот для SELL на {position['symbol']}")
+    elif position.get('side') == 'SELL' and ema_12 > ema_26:
+      logger.info(f"EMA подтверждает разворот для BUY на {position['symbol']}")
+    else:
+      return None
+
     reverse_signal_candidate = TradingSignal(
-      signal_type=opposite_signal_type, symbol=position['symbol'], price=current_price,
-      confidence=0.99, strategy_name="ReversalSAR", timestamp=datetime.now()
+      signal_type=opposite_signal_type,
+      symbol=position['symbol'],
+      price=current_price,
+      confidence=0.85,  # Снизить с 0.99
+      strategy_name="ReversalSAR",
+      timestamp=datetime.now()
     )
 
     is_strong_reverse, _ = await self.signal_filter.filter_signal(reverse_signal_candidate, ltf_data)
-    if not is_strong_reverse: return None
+    if not is_strong_reverse:
+      return None
 
     commission_rate = 0.00075
-    safety_buffer_pct = (commission_rate * 3) * 1.5
+    safety_buffer_pct = commission_rate * 3  # Упростить расчет
 
-    if unrealized_pnl_pct > safety_buffer_pct:
-      logger.info(f"Обнаружен экономически выгодный разворот для {position['symbol']}.")
+    # ИЗМЕНИТЬ условие - разрешаем разворот даже при небольшом убытке
+    if unrealized_pnl_pct > -10.0:  # Не разворачиваем при убытке больше 10%
+      logger.info(f"Обнаружен разворот для {position['symbol']}. PnL: {unrealized_pnl_pct:.2f}%")
       return reverse_signal_candidate
     else:
-      logger.info(f"Разворот для {position['symbol']} обнаружен, но прибыль недостаточна.")
+      logger.info(f"Разворот для {position['symbol']} отклонен - слишком большой убыток: {unrealized_pnl_pct:.2f}%")
       return None
+  # async def _check_reversal_exit(self, position: Dict, ltf_data: pd.DataFrame) -> Optional[TradingSignal]:
+  #   """
+  #   Проверяет сигнал на разворот и возвращает ГОТОВЫЙ СИГНАЛ для новой сделки, если разворот оправдан.
+  #   """
+  #   current_price = ltf_data['close'].iloc[-1]
+  #   open_price = float(position.get('open_price', 0))
+  #   if open_price == 0: return None
+  #
+  #   pnl_multiplier = 1 if position.get('side') == 'BUY' else -1
+  #   unrealized_pnl_pct = ((current_price - open_price) / open_price) * pnl_multiplier
+  #
+  #   if unrealized_pnl_pct <= 0.005: return None
+  #
+  #   opposite_signal_type = SignalType.SELL if position.get('side') == 'BUY' else SignalType.BUY
+  #   reverse_signal_candidate = TradingSignal(
+  #     signal_type=opposite_signal_type, symbol=position['symbol'], price=current_price,
+  #     confidence=0.99, strategy_name="ReversalSAR", timestamp=datetime.now()
+  #   )
+  #
+  #   is_strong_reverse, _ = await self.signal_filter.filter_signal(reverse_signal_candidate, ltf_data)
+  #   if not is_strong_reverse: return None
+  #
+  #   commission_rate = 0.00075
+  #   safety_buffer_pct = (commission_rate * 3) * 1.5
+  #
+  #   if unrealized_pnl_pct > safety_buffer_pct:
+  #     logger.info(f"Обнаружен экономически выгодный разворот для {position['symbol']}.")
+  #     return reverse_signal_candidate
+  #   else:
+  #     logger.info(f"Разворот для {position['symbol']} обнаружен, но прибыль недостаточна.")
+  #     return None
 
   def add_position_to_cache(self, trade: Dict):
     """Добавляет информацию о новой сделке в кэш открытых позиций."""

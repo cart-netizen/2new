@@ -527,7 +527,7 @@ class VolatilityPredictor:
 
     # --- НОВАЯ СТРОКА ЛОГИРОВАНИЯ ---
     logger.info(
-      f"Прогноз волатильности: Текущая=, Предсказанная=, Режим=''")
+      f"Прогноз волатильности: Текущая={current_volatility:.6f}, Предсказанная={predicted_volatility:.6f}, Режим='{volatility_regime.value}'")
     # --- КОНЕЦ НОВОЙ СТРОКИ ---
 
     return VolatilityPrediction(

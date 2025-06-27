@@ -557,6 +557,10 @@ class AdvancedDatabaseManager:
 
     trade_id = await self._execute(query, params)
 
+    if not trade_id:
+      logger.error(f"Не удалось добавить сделку в БД для {signal.symbol}")
+      return None
+
     # Очищаем кэш открытых позиций
     self.clear_cache("open_positions")
 

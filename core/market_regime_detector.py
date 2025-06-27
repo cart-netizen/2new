@@ -134,7 +134,7 @@ class MarketRegimeDetector:
     """Инициализирует оптимальные параметры для каждого режима"""
     regime_parameters = {
       MarketRegime.STRONG_TREND_UP: RegimeParameters(
-        recommended_strategies=['Momentum_Spike', 'Dual_Thrust', 'Live_ML_Strategy'],
+        recommended_strategies=['Momentum_Spike', 'Dual_Thrust', 'Live_ML_Strategy', 'Stop_and_Reverse'],
         avoided_strategies=['Mean_Reversion_BB'],
         position_size_multiplier=1.2,
         stop_loss_multiplier=1.5,  # Шире стопы в тренде
@@ -145,15 +145,64 @@ class MarketRegimeDetector:
         min_signal_quality=0.6,
         primary_timeframe=Timeframe.ONE_HOUR,
         confirmation_timeframes=[Timeframe.FOUR_HOURS],
-        key_indicators=['ADX', 'MACD', 'RSI'],
-        indicator_settings={'ADX_threshold': 30, 'RSI_overbought': 80},
+        key_indicators=['ADX', 'MACD', 'RSI', 'PSAR'],
+        indicator_settings={'ADX_threshold': 30, 'RSI_overbought': 80, 'PSAR_acceleration': 0.02},
         volume_filter_enabled=True,
         volatility_filter_enabled=False,
         correlation_filter_strict=False
       ),
 
+      MarketRegime.STRONG_TREND_DOWN: RegimeParameters(
+        recommended_strategies=['Momentum_Spike', 'Dual_Thrust', 'Live_ML_Strategy', 'Stop_and_Reverse'],
+        avoided_strategies=['Mean_Reversion_BB', 'Grid_Trading'],
+        position_size_multiplier=1.2,
+        stop_loss_multiplier=1.5,  # Шире стопы в сильном тренде
+        take_profit_multiplier=2.5,  # Больше целей для сильного движения
+        max_positions=5,
+        use_limit_orders=False,  # Маркет для входа в сильный тренд
+        entry_confirmation_required=False,  # Быстрый вход в сильный тренд
+        min_signal_quality=0.6,
+        primary_timeframe=Timeframe.ONE_HOUR,
+        confirmation_timeframes=[Timeframe.FOUR_HOURS],
+        key_indicators=['ADX', 'MACD', 'RSI', 'PSAR'],
+        indicator_settings={
+          'ADX_threshold': 35,  # Очень сильный тренд
+          'RSI_oversold': 20,  # Экстремальная зона для медвежьего тренда
+          'PSAR_acceleration': 0.02
+        },
+        volume_filter_enabled=True,
+        volatility_filter_enabled=False,  # В сильном тренде волатильность допустима
+        correlation_filter_strict=False  # Разрешаем коррелированные позиции в тренде
+      ),
+      MarketRegime.TREND_DOWN: RegimeParameters(
+        recommended_strategies=['Live_ML_Strategy', 'Dual_Thrust', 'Stop_and_Reverse'],
+        avoided_strategies=['Mean_Reversion_BB', 'Grid_Trading'],
+        position_size_multiplier=0.9,  # Чуть меньший размер для медвежьего тренда
+        stop_loss_multiplier=1.3,  # Чуть шире стопы (медвежьи тренды более волатильны)
+        take_profit_multiplier=2.0,  # Более консервативные цели
+        max_positions=3,
+        use_limit_orders=True,  # Лимитники для точного входа
+        entry_confirmation_required=True,  # Обязательное подтверждение
+        min_signal_quality=0.75,  # Высокие требования к качеству
+        primary_timeframe=Timeframe.ONE_HOUR,
+        confirmation_timeframes=[Timeframe.FOUR_HOURS, Timeframe.ONE_DAY],
+        key_indicators=['ADX', 'EMA', 'RSI', 'MACD', 'PSAR', 'Volume'],
+        indicator_settings={
+          'ADX_threshold': 28,  # Чуть выше порог для медвежьего тренда
+          'RSI_overbought': 70,
+          'RSI_oversold': 20,  # Более экстремальная зона для медвежьего
+          'EMA_fast': 50,
+          'EMA_slow': 200,
+          'PSAR_acceleration': 0.02,
+          'volume_spike_threshold': 1.5
+        },
+        volume_filter_enabled=True,
+        volatility_filter_enabled=True,  # Строгий контроль волатильности
+        correlation_filter_strict=True  # Избегаем множественных медвежьих позиций
+      ),
+
       MarketRegime.TREND_UP: RegimeParameters(
-        recommended_strategies=['Live_ML_Strategy', 'Ichimoku_Cloud', 'Dual_Thrust'],
+        recommended_strategies=['Live_ML_Strategy', 'Ichimoku_Cloud', 'Dual_Thrust', 'Stop_and_Reverse'],
         avoided_strategies=['Mean_Reversion_BB'],
         position_size_multiplier=1.0,
         stop_loss_multiplier=1.2,
@@ -268,7 +317,7 @@ class MarketRegimeDetector:
     }
 
     # Добавляем параметры для остальных режимов
-    for regime in [MarketRegime.TREND_DOWN, MarketRegime.STRONG_TREND_DOWN,
+    for regime in [
                    MarketRegime.WEAK_TREND_UP, MarketRegime.WEAK_TREND_DOWN,
                    MarketRegime.REVERSAL]:
       if regime not in regime_parameters:

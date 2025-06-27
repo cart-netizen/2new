@@ -1,6 +1,6 @@
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
 from core.schemas import TradingSignal
@@ -51,6 +51,40 @@ class ShadowTradingManager:
     self._apply_config_settings()
 
     self.is_active = False
+
+  async def get_symbol_performance(self, symbol: str, days: int = 7) -> Optional[Dict]:
+    """Получает статистику производительности для символа за указанный период"""
+    try:
+      end_date = datetime.now()
+      start_date = end_date - timedelta(days=days)
+
+      # Получаем данные из БД
+      query = """
+        SELECT 
+            COUNT(*) as signal_count,
+            AVG(CASE WHEN outcome = 'WIN' THEN 1.0 ELSE 0.0 END) as win_rate,
+            AVG(profit_loss_pct) as avg_profit_pct,
+            STDDEV(profit_loss_pct) as profit_volatility
+        FROM signal_analysis 
+        WHERE symbol = ? AND created_at >= ? AND outcome != 'PENDING'
+        """
+
+      result = await self.db_manager.execute_query(query, (symbol, start_date))
+
+      if result and len(result) > 0:
+        row = result[0]
+        return {
+          'signal_count': row[0] or 0,
+          'win_rate': row[1] or 0.5,
+          'avg_profit_pct': row[2] or 0.0,
+          'profit_volatility': row[3] or 0.0
+        }
+
+      return None
+
+    except Exception as e:
+      logger.error(f"Ошибка получения производительности для {symbol}: {e}")
+      return None
 
   def _apply_config_settings(self):
     """Применяет настройки из конфигурации"""
@@ -249,6 +283,16 @@ class ShadowTradingManager:
     Returns:
         signal_id для отслеживания
     """
+    if metadata.get('source') == 'sar_strategy' or 'sar' in metadata.get('strategy_name', '').lower():
+      # Дополнительные метаданные для SAR
+      sar_metadata = {
+        'sar_score': metadata.get('signal_score', 0),
+        'sar_components': metadata.get('sar_components', {}),
+        'filter_reason': metadata.get('filter_reason', ''),
+        'protection_checks': metadata.get('protection_checks', '')
+      }
+      metadata.update(sar_metadata)
+
     try:
       # Начинаем отслеживание сигнала
       signal_id = await self.signal_tracker.track_signal(signal, metadata or {})

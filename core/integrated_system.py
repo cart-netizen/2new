@@ -28,6 +28,7 @@ from strategies.ensemble_ml_strategy import EnsembleMLStrategy
 from strategies.ichimoku_strategy import IchimokuStrategy
 from strategies.mean_reversion_strategy import MeanReversionStrategy
 from strategies.momentum_strategy import MomentumStrategy
+from strategies.sar_strategy import StopAndReverseStrategy
 from utils.logging_config import get_logger
 from config import trading_params, api_keys, settings
 from core.data_fetcher import DataFetcher
@@ -136,6 +137,16 @@ class IntegratedTradingSystem:
 
     momentum_strategy = MomentumStrategy()
     self.strategy_manager.add_strategy(momentum_strategy)
+
+    try:
+
+      self.sar_strategy = StopAndReverseStrategy(self.config, self.data_fetcher)
+      self.strategy_manager.add_strategy(self.sar_strategy)
+      logger.info("✅ Stop-and-Reverse стратегия зарегистрирована")
+    except Exception as e:
+      logger.error(f"Ошибка инициализации SAR стратегии: {e}")
+      self.sar_strategy = None
+
     self.volatility_predictor: Optional[VolatilityPredictor] = None
     # --- НОВЫЙ БЛОК: ЗАГРУЗКА СИСТЕМЫ ВОЛАТИЛЬНОСТИ ---
     self.volatility_system: Optional[VolatilityPredictionSystem] = None
@@ -176,6 +187,9 @@ class IntegratedTradingSystem:
     self.trade_executor.integrated_system = self
     if self.shadow_trading:
       self.trade_executor.shadow_trading = self.shadow_trading
+
+    if self.shadow_trading and self.data_fetcher:
+      self.data_fetcher.shadow_trading_manager = self.shadow_trading
 
     self.signal_filter = SignalFilter(
       settings=strategy_settings,
@@ -451,8 +465,53 @@ class IntegratedTradingSystem:
         signal_logger.info(f"РЕЖИМ: Торговля не рекомендуется.")
         return
 
-      # --- ПРИОРИТЕТНАЯ ПРОВЕРКА ДЛЯ СЕТОЧНОЙ СТРАТЕГИИ ---
+      # --- ПРИОРИТЕТНАЯ ПРОВЕРКА ДЛЯ СЕТОЧНОЙ СТРАТЕГИИ и SAR ---
       active_strategies_from_dashboard = self.state_manager.get_custom_data('active_strategies') or {}
+      candidate_signals: Dict[str, TradingSignal] = {}
+      # Проверяем SAR стратегию отдельно
+      if "Stop_and_Reverse" in regime_params.recommended_strategies and active_strategies_from_dashboard.get(
+          "Stop_and_Reverse", True):
+        if self.sar_strategy and symbol in self.sar_strategy.monitored_symbols:
+          try:
+            # Очищаем старый кэш перед генерацией сигнала
+            self.sar_strategy._clear_old_cache()
+
+            sar_signal = await self.sar_strategy.generate_signal(symbol, htf_data)
+            if sar_signal and sar_signal.signal_type != SignalType.HOLD:
+              # Обновляем статус позиции в SAR стратегии
+              current_position = self.position_manager.open_positions.get(symbol)
+              await self.sar_strategy.update_position_status(symbol, current_position)
+
+              # Применяем адаптивный вес
+              weight = self.adaptive_selector.get_strategy_weight(
+                "Stop_and_Reverse", regime_characteristics.primary_regime.value
+              )
+              sar_signal.confidence *= weight
+
+              # Интеграция с Shadow Trading
+              if self.shadow_trading:
+                signal_id = await self.shadow_trading.process_signal(
+                  signal=sar_signal,
+                  metadata={
+                    'source': 'sar_strategy',
+                    'strategy_name': 'Stop_and_Reverse',
+                    'signal_score': sar_signal.metadata.get('signal_score', 0),
+                    'sar_components': sar_signal.metadata.get('sar_components', {}),
+                    'filter_reason': sar_signal.metadata.get('filter_reason', ''),
+                    'market_regime': regime_characteristics.primary_regime.value,
+                    'volatility_level': 'normal',  # TODO: динамически определять
+                    'confidence_score': sar_signal.confidence
+                  },
+                  was_filtered=False
+                )
+                # Сохраняем ID для отслеживания
+                sar_signal.metadata['shadow_tracking_id'] = signal_id
+
+              candidate_signals["Stop_and_Reverse"] = sar_signal
+              logger.info(f"SAR сигнал для {symbol}: {sar_signal.signal_type.value}, "
+                          f"confidence={sar_signal.confidence:.3f}, вес={weight:.2f}")
+          except Exception as e:
+            logger.error(f"Ошибка получения SAR сигнала для {symbol}: {e}")
 
       if "Grid_Trading" in regime_params.recommended_strategies and active_strategies_from_dashboard.get("Grid_Trading",
                                                                                                          True):
@@ -694,6 +753,76 @@ class IntegratedTradingSystem:
 
     logger.info(f"✅ Enhanced сигнал для {symbol} одобрен и поставлен в очередь")
     signal_logger.info(f"====== ENHANCED СИГНАЛ ДЛЯ {symbol} ПОСТАВЛЕН В ОЧЕРЕДЬ ======")
+
+  async def update_sar_symbols_task(self):
+    """Обновляет список символов для SAR стратегии каждый час"""
+    while self.is_running:
+      try:
+        if self.sar_strategy:
+          # Сохраняем текущий список для сравнения
+          old_symbols = set(self.sar_strategy.monitored_symbols.keys())
+
+          # Обновляем список
+          updated_symbols = await self.sar_strategy.update_monitored_symbols(self.data_fetcher)
+          new_symbols = set(updated_symbols)
+
+          # Определяем изменения
+          added_symbols = new_symbols - old_symbols
+          removed_symbols = old_symbols - new_symbols
+
+          # Обрабатываем исключенные символы
+          if removed_symbols:
+            await self.sar_strategy.handle_removed_symbols(
+              list(removed_symbols), self.position_manager
+            )
+
+          # Логируем изменения
+          if added_symbols or removed_symbols:
+            logger.info(f"🔄 SAR символы обновлены: +{len(added_symbols)}, -{len(removed_symbols)}")
+
+          # Обновляем статус в state_manager
+          sar_status = self.sar_strategy.get_strategy_status()
+          self.state_manager.set_custom_data('sar_strategy_status', sar_status)
+
+      except Exception as e:
+        logger.error(f"Ошибка обновления SAR символов: {e}")
+
+      await asyncio.sleep(3600)  # 1 час
+
+  # Задача очистки кэша SAR стратегии
+  async def cleanup_sar_cache_task(self):
+    """Периодически очищает кэш SAR стратегии"""
+    while self.is_running:
+      try:
+        if self.sar_strategy:
+          self.sar_strategy._clear_old_cache()
+      except Exception as e:
+        logger.error(f"Ошибка очистки кэша SAR: {e}")
+      await asyncio.sleep(300)  # 5 минут
+
+  async def transfer_position_from_strategy(self, symbol: str, position_data: Dict, strategy_name: str):
+    """
+    Принимает позицию от стратегии для дальнейшей обработки основной системой
+    """
+    try:
+      logger.info(f"📥 Получена позиция {symbol} от стратегии {strategy_name}")
+
+      # Добавляем позицию в основной список для мониторинга
+      self.open_positions[symbol] = position_data
+
+      # Логируем детали передачи
+      transfer_reason = position_data.get('transfer_reason', 'unknown')
+      logger.info(f"📋 Позиция {symbol} принята в основную обработку. Причина: {transfer_reason}")
+
+      # Уведомляем систему о необходимости особого внимания к этой позиции
+      if hasattr(self, 'special_monitoring_positions'):
+        self.special_monitoring_positions.add(symbol)
+
+      return True
+
+    except Exception as e:
+      logger.error(f"Ошибка передачи позиции {symbol} от {strategy_name}: {e}")
+      return False
 
   async def train_anomaly_detector(self, symbols: List[str], lookback_days: int = 45):
     """
@@ -2427,6 +2556,24 @@ class IntegratedTradingSystem:
       cache_stats = self.data_fetcher.get_cache_stats()
       logger.info(f"Статистика кэша после предзагрузки: {cache_stats}")
 
+      if self.sar_strategy:
+        try:
+          # Запускаем первоначальное обновление символов
+          initial_symbols = await self.sar_strategy.update_monitored_symbols(self.data_fetcher)
+          logger.info(f"🎯 SAR стратегия готова к работе с {len(initial_symbols)} символами")
+
+          # Сохраняем начальный статус
+          sar_status = self.sar_strategy.get_strategy_status()
+          self.state_manager.set_custom_data('sar_strategy_status', sar_status)
+
+        except Exception as e:
+          logger.error(f"Ошибка инициализации SAR стратегии: {e}")
+      else:
+        logger.warning("SAR стратегия не была инициализирована")
+
+      logger.info("🚀 Все компоненты системы, включая SAR стратегию, готовы к работе")
+
+
       logger.info("Оптимизированная инициализация завершена")
 
   async def _monitoring_loop_optimized(self):
@@ -2492,6 +2639,17 @@ class IntegratedTradingSystem:
         # Обновляем состояние для дашборда
         self.state_manager.update_open_positions(self.position_manager.open_positions)
 
+        if self.sar_strategy:
+          asyncio.create_task(await self.cleanup_sar_cache_task())
+          try:
+            sar_status = self.sar_strategy.get_strategy_status()
+            self.state_manager.set_custom_data('sar_strategy_status', sar_status)
+          except Exception as e:
+            logger.error(f"Ошибка обновления статуса SAR: {e}")
+
+        if self.sar_strategy:
+          asyncio.create_task(await self.update_sar_symbols_task())
+
         # Выводим статистику производительности каждые 10 циклов
         if hasattr(self, '_monitoring_cycles'):
           self._monitoring_cycles += 1
@@ -2517,9 +2675,28 @@ class IntegratedTradingSystem:
             if symbol:
               stats = self.market_regime_detector.get_regime_statistics(symbol)
               self.state_manager.set_custom_data(f"regime_stats_{symbol}", stats)
-          # Добавьте обработку других команд по аналогии, если необходимо
-          # elif command_name == 'another_command':
-          #    ...
+          elif command_name == 'reload_sar_config':
+            logger.info("🔄 Перезагрузка конфигурации SAR стратегии...")
+            try:
+              if self.sar_strategy:
+                # Перезагружаем конфигурацию
+                new_config = self.config_manager.load_config()
+                new_sar_config = new_config.get('stop_and_reverse_strategy', {})
+
+                # Обновляем параметры стратегии
+                for key, value in new_sar_config.items():
+                  if hasattr(self.sar_strategy, key):
+                    setattr(self.sar_strategy, key, value)
+
+                # Обновляем статус в state_manager
+                sar_status = self.sar_strategy.get_strategy_status()
+                self.state_manager.set_custom_data('sar_strategy_status', sar_status)
+
+                logger.info("✅ Конфигурация SAR стратегии перезагружена")
+              else:
+                logger.warning("SAR стратегия не инициализирована")
+            except Exception as e:
+              logger.error(f"Ошибка перезагрузки SAR конфигурации: {e}")
           # Очищаем команду после выполнения
           self.state_manager.clear_command()
         # ================================================================
@@ -3275,20 +3452,6 @@ class IntegratedTradingSystem:
       'recommendation': self._generate_quality_recommendation(results)
     }
 
-  def _generate_quality_recommendation(self, results: Dict[str, Any]) -> str:
-    """
-    Генерирует рекоменд# Обновления для integrated_system.py для интеграции системы оценки качества
-    """
-
-    # Добавьте импорт в начало файла:
-    from core.signal_quality_analyzer import SignalQualityAnalyzer, QualityScore
-
-    # В методе __init__ добавьте инициализацию после correlation_manager:
-    # Инициализация анализатора качества сигналов
-    self.signal_quality_analyzer = SignalQualityAnalyzer(self.data_fetcher, self.db_manager)
-    self.min_quality_score = 0.6  # Минимальный балл качества для исполнения
-
-    # Обновите метод _process_trading_signal_with_correlation, добавив оценку качества:
 
   async def process_trade_feedback(self, symbol: str, trade_id: int, trade_result: Dict[str, Any]):
       """

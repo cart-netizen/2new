@@ -122,6 +122,9 @@ class TradeExecutor:
 
       # 2. Отправляем ордер на биржу
       logger.info(f"Отправка ордера на открытие: {params}")
+      if not hasattr(signal, 'strategy_name') or not signal.strategy_name:
+        signal.strategy_name = 'Unknown_new'
+
       order_response = await self.connector.place_order(**params)
 
       # 3. Обрабатываем ответ
@@ -136,6 +139,12 @@ class TradeExecutor:
           quantity=quantity,
           leverage=leverage
         )
+
+        if trade_details:
+          logger.info(f"✅ Сделка записана в БД: ID={trade_details.get('id')}, Symbol={symbol}")
+        else:
+          logger.error(f"❌ Не удалось записать сделку в БД для {symbol}")
+
         if hasattr(signal, 'metadata') and signal.metadata:
           shadow_id = signal.metadata.get('shadow_tracking_id')
           if shadow_id and hasattr(self, 'shadow_trading') and self.shadow_trading:

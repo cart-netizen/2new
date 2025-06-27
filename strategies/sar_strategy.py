@@ -100,7 +100,7 @@ class StopAndReverseStrategy(BaseStrategy):
         self.macro_alignment_score_weight = self.sar_config.get('macro_alignment_score_weight', 1)
         
         # Защита от быстрых разворотов
-        self.commission_rate = 0.00075  # 0.075%
+        self.commission_rate = 0.00085  # 0.075%
         self.min_profit_protection = self.commission_rate * 2 * 3  # 3 комиссии
         
         # Shadow system интеграция
@@ -166,6 +166,7 @@ class StopAndReverseStrategy(BaseStrategy):
         2. ADX > 25  
         3. ATR волатильность выше среднего
         """
+        logger.debug(f"Проверка символа {symbol} для SAR стратегии...")
         try:
             if len(data) < max(self.chop_period, self.adx_period, self.atr_period, 100):
                 return False, "Недостаточно исторических данных"
@@ -201,7 +202,10 @@ class StopAndReverseStrategy(BaseStrategy):
             
         except Exception as e:
             logger.error(f"Ошибка в фильтрах режимов для {symbol}: {e}")
-            return False, f"Ошибка фильтров: {str(e)}"
+            volume_24h = data['volume'].iloc[-24:].sum() * data['close'].iloc[-1]
+            logger.debug(f"Символ {symbol} отклонен: объем 24h = {volume_24h:.0f} USDT")
+            return False, f"Низкий объем торгов: {volume_24h:.0f} USDT, Ошибка фильтров: {str(e)}"
+
 
     def _calculate_choppiness_index(self, data: pd.DataFrame, period: int) -> Optional[float]:
         """Расчет Choppiness Index согласно исследованию"""
@@ -1424,17 +1428,19 @@ class StopAndReverseStrategy(BaseStrategy):
             # Получаем символы с высоким объемом
             all_symbols = await data_fetcher.get_active_symbols_by_volume(
 
-                limit=50  # Ограничиваем количество для производительности
+                limit=150  # Ограничиваем количество для производительности
             )
             
             new_monitored = {}
             removed_symbols = []
-            
+            logger.info(f"Получено {len(all_symbols)} символов для проверки")
+
             for symbol in all_symbols:
                 # Получаем данные для проверки фильтров
                 try:
                     data = await data_fetcher.get_historical_candles(symbol, Timeframe.FIFTEEN_MINUTES, limit=200)
                     if data is None or len(data) < 100:
+                        logger.debug(f"Недостаточно данных для {symbol}: {len(data) if data is not None else 0}")
                         continue
                     
                     # Проверяем, подходит ли символ для SAR стратегии
@@ -1449,7 +1455,9 @@ class StopAndReverseStrategy(BaseStrategy):
                         
                         if symbol not in self.monitored_symbols:
                             logger.info(f"➕ Добавлен символ в SAR мониторинг: {symbol} ({reason})")
-                    
+                    else:
+                        logger.debug(f"Символ {symbol} не прошел фильтры: {reason}")
+
                 except Exception as e:
                     logger.error(f"Ошибка проверки символа {symbol}: {e}")
                     continue

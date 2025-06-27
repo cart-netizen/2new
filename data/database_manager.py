@@ -627,6 +627,29 @@ class AdvancedDatabaseManager:
     closed_trades = await self._execute(query, (limit,), fetch='all')
     return closed_trades
 
+  async def get_recent_closed_trades(self, limit: int = 100) -> List[Dict]:
+    """Получает последние закрытые сделки"""
+    try:
+      query = """
+            SELECT * FROM trades 
+            WHERE status = 'CLOSED' 
+            ORDER BY close_timestamp DESC 
+            LIMIT ?
+        """
+
+      result = await self.execute_query(query, (limit,))
+      return result if result else []
+
+    except Exception as e:
+      logger.error(f"Ошибка получения закрытых сделок: {e}")
+      return []
+
+  @property
+  def conn(self):
+    """Совместимость для старого кода"""
+    # Возвращаем None, так как используем пул соединений
+    return None
+
   async def get_all_open_trades(self) -> List[Dict]:
       """Получает все открытые сделки"""
       query = "SELECT * FROM trades WHERE status = 'OPEN'"

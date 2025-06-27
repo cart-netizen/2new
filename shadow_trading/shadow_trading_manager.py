@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
+from core.enums import Timeframe
 from core.schemas import TradingSignal
 from data.database_manager import AdvancedDatabaseManager
 # from main import logger
@@ -64,7 +65,7 @@ class ShadowTradingManager:
             COUNT(*) as signal_count,
             AVG(CASE WHEN outcome = 'WIN' THEN 1.0 ELSE 0.0 END) as win_rate,
             AVG(profit_loss_pct) as avg_profit_pct,
-            STDDEV(profit_loss_pct) as profit_volatility
+            (AVG(profit_loss_pct * profit_loss_pct) - AVG(profit_loss_pct) * AVG(profit_loss_pct)) as profit_volatility
         FROM signal_analysis 
         WHERE symbol = ? AND created_at >= ? AND outcome != 'PENDING'
         """
@@ -318,6 +319,27 @@ class ShadowTradingManager:
     try:
       # Общая производительность
       overall_perf = await self.performance_analyzer.get_overall_performance(days=1)
+      # Добавляем отладочную информацию
+      logger.debug(f"Shadow Trading статистика: {overall_perf}")
+
+      # Получаем также статистику из основной БД для сравнения
+      real_trades_query = """
+              SELECT 
+                COUNT(*) as total_trades,
+                COUNT(CASE WHEN profit_loss > 0 THEN 1 END) as profitable_trades
+              FROM trades 
+              WHERE close_timestamp >= datetime('now', '-1 day')
+              AND status = 'CLOSED'
+            """
+
+      real_stats = await self.db_manager._execute(real_trades_query, fetch='one')
+      if real_stats:
+        real_win_rate = (real_stats['profitable_trades'] / real_stats['total_trades'] * 100) if real_stats[
+                                                                                                  'total_trades'] > 0 else 0
+        logger.info(f"📊 Сравнение статистики:")
+        logger.info(
+          f"  Shadow Trading: {overall_perf.get('completed_signals', 0)} сигналов, WR: {overall_perf.get('win_rate_pct', 0)}%")
+        logger.info(f"  Реальные сделки: {real_stats['total_trades']} сделок, WR: {real_win_rate:.1f}%")
 
       # По источникам
       source_perf = await self.performance_analyzer.get_performance_by_source(days=1)
@@ -387,3 +409,174 @@ class ShadowTradingManager:
     except Exception as e:
       logger.error(f"Ошибка получения деталей сигнала {signal_id}: {e}")
       return None
+
+  async def update_signal_outcomes(self):
+    """Обновляет исходы завершенных сигналов"""
+    try:
+      # Получаем сигналы в статусе 'pending'
+      query = """
+            SELECT signal_id, symbol, entry_price, entry_time, signal_type
+            FROM signal_analysis 
+            WHERE outcome = 'pending'
+            AND entry_time < datetime('now', '-1 hour')
+        """
+
+      pending_signals = await self.db_manager.execute_query(query)
+
+      for signal in pending_signals:
+        signal_id = signal['signal_id']
+        symbol = signal['symbol']
+        entry_price = signal['entry_price']
+        signal_type = signal['signal_type']
+        entry_time = datetime.fromisoformat(signal['entry_time'])
+
+        # Получаем текущую цену
+        try:
+          current_data = await self.data_fetcher.get_historical_candles(
+            symbol, Timeframe.ONE_MINUTE, limit=1
+          )
+          if current_data is None or current_data.empty:
+            continue
+
+          current_price = current_data['close'].iloc[-1]
+
+          # Рассчитываем P&L
+          if signal_type.upper() == 'BUY':
+            pnl_pct = ((current_price - entry_price) / entry_price) * 100
+          else:  # SELL
+            pnl_pct = ((entry_price - current_price) / entry_price) * 100
+
+          # Определяем исход через час после сигнала
+          time_elapsed = datetime.now() - entry_time
+          if time_elapsed > timedelta(hours=1):
+            outcome = 'profitable' if pnl_pct > 0.1 else 'loss'  # 0.1% минимум для профита
+
+            # Обновляем в БД
+            update_query = """
+                        UPDATE signal_analysis 
+                        SET outcome = ?, 
+                            exit_price = ?,
+                            exit_time = datetime('now'),
+                            profit_loss_pct = ?,
+                            updated_at = datetime('now')
+                        WHERE signal_id = ?
+                    """
+
+            await self.db_manager.execute_query(
+              update_query,
+              (outcome, current_price, pnl_pct, signal_id)
+            )
+
+            logger.debug(f"Обновлен исход сигнала {signal_id}: {outcome} ({pnl_pct:.2f}%)")
+
+        except Exception as e:
+          logger.error(f"Ошибка обновления сигнала {signal_id}: {e}")
+
+    except Exception as e:
+      logger.error(f"Ошибка обновления исходов сигналов: {e}")
+
+  async def get_advanced_analytics_report(self, days: int = 7) -> Dict[str, Any]:
+    """Получить продвинутый аналитический отчет"""
+    try:
+      # Базовая производительность
+      overall_perf = await self.performance_analyzer.get_overall_performance(days)
+
+      # Анализ по источникам
+      source_perf = await self.performance_analyzer.get_performance_by_source(days)
+
+      # Анализ по символам
+      symbol_perf = await self.performance_analyzer.get_symbol_performance(days)
+
+      # Временной анализ
+      hourly_perf = await self.performance_analyzer.get_hourly_performance(days)
+
+      # Анализ паттернов
+      pattern_analysis = await self.performance_analyzer.get_pattern_analysis(days)
+
+      return {
+        'period_days': days,
+        'overall_performance': overall_perf,
+        'source_analysis': source_perf,
+        'symbol_analysis': symbol_perf,
+        'time_analysis': hourly_perf,
+        'pattern_analysis': pattern_analysis,
+        'generated_at': datetime.now().isoformat()
+      }
+
+    except Exception as e:
+      logger.error(f"Ошибка создания продвинутого отчета: {e}")
+      return {'error': str(e)}
+
+  async def get_optimization_recommendations(self, days: int = 14) -> Dict[str, Any]:
+    """Получить рекомендации по оптимизации"""
+    try:
+      return await self.performance_analyzer.generate_optimization_recommendations(days)
+
+    except Exception as e:
+      logger.error(f"Ошибка генерации рекомендаций: {e}")
+      return {'error': str(e)}
+
+  async def get_enhanced_metrics(self, days: int = 7) -> Dict[str, Any]:
+    """Получить расширенные метрики для дашборда"""
+    try:
+      cutoff_date = datetime.now() - timedelta(days=days)
+
+      # Запрос лучших и худших сигналов
+      best_signal_query = """
+        SELECT symbol, profit_loss_pct, signal_type, confidence, source
+        FROM signal_analysis 
+        WHERE entry_time >= ? AND profit_loss_pct IS NOT NULL
+        ORDER BY profit_loss_pct DESC 
+        LIMIT 1
+      """
+
+      worst_signal_query = """
+        SELECT symbol, profit_loss_pct, signal_type, confidence, source
+        FROM signal_analysis 
+        WHERE entry_time >= ? AND profit_loss_pct IS NOT NULL
+        ORDER BY profit_loss_pct ASC 
+        LIMIT 1
+      """
+
+      # Общие метрики
+      metrics_query = """
+        SELECT 
+          COUNT(*) as total_signals,
+          AVG(profit_loss_pct) as avg_profit_pct,
+          SUM(CASE WHEN profit_loss_pct > 0 THEN profit_loss_pct ELSE 0 END) as total_profit,
+          SUM(CASE WHEN profit_loss_pct < 0 THEN ABS(profit_loss_pct) ELSE 0 END) as total_loss,
+          COUNT(CASE WHEN profit_loss_pct > 0 THEN 1 END) as winning_signals,
+          COUNT(CASE WHEN profit_loss_pct < 0 THEN 1 END) as losing_signals,
+          MAX(profit_loss_pct) as max_profit,
+          MIN(profit_loss_pct) as max_loss
+        FROM signal_analysis 
+        WHERE entry_time >= ? AND profit_loss_pct IS NOT NULL
+      """
+
+      best_signal = await self.db_manager._execute(best_signal_query, (cutoff_date.isoformat(),), fetch='one')
+      worst_signal = await self.db_manager._execute(worst_signal_query, (cutoff_date.isoformat(),), fetch='one')
+      metrics = await self.db_manager._execute(metrics_query, (cutoff_date.isoformat(),), fetch='one')
+
+      result = {
+        'best_signal': best_signal or {},
+        'worst_signal': worst_signal or {},
+        'total_signals': metrics.get('total_signals', 0) if metrics else 0,
+        'winning_signals': metrics.get('winning_signals', 0) if metrics else 0,
+        'losing_signals': metrics.get('losing_signals', 0) if metrics else 0,
+        'max_profit_pct': metrics.get('max_profit', 0) if metrics else 0,
+        'max_loss_pct': metrics.get('max_loss', 0) if metrics else 0,
+        'total_profit': metrics.get('total_profit', 0) if metrics else 0,
+        'total_loss': metrics.get('total_loss', 0) if metrics else 0
+      }
+
+      # Вычисляем Profit Factor
+      if result['total_loss'] > 0:
+        result['profit_factor'] = result['total_profit'] / result['total_loss']
+      else:
+        result['profit_factor'] = 0.0
+
+      return result
+
+    except Exception as e:
+      logger.error(f"Ошибка получения расширенных метрик: {e}")
+      return {}

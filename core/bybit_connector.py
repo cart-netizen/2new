@@ -118,6 +118,7 @@ class BybitConnector:
     # Кэш для повторяющихся запросов
     self.request_cache = {}
     self.cache_ttl = 5  # 5 секунд для краткосрочного кэша
+    self.exchange = None
 
     # Статистика
     self.request_stats = defaultdict(int)
@@ -354,7 +355,7 @@ class BybitConnector:
               session = await self.optimized_session.get_session()
 
               # Выполнение запроса с оптимизированными таймаутами
-              request_timeout = aiohttp.ClientTimeout(total=20, connect=5)
+              request_timeout = aiohttp.ClientTimeout(total=30, connect=10)
 
               if method == 'GET':
                 async with session.get(url, params=params, headers=headers, timeout=request_timeout) as response:

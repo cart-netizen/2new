@@ -2,7 +2,7 @@
 import sys
 from collections import deque
 import json
-
+import sqlite3
 import numpy as np
 import psutil
 import streamlit as st
@@ -17,14 +17,14 @@ import json
 import plotly.graph_objects as go
 import plotly.express as px
 from datetime import datetime, timedelta
-
+import logging
 
 # from shadow_trading.dashboard_extensions import (
 #     add_shadow_trading_section,
 #     display_full_shadow_dashboard,
 #     setup_shadow_dashboard_integration
 # )
-from data.database_manager import AdvancedDatabaseManager
+from data.database_manager import AdvancedDatabaseManager, logger
 from data.state_manager import StateManager
 from config import settings
 from config.config_manager import ConfigManager
@@ -315,60 +315,427 @@ def create_shadow_trading_summary(days: int = 7) -> str:
       return f"❌ Ошибка создания сводки Shadow Trading: {e}"
 
 
+def get_shadow_data_safely(days: int) -> dict:
+  """Безопасно получает данные Shadow Trading для дашборда"""
+  try:
+    # Прямой запрос к БД без создания ShadowTradingManager
+    cutoff_date = datetime.now() - timedelta(days=days)
+
+    # Базовые метрики
+    basic_query = """
+      SELECT 
+        COUNT(*) as total_signals,
+        COUNT(CASE WHEN profit_loss_pct > 0 THEN 1 END) as winning_signals,
+        COUNT(CASE WHEN profit_loss_pct < 0 THEN 1 END) as losing_signals,
+        SUM(CASE WHEN profit_loss_pct > 0 THEN profit_loss_pct ELSE 0 END) as total_profit,
+        SUM(CASE WHEN profit_loss_pct < 0 THEN ABS(profit_loss_pct) ELSE 0 END) as total_loss,
+        MAX(profit_loss_pct) as best_signal_pct,
+        MIN(profit_loss_pct) as worst_signal_pct,
+        AVG(confidence) as avg_confidence
+      FROM signal_analysis 
+      WHERE entry_time >= ? AND profit_loss_pct IS NOT NULL
+    """
+
+    # Лучший сигнал
+    best_signal_query = """
+      SELECT symbol, profit_loss_pct, source, signal_type
+      FROM signal_analysis 
+      WHERE entry_time >= ? AND profit_loss_pct IS NOT NULL
+      ORDER BY profit_loss_pct DESC LIMIT 1
+    """
+
+    # Худший сигнал
+    worst_signal_query = """
+      SELECT symbol, profit_loss_pct, source, signal_type
+      FROM signal_analysis 
+      WHERE entry_time >= ? AND profit_loss_pct IS NOT NULL
+      ORDER BY profit_loss_pct ASC LIMIT 1
+    """
+
+    with sqlite3.connect(db_manager.db_path) as conn:
+      # Основные метрики
+      cursor = conn.execute(basic_query, (cutoff_date.isoformat(),))
+      basic_row = cursor.fetchone()
+
+      # Лучший сигнал
+      cursor = conn.execute(best_signal_query, (cutoff_date.isoformat(),))
+      best_row = cursor.fetchone()
+
+      # Худший сигнал
+      cursor = conn.execute(worst_signal_query, (cutoff_date.isoformat(),))
+      worst_row = cursor.fetchone()
+
+      if not basic_row or basic_row[0] == 0:
+        return {'total_signals': 0}
+
+      total_profit = basic_row[3] or 0
+      total_loss = basic_row[4] or 0
+      profit_factor = total_profit / total_loss if total_loss > 0 else 0
+
+      result = {
+        'total_signals': basic_row[0],
+        'winning_signals': basic_row[1],
+        'losing_signals': basic_row[2],
+        'total_profit': total_profit,
+        'total_loss': total_loss,
+        'profit_factor': profit_factor,
+        'best_signal': {
+          'symbol': best_row[0] if best_row else '',
+          'profit_loss_pct': best_row[1] if best_row else 0,
+          'source': best_row[2] if best_row else 'unknown'
+        } if best_row else {},
+        'worst_signal': {
+          'symbol': worst_row[0] if worst_row else '',
+          'profit_loss_pct': worst_row[1] if worst_row else 0,
+          'source': worst_row[2] if worst_row else 'unknown'
+        } if worst_row else {},
+        'avg_confidence': basic_row[7] or 0
+      }
+
+      return result
+
+  except Exception as e:
+    logger.error(f"Ошибка получения данных Shadow Trading: {e}")
+    return {'total_signals': 0}
+
+
+def get_shadow_analytics_safely(days: int) -> dict:
+  """Безопасно получает аналитические данные Shadow Trading"""
+  try:
+    cutoff_date = datetime.now() - timedelta(days=days)
+
+    # Статистика по источникам
+    source_query = """
+      SELECT 
+        source,
+        COUNT(*) as total_signals,
+        COUNT(CASE WHEN profit_loss_pct > 0 THEN 1 END) as winning_signals,
+        AVG(profit_loss_pct) as avg_profit_pct,
+        SUM(CASE WHEN profit_loss_pct > 0 THEN profit_loss_pct ELSE 0 END) as total_profit,
+        SUM(CASE WHEN profit_loss_pct < 0 THEN ABS(profit_loss_pct) ELSE 0 END) as total_loss
+      FROM signal_analysis 
+      WHERE entry_time >= ? AND profit_loss_pct IS NOT NULL
+      GROUP BY source
+      HAVING COUNT(*) >= 3
+      ORDER BY avg_profit_pct DESC
+    """
+
+    with sqlite3.connect(db_manager.db_path) as conn:
+      cursor = conn.execute(source_query, (cutoff_date.isoformat(),))
+      source_rows = cursor.fetchall()
+
+      source_analysis = []
+      for row in source_rows:
+        win_rate = (row[2] / row[1]) * 100 if row[1] > 0 else 0
+        profit_factor = row[4] / row[5] if row[5] > 0 else 0
+
+        source_analysis.append({
+          'source': row[0],
+          'total_signals': row[1],
+          'win_rate_pct': round(win_rate, 1),
+          'avg_profit_pct': round(row[3], 2),
+          'profit_factor': round(profit_factor, 2)
+        })
+
+      return {
+        'source_analysis': source_analysis,
+        'generated_at': datetime.now().isoformat()
+      }
+
+  except Exception as e:
+    logger.error(f"Ошибка получения аналитики Shadow Trading: {e}")
+    return {'source_analysis': []}
+
+
+def get_shadow_recommendations_safely(days: int) -> dict:
+  """Безопасно получает рекомендации по оптимизации Shadow Trading"""
+  try:
+    cutoff_date = datetime.now() - timedelta(days=days)
+
+    # Анализ общей производительности
+    performance_query = """
+      SELECT 
+        COUNT(*) as total_signals,
+        COUNT(CASE WHEN profit_loss_pct > 0 THEN 1 END) as winning_signals,
+        AVG(profit_loss_pct) as avg_profit_pct,
+        AVG(confidence) as avg_confidence,
+        COUNT(CASE WHEN was_filtered = 1 THEN 1 END) as filtered_signals
+      FROM signal_analysis 
+      WHERE entry_time >= ?
+    """
+
+    # Анализ по источникам для рекомендаций
+    source_analysis_query = """
+      SELECT 
+        source,
+        COUNT(*) as total_signals,
+        COUNT(CASE WHEN profit_loss_pct > 0 THEN 1 END) as winning_signals,
+        AVG(profit_loss_pct) as avg_profit_pct
+      FROM signal_analysis 
+      WHERE entry_time >= ? AND profit_loss_pct IS NOT NULL
+      GROUP BY source
+      HAVING COUNT(*) >= 3
+    """
+
+    with sqlite3.connect(db_manager.db_path) as conn:
+      # Основные метрики
+      cursor = conn.execute(performance_query, (cutoff_date.isoformat(),))
+      perf_row = cursor.fetchone()
+
+      # Анализ источников
+      cursor = conn.execute(source_analysis_query, (cutoff_date.isoformat(),))
+      source_rows = cursor.fetchall()
+
+      recommendations = []
+
+      if not perf_row or perf_row[0] == 0:
+        return {'recommendations': [], 'total_recommendations': 0}
+
+      total_signals = perf_row[0]
+      winning_signals = perf_row[1]
+      avg_profit = perf_row[2] or 0
+      avg_confidence = perf_row[3] or 0
+      filtered_signals = perf_row[4] or 0
+
+      win_rate = (winning_signals / total_signals) * 100 if total_signals > 0 else 0
+      filter_rate = (filtered_signals / total_signals) * 100 if total_signals > 0 else 0
+
+      # Генерируем рекомендации на основе анализа
+
+      # Рекомендация по win rate
+      if win_rate < 45:
+        recommendations.append({
+          'type': 'low_win_rate',
+          'priority': 'high',
+          'message': f'Низкий win rate ({win_rate:.1f}%). Рекомендуется повысить порог уверенности.',
+          'suggested_action': f'Установить минимальную уверенность выше {avg_confidence:.2f}'
+        })
+      elif win_rate > 75:
+        recommendations.append({
+          'type': 'high_win_rate',
+          'priority': 'low',
+          'message': f'Отличный win rate ({win_rate:.1f}%). Можно снизить пороги для большего количества сигналов.',
+          'suggested_action': 'Рассмотреть снижение порога уверенности на 0.05-0.1'
+        })
+
+      # Рекомендация по фильтрации
+      if filter_rate > 70:
+        recommendations.append({
+          'type': 'high_filter_rate',
+          'priority': 'medium',
+          'message': f'Высокий процент фильтрации ({filter_rate:.1f}%). Возможно, фильтры слишком строгие.',
+          'suggested_action': 'Пересмотреть настройки фильтров рисков'
+        })
+      elif filter_rate < 20:
+        recommendations.append({
+          'type': 'low_filter_rate',
+          'priority': 'medium',
+          'message': f'Низкий процент фильтрации ({filter_rate:.1f}%). Рекомендуется усилить контроль рисков.',
+          'suggested_action': 'Добавить дополнительные фильтры или ужесточить существующие'
+        })
+
+      # Анализ источников
+      if source_rows:
+        # Находим лучший и худший источники
+        source_data = []
+        for row in source_rows:
+          source_win_rate = (row[2] / row[1]) * 100 if row[1] > 0 else 0
+          source_data.append({
+            'source': row[0],
+            'win_rate': source_win_rate,
+            'total_signals': row[1],
+            'avg_profit': row[3]
+          })
+
+        if source_data:
+          best_source = max(source_data, key=lambda x: x['win_rate'])
+          worst_source = min(source_data, key=lambda x: x['win_rate'])
+
+          if best_source['win_rate'] > 60:
+            recommendations.append({
+              'type': 'boost_source',
+              'priority': 'low',
+              'message': f"Источник '{best_source['source']}' показывает отличную эффективность ({best_source['win_rate']:.1f}%)",
+              'suggested_action': f"Увеличить вес или приоритет источника '{best_source['source']}'"
+            })
+
+          if worst_source['win_rate'] < 40 and worst_source['total_signals'] >= 5:
+            recommendations.append({
+              'type': 'disable_source',
+              'priority': 'medium',
+              'message': f"Источник '{worst_source['source']}' показывает низкую эффективность ({worst_source['win_rate']:.1f}%)",
+              'suggested_action': f"Рассмотреть отключение или снижение веса источника '{worst_source['source']}'"
+            })
+
+      # Рекомендация по объему данных
+      if total_signals < 10:
+        recommendations.append({
+          'type': 'insufficient_data',
+          'priority': 'low',
+          'message': f'Недостаточно данных для анализа ({total_signals} сигналов)',
+          'suggested_action': 'Дождитесь накопления больше данных (минимум 20-30 сигналов)'
+        })
+
+      return {
+        'total_recommendations': len(recommendations),
+        'high_priority': len([r for r in recommendations if r['priority'] == 'high']),
+        'medium_priority': len([r for r in recommendations if r['priority'] == 'medium']),
+        'low_priority': len([r for r in recommendations if r['priority'] == 'low']),
+        'recommendations': recommendations,
+        'generated_at': datetime.now().isoformat()
+      }
+
+  except Exception as e:
+    logger.error(f"Ошибка генерации рекомендаций Shadow Trading: {e}")
+    return {'recommendations': [], 'total_recommendations': 0}
+
 def add_shadow_trading_section():
-  """Добавляет секцию Shadow Trading без импорта классов"""
+  """Добавляет расширенную секцию Shadow Trading Analytics"""
 
   st.markdown("---")
   st.header("🌟 Shadow Trading Analytics")
 
-  with st.expander("📊 Краткая сводка Shadow Trading", expanded=True):
-    # Выбор периода
-    col1, col2 = st.columns([2, 1])
+  # Выбор периода анализа
+  col1, col2, col3 = st.columns([2, 1, 1])
 
-    with col1:
-      days = st.selectbox(
-        "📅 Период анализа",
-        options=[1, 3, 7, 14, 30],
-        index=2,  # 7 дней по умолчанию
-        key="shadow_period"
-      )
+  with col1:
+    days = st.selectbox(
+      "📅 Период анализа",
+      options=[1, 3, 7, 14, 30],
+      index=2,  # 7 дней по умолчанию
+      key="shadow_period_main"  # УНИКАЛЬНЫЙ КЛЮЧ
+    )
 
-    with col2:
-      if st.button("🔄 Обновить Shadow", use_container_width=True):
-        st.rerun()
+  with col2:
+    if st.button("🔄 Обновить данные", use_container_width=True, key="shadow_refresh_main"):  # УНИКАЛЬНЫЙ КЛЮЧ
+      st.rerun()
 
-    # Отображаем сводку
-    summary = create_shadow_trading_summary(days)
-    st.markdown(summary)
+  with col3:
+    if st.button("📊 Детальный отчет", use_container_width=True, key="shadow_detailed_main"):  # УНИКАЛЬНЫЙ КЛЮЧ
+      st.session_state.show_detailed_shadow = True
 
-    # Базовая статистика по источникам (если есть данные)
-    try:
-      cutoff_date = datetime.now() - timedelta(days=days)
-      source_query = """
-                SELECT 
-                    source,
-                    COUNT(*) as total_signals,
-                    COUNT(CASE WHEN outcome = 'profitable' THEN 1 END) as profitable_signals
-                FROM signal_analysis 
-                WHERE entry_time >= ?
-                GROUP BY source
-                ORDER BY COUNT(*) DESC
-                LIMIT 5
-            """
+  try:
+    # # Проверяем наличие Shadow Trading системы
+    # from shadow_trading.shadow_trading_manager import ShadowTradingManager
+    #
+    # # Создаем временный экземпляр для получения данных
+    # shadow_manager = ShadowTradingManager(db_manager, None)
+    #
+    # # Получаем расширенные метрики
+    # enhanced_metrics = asyncio.run(shadow_manager.get_enhanced_metrics(days))
+    enhanced_metrics = get_shadow_data_safely(days)
+    if enhanced_metrics and enhanced_metrics.get('total_signals', 0) > 0:
+      # === ОСНОВНЫЕ МЕТРИКИ ===
+      st.subheader("📈 Основные метрики")
 
-      source_results = asyncio.run(db_manager._execute(source_query, (cutoff_date,), fetch='all'))
+      col1, col2, col3, col4 = st.columns(4)
 
-      if source_results:
-        st.markdown("**🏆 Топ источники сигналов:**")
-        for row in source_results:
-          total = row['total_signals']
-          profitable = row['profitable_signals'] or 0
-          win_rate = (profitable / total * 100) if total > 0 else 0
-          st.markdown(f"• {row['source']}: {win_rate:.1f}% WR ({total} сигналов)")
+      with col1:
+        total_signals = enhanced_metrics.get('total_signals', 0)
+        st.metric("Всего сигналов", total_signals)
 
-    except Exception as source_error:
-      st.info("Статистика по источникам временно недоступна")
+      with col2:
+        win_rate = (enhanced_metrics.get('winning_signals', 0) / max(total_signals, 1)) * 100
+        st.metric("Win Rate", f"{win_rate:.1f}%")
 
+      with col3:
+        profit_factor = enhanced_metrics.get('profit_factor', 0)
+        st.metric("Profit Factor", f"{profit_factor:.2f}")
+
+      with col4:
+        total_pnl = enhanced_metrics.get('total_profit', 0) - enhanced_metrics.get('total_loss', 0)
+        st.metric("Общий P&L", f"{total_pnl:+.2f}%")
+
+      # === РАСШИРЕННЫЕ МЕТРИКИ ПРОИЗВОДИТЕЛЬНОСТИ ===
+      st.subheader("🎯 Расширенные метрики производительности")
+
+      col1, col2 = st.columns(2)
+
+      with col1:
+        best_signal = enhanced_metrics.get('best_signal', {})
+        if best_signal:
+          st.metric(
+            "Лучший сигнал",
+            f"+{best_signal.get('profit_loss_pct', 0):.2f}%",
+            delta=f"{best_signal.get('symbol', 'N/A')} ({best_signal.get('source', 'unknown')})"
+          )
+        else:
+          st.metric("Лучший сигнал", "+0.00%", delta="максимальная прибыль")
+
+      with col2:
+        worst_signal = enhanced_metrics.get('worst_signal', {})
+        if worst_signal:
+          st.metric(
+            "Худший сигнал",
+            f"{worst_signal.get('profit_loss_pct', 0):.2f}%",
+            delta=f"{worst_signal.get('symbol', 'N/A')} ({worst_signal.get('source', 'unknown')})",
+            delta_color="inverse"
+          )
+        else:
+          st.metric("Худший сигнал", "0.00%", delta="максимальный убыток")
+
+      # === АНАЛИТИЧЕСКИЕ ОТЧЕТЫ ===
+      if st.session_state.get('show_detailed_shadow', False):
+        st.subheader("📊 Детальная аналитика")
+
+        # Получаем продвинутый отчет
+        # analytics_report = asyncio.run(shadow_manager.get_advanced_analytics_report(days))
+        analytics_report = get_shadow_analytics_safely(days)
+
+        if 'error' not in analytics_report:
+          # Анализ по источникам
+          source_perf = analytics_report.get('source_analysis', [])
+          if source_perf:
+            st.write("**🏆 Производительность по источникам:**")
+            source_df = pd.DataFrame(source_perf)
+            st.dataframe(source_df, use_container_width=True)
+
+          # Временной анализ
+          time_analysis = analytics_report.get('time_analysis', {})
+          if time_analysis and time_analysis.get('hourly_performance'):
+            st.write("**⏰ Производительность по часам:**")
+            hourly_data = time_analysis['hourly_performance']
+            hourly_df = pd.DataFrame(hourly_data)
+            if not hourly_df.empty:
+              fig = px.line(hourly_df, x='hour', y='avg_profit_pct',
+                            title='Средняя прибыль по часам')
+              st.plotly_chart(fig, use_container_width=True)
+
+        # Рекомендации по оптимизации
+        recommendations = get_shadow_recommendations_safely(days)
+
+        if 'error' not in recommendations and recommendations.get('recommendations'):
+          st.write("**💡 Рекомендации по оптимизации:**")
+
+          high_priority = [r for r in recommendations['recommendations'] if r['priority'] == 'high']
+          if high_priority:
+            st.error("🔴 **Высокий приоритет:**")
+            for rec in high_priority:
+              st.write(f"• {rec['message']}")
+              st.write(f"  💡 *{rec['suggested_action']}*")
+
+          medium_priority = [r for r in recommendations['recommendations'] if r['priority'] == 'medium']
+          if medium_priority:
+            st.warning("🟡 **Средний приоритет:**")
+            for rec in medium_priority[:3]:  # Показываем топ 3
+              st.write(f"• {rec['message']}")
+
+        if st.button("🔼 Скрыть детали", key="shadow_hide_details"):  # УНИКАЛЬНЫЙ КЛЮЧ
+          st.session_state.show_detailed_shadow = False
+          st.rerun()
+
+    else:
+      st.info("📊 Недостаточно данных для анализа. Дождитесь накопления сигналов (минимум 5-10 сигналов).")
+
+      # Показываем базовую статистику если есть хоть какие-то данные
+      basic_summary = create_shadow_trading_summary(days)
+      if "Всего сигналов: 0" not in basic_summary:
+        st.markdown(basic_summary)
+
+  except ImportError:
+    st.error("❌ Shadow Trading модуль не найден")
+  except Exception as e:
+    st.error(f"❌ Ошибка получения данных Shadow Trading: {e}")
 
 def display_simple_shadow_metrics():
   """Отображает простые метрики Shadow Trading"""
@@ -707,6 +1074,8 @@ def get_market_regimes():
   return regimes_data or {}
 
 
+
+
 # --- Боковая панель с управлением ---
 # bot_pid = get_bot_pid()
 # if bot_pid:
@@ -802,6 +1171,109 @@ with tab2:
 
 with tab3:
   st.header("🎯 Shadow Trading System")
+
+  # Добавляем выбор периода для Shadow Trading
+  col1, col2, col3 = st.columns([2, 1, 1])
+
+  with col1:
+    days = st.selectbox(
+      "📅 Период анализа",
+      options=[1, 3, 7, 14, 30],
+      index=2,  # 7 дней по умолчанию
+      key="shadow_period_tab3"  # Уникальный ключ для tab3
+    )
+
+  with col2:
+    if st.button("🔄 Обновить данные", use_container_width=True, key="shadow_refresh_tab3"):
+      st.rerun()
+
+  # Безопасное получение данных без создания асинхронных объектов
+  enhanced_metrics = get_shadow_data_safely(days)
+
+  if enhanced_metrics and enhanced_metrics.get('total_signals', 0) > 0:
+    # === ОСНОВНЫЕ МЕТРИКИ ===
+    st.subheader("📈 Основные метрики")
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+      total_signals = enhanced_metrics.get('total_signals', 0)
+      st.metric("Всего сигналов", total_signals)
+
+    with col2:
+      win_rate = (enhanced_metrics.get('winning_signals', 0) / max(total_signals, 1)) * 100
+      st.metric("Win Rate", f"{win_rate:.1f}%")
+
+    with col3:
+      profit_factor = enhanced_metrics.get('profit_factor', 0)
+      st.metric("Profit Factor", f"{profit_factor:.2f}")
+
+    with col4:
+      total_pnl = enhanced_metrics.get('total_profit', 0) - enhanced_metrics.get('total_loss', 0)
+      st.metric("Общий P&L", f"{total_pnl:+.2f}%")
+
+    # === РАСШИРЕННЫЕ МЕТРИКИ ПРОИЗВОДИТЕЛЬНОСТИ ===
+    st.subheader("🎯 Расширенные метрики производительности")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+      best_signal = enhanced_metrics.get('best_signal', {})
+      if best_signal and best_signal.get('symbol'):
+        st.metric(
+          "Лучший сигнал",
+          f"+{best_signal.get('profit_loss_pct', 0):.2f}%",
+          delta=f"{best_signal.get('symbol', 'N/A')} ({best_signal.get('source', 'unknown')})"
+        )
+      else:
+        st.metric("Лучший сигнал", "+0.00%", delta="максимальная прибыль")
+
+    with col2:
+      worst_signal = enhanced_metrics.get('worst_signal', {})
+      if worst_signal and worst_signal.get('symbol'):
+        st.metric(
+          "Худший сигнал",
+          f"{worst_signal.get('profit_loss_pct', 0):.2f}%",
+          delta=f"{worst_signal.get('symbol', 'N/A')} ({worst_signal.get('source', 'unknown')})",
+          delta_color="inverse"
+        )
+      else:
+        st.metric("Худший сигнал", "0.00%", delta="максимальный убыток")
+
+    # === АНАЛИТИЧЕСКИЕ ОТЧЕТЫ ===
+    if st.session_state.get('show_detailed_shadow', False):
+      st.subheader("📊 Детальная аналитика")
+
+      # Получаем продвинутую аналитику безопасно
+      analytics_report = get_shadow_analytics_safely(days)
+
+      if analytics_report.get('source_analysis'):
+        st.write("**🏆 Производительность по источникам:**")
+        source_df = pd.DataFrame(analytics_report['source_analysis'])
+        st.dataframe(source_df, use_container_width=True)
+
+      # Рекомендации по оптимизации
+      # recommendations = get_shadow_recommendations_safely(days)
+
+      # if recommendations.get('recommendations'):
+        st.write("**💡 Рекомендации по оптимизации:**")
+
+        high_priority = [r for r in recommendations['recommendations'] if r['priority'] == 'high']
+        if high_priority:
+          st.error("🔴 **Высокий приоритет:**")
+          for rec in high_priority:
+            st.write(f"• {rec['message']}")
+            st.write(f"  💡 *{rec['suggested_action']}*")
+
+        medium_priority = [r for r in recommendations['recommendations'] if r['priority'] == 'medium']
+        if medium_priority:
+          st.warning("🟡 **Средний приоритет:**")
+          for rec in medium_priority[:3]:  # Показываем топ 3
+            st.write(f"• {rec['message']}")
+
+      if st.button("🔼 Скрыть детали", key="shadow_hide_details"):
+        st.session_state.show_detailed_shadow = False
+        st.rerun()
 
   # Сводка Shadow Trading
   col1, col2 = st.columns([2, 1])
@@ -1049,7 +1521,7 @@ with tab4:
         st.write(f"**{setting}:** {value}")
 
     # Кнопка для перезагрузки конфигурации
-    if st.button("🔄 Перезагрузить конфигурацию"):
+    if st.button("🔄 Перезагрузить конфигурацию", key="reload_config"):
       config_manager = ConfigManager(config_path=CONFIG_FILE_PATH)
       st.success("Конфигурация перезагружена")
 
@@ -1191,7 +1663,7 @@ with tab4:
       else:
         st.warning("⚠️ Таблицы Shadow Trading не найдены")
 
-        if st.button("🔨 Создать таблицы Shadow Trading"):
+        if st.button("🔨 Создать таблицы Shadow Trading", key="create_shadow_tables"):
           if initialize_shadow_trading():
             st.success("✅ Таблицы Shadow Trading созданы успешно")
             st.rerun()
@@ -1215,13 +1687,13 @@ with st.sidebar:
   col1, col2 = st.columns(2)
 
   with col1:
-    if st.button("🚀 Запустить", type="primary", use_container_width=True):
+    if st.button("🚀 Запустить", type="primary", use_container_width=True, key="start_bot_main"):
       start_bot()
       time.sleep(1)
       st.rerun()
 
   with col2:
-    if st.button("🛑 Остановить", use_container_width=True):
+    if st.button("🛑 Остановить", use_container_width=True, key="stop_bot_main"):
       stop_bot()
       time.sleep(1)
       st.rerun()
@@ -1240,7 +1712,7 @@ with st.sidebar:
   # Показываем простые метрики
   display_simple_shadow_metrics()
 
-  if st.button("📊 Подробная аналитика", use_container_width=True):
+  if st.button("📊 Подробная аналитика", use_container_width=True, key="shadow_analytics_sidebar"):
     st.info("🔄 Для подробной аналитики Shadow Trading запустите бота и дождитесь накопления данных")
 
   st.divider()
@@ -1262,7 +1734,7 @@ with st.sidebar:
     help="Базовая ML стратегия"
   )
 
-  if st.button("Применить ML настройки", use_container_width=True):
+  if st.button("Применить ML настройки", use_container_width=True, key="apply_ml_settings"):
     update_ml_models_state(use_enhanced, use_base)
     st.success("ML настройки обновлены!")
     if not use_enhanced and not use_base:
@@ -1271,17 +1743,17 @@ with st.sidebar:
   st.divider()
 
   # Кнопка обновления
-  if st.button("🔄 Обновить данные", use_container_width=True):
+  if st.button("🔄 Обновить данные", use_container_width=True, key="refresh_data_sidebar"):
     st.rerun()
 
   st.divider()
 
   st.subheader("📊 Действия")
-  if st.button("📈 Отчет о модели", use_container_width=True):
+  if st.button("📈 Отчет о модели", use_container_width=True, key="generate_report"):
     state_manager.set_command("generate_report")
     st.toast("Команда отправлена!")
 
-  if st.button("🔄 Переобучить модель", use_container_width=True):
+  if st.button("🔄 Переобучить модель", use_container_width=True, key="retrain_model"):
     state_manager.set_command("retrain_model")
     st.toast("Запущено переобучение!")
 
@@ -1642,76 +2114,78 @@ with tabs[1]:
     else:
       st.info("ℹ️ Адаптивные веса стратегий пока недоступны")
 
-      # Показываем почему нет данных
-      with st.expander("🔍 Отладка адаптивных весов"):
-        st.write("Возможные причины:")
-        st.write("• Бот не запущен")
-        st.write("• AdaptiveStrategySelector не инициализирован")
-        st.write("• Недостаточно сделок для расчета весов")
-        st.write("• Данные не обновляются в state_manager")
+
 #---------------------------------------------------------------------------------------------------------------------
-# st.divider()
+  st.divider()
 
-sar_performance = state_manager.get_custom_data('sar_strategy_performance')
-st.sidebar.write(f"SAR данные: {'✅ найдены' if sar_performance else '❌ отсутствуют'}")
+  sar_performance = state_manager.get_custom_data('sar_strategy_performance')
+  st.sidebar.write(f"SAR данные: {'✅ найдены' if sar_performance else '❌ отсутствуют'}")
 
-sar_performance = state_manager.get_custom_data('sar_strategy_performance')
-if sar_performance:
-  st.subheader("🎯 Производительность SAR стратегии")
+  sar_performance = state_manager.get_custom_data('sar_strategy_performance')
+  if sar_performance:
+    st.subheader("🎯 Производительность SAR стратегии")
 
-  col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4 = st.columns(4)
 
-  with col1:
-    st.metric(
-      "Общие сделки",
-      sar_performance.get('total_trades', 0),
-      delta=f"+{sar_performance.get('recent_trades_count', 0)} за период"
-    )
-
-  with col2:
-    win_rate = sar_performance.get('win_rate', 0) * 100
-    st.metric(
-      "Win Rate",
-      f"{win_rate:.1f}%",
-      delta=f"{sar_performance.get('recent_win_rate', 0) * 100:.1f}% недавних"
-    )
-
-  with col3:
-    st.metric(
-      "Profit Factor",
-      f"{sar_performance.get('profit_factor', 0):.2f}",
-      delta=f"Общая прибыль: {sar_performance.get('total_profit', 0):.2f} USDT"
-    )
-
-  with col4:
-    avg_trade = sar_performance.get('avg_profit_per_trade', 0)
-    st.metric(
-      "Средн./сделка",
-      f"{avg_trade:.2f} USDT",
-      delta="положительная" if avg_trade > 0 else "отрицательная"
-    )
-
-  # График адаптивных параметров
-  if 'parameter_history' in sar_performance:
-    st.subheader("📊 История адаптации параметров")
-    param_history = sar_performance['parameter_history']
-
-    if param_history:
-      df_params = pd.DataFrame(param_history)
-      df_params['timestamp'] = pd.to_datetime(df_params['timestamp'])
-
-      fig_params = px.line(
-        df_params,
-        x='timestamp',
-        y=['acceleration', 'sensitivity', 'confidence_threshold'],
-        title="Динамика адаптивных параметров SAR"
+    with col1:
+      st.metric(
+        "Общие сделки",
+        sar_performance.get('total_trades', 0),
+        delta=f"+{sar_performance.get('recent_trades_count', 0)} за период"
       )
-      st.plotly_chart(fig_params, use_container_width=True)
 
-  # Кнопка экспорта отчета SAR
-  if st.button("📄 Экспортировать отчет SAR"):
-    state_manager.set_command('export_sar_report')
-    st.toast("Запрос на экспорт отчета SAR отправлен!")
+    with col2:
+      win_rate = sar_performance.get('win_rate', 0) * 100
+      st.metric(
+        "Win Rate",
+        f"{win_rate:.1f}%",
+        delta=f"{sar_performance.get('recent_win_rate', 0) * 100:.1f}% недавних"
+      )
+
+    with col3:
+      st.metric(
+        "Profit Factor",
+        f"{sar_performance.get('profit_factor', 0):.2f}",
+        delta=f"Общая прибыль: {sar_performance.get('total_profit', 0):.2f} USDT"
+      )
+
+    with col4:
+      avg_trade = sar_performance.get('avg_profit_per_trade', 0)
+      st.metric(
+        "Средн./сделка",
+        f"{avg_trade:.2f} USDT",
+        delta="положительная" if avg_trade > 0 else "отрицательная"
+      )
+
+    # График адаптивных параметров
+    if 'parameter_history' in sar_performance:
+      st.subheader("📊 История адаптации параметров")
+      param_history = sar_performance['parameter_history']
+
+      if param_history:
+        df_params = pd.DataFrame(param_history)
+        df_params['timestamp'] = pd.to_datetime(df_params['timestamp'])
+
+        fig_params = px.line(
+          df_params,
+          x='timestamp',
+          y=['acceleration', 'sensitivity', 'confidence_threshold'],
+          title="Динамика адаптивных параметров SAR"
+        )
+        st.plotly_chart(fig_params, use_container_width=True)
+
+    # Кнопка экспорта отчета SAR
+    if st.button("📄 Экспортировать отчет SAR"):
+      state_manager.set_command('export_sar_report')
+      st.toast("Запрос на экспорт отчета SAR отправлен!")
+
+  # Показываем почему нет данных
+  with st.expander("🔍 Отладка адаптивных весов"):
+    st.write("Возможные причины:")
+    st.write("• Бот не запущен")
+    st.write("• AdaptiveStrategySelector не инициализирован")
+    st.write("• Недостаточно сделок для расчета весов")
+    st.write("• Данные не обновляются в state_manager")
 #-------------------------------------------test_--------------------------
   with st.sidebar.expander("🔍 Отладка данных", expanded=False):
     st.write("**Проверка state_manager:**")
@@ -1743,77 +2217,108 @@ if sar_performance:
     st.write(f"Активные стратегии: {'✅' if active_strategies else '❌'}")
     if active_strategies:
       st.json(active_strategies)
-    t.sidebar.divider()
-    st.sidebar.subheader("🧪 Тестирование")
+      with st.sidebar.expander("🔍 Отладка данных", expanded=False):
+        st.write("**Проверка state_manager:**")
 
-    if st.sidebar.button("Создать тестовые данные SAR"):
-      from datetime import datetime, timedelta
+        # Проверяем все custom_data
+        all_custom_data = state_manager._read_state().get('custom_data', {})
+        st.write(f"Всего ключей в custom_data: {len(all_custom_data)}")
 
-      test_sar = {
-        'total_trades': 25,
-        'winning_trades': 17,
-        'losing_trades': 8,
-        'win_rate': 0.68,
-        'recent_win_rate': 0.75,
-        'profit_factor': 2.1,
-        'total_profit': 245.30,
-        'total_loss': 117.20,
-        'avg_profit_per_trade': 5.12,
-        'recent_trades_count': 12,
-        'last_update': datetime.now().isoformat(),
-        'current_parameters': {
+        for key in all_custom_data.keys():
+          st.write(f"• {key}")
+
+        st.write("**Специфичные проверки:**")
+
+        # SAR данные
+        sar_data = state_manager.get_custom_data('sar_strategy_performance')
+        st.write(f"SAR данные: {'✅' if sar_data else '❌'}")
+        if sar_data:
+          st.write(f"Содержит ключей: {len(sar_data)}")
+          st.json(sar_data)
+
+        # Адаптивные веса
+        adaptive_weights = state_manager.get_custom_data('adaptive_weights')
+        st.write(f"Адаптивные веса: {'✅' if adaptive_weights else '❌'}")
+        if adaptive_weights:
+          st.json(adaptive_weights)
+
+        # Активные стратегии
+        active_strategies = state_manager.get_custom_data('active_strategies')
+        st.write(f"Активные стратегии: {'✅' if active_strategies else '❌'}")
+        if active_strategies:
+          st.json(active_strategies)
+
+  st.sidebar.divider()
+  st.sidebar.subheader("🧪 Тестирование")
+
+  if st.sidebar.button("Создать тестовые данные SAR"):
+    from datetime import datetime, timedelta
+
+    test_sar = {
+      'total_trades': 25,
+      'winning_trades': 17,
+      'losing_trades': 8,
+      'win_rate': 0.68,
+      'recent_win_rate': 0.75,
+      'profit_factor': 2.1,
+      'total_profit': 245.30,
+      'total_loss': 117.20,
+      'avg_profit_per_trade': 5.12,
+      'recent_trades_count': 12,
+      'last_update': datetime.now().isoformat(),
+      'current_parameters': {
+        'acceleration': 0.025,
+        'max_acceleration': 0.2,
+        'sensitivity': 0.82,
+        'confidence_threshold': 0.73,
+        'stop_loss_atr_multiplier': 1.8,
+        'take_profit_atr_multiplier': 3.2
+      },
+      'parameter_history': [
+        {
+          'timestamp': (datetime.now() - timedelta(hours=2)).isoformat(),
+          'acceleration': 0.02,
+          'sensitivity': 0.8,
+          'confidence_threshold': 0.7,
+          'total_trades': 20,
+          'win_rate': 0.65
+        },
+        {
+          'timestamp': datetime.now().isoformat(),
           'acceleration': 0.025,
-          'max_acceleration': 0.2,
           'sensitivity': 0.82,
           'confidence_threshold': 0.73,
-          'stop_loss_atr_multiplier': 1.8,
-          'take_profit_atr_multiplier': 3.2
-        },
-        'parameter_history': [
-          {
-            'timestamp': (datetime.now() - timedelta(hours=2)).isoformat(),
-            'acceleration': 0.02,
-            'sensitivity': 0.8,
-            'confidence_threshold': 0.7,
-            'total_trades': 20,
-            'win_rate': 0.65
-          },
-          {
-            'timestamp': datetime.now().isoformat(),
-            'acceleration': 0.025,
-            'sensitivity': 0.82,
-            'confidence_threshold': 0.73,
-            'total_trades': 25,
-            'win_rate': 0.68
-          }
-        ],
-        'monitored_symbols': 15,
-        'active_positions': 3,
-        'market_regime': 'trending',
-        'trend_strength': 0.78
-      }
+          'total_trades': 25,
+          'win_rate': 0.68
+        }
+      ],
+      'monitored_symbols': 15,
+      'active_positions': 3,
+      'market_regime': 'trending',
+      'trend_strength': 0.78
+    }
 
-      state_manager.set_custom_data('sar_strategy_performance', test_sar)
-      st.sidebar.success("✅ Тестовые данные SAR созданы!")
+    state_manager.set_custom_data('sar_strategy_performance', test_sar)
+    st.sidebar.success("✅ Тестовые данные SAR созданы!")
 
-    if st.sidebar.button("Создать тестовые адаптивные веса"):
-      test_weights = {
-        'Live_ML_Strategy': 1.2,
-        'Ichimoku_Cloud': 0.8,
-        'Dual_Thrust': 1.1,
-        'Mean_Reversion_BB': 0.9,
-        'Momentum_Spike': 1.3,
-        'Grid_Trading': 0.7,
-        'Stop_and_Reverse': 1.15
-      }
+  if st.sidebar.button("Создать тестовые адаптивные веса"):
+    test_weights = {
+      'Live_ML_Strategy': 1.2,
+      'Ichimoku_Cloud': 0.8,
+      'Dual_Thrust': 1.1,
+      'Mean_Reversion_BB': 0.9,
+      'Momentum_Spike': 1.3,
+      'Grid_Trading': 0.7,
+      'Stop_and_Reverse': 1.15
+    }
 
-      state_manager.set_custom_data('adaptive_weights', test_weights)
-      st.sidebar.success("✅ Тестовые адаптивные веса созданы!")
+    state_manager.set_custom_data('adaptive_weights', test_weights)
+    st.sidebar.success("✅ Тестовые адаптивные веса созданы!")
 
-    if st.sidebar.button("Очистить тестовые данные"):
-      state_manager.set_custom_data('sar_strategy_performance', None)
-      state_manager.set_custom_data('adaptive_weights', None)
-      st.sidebar.info("🗑️ Тестовые данные очищены")
+  if st.sidebar.button("Очистить тестовые данные"):
+    state_manager.set_custom_data('sar_strategy_performance', None)
+    state_manager.set_custom_data('adaptive_weights', None)
+    st.sidebar.info("🗑️ Тестовые данные очищены")
 #--------------------------------------------------------------------------------------------------
 # --- Вкладка: Стратегии ---
 with tabs[2]:
@@ -2712,7 +3217,7 @@ with st.expander("🎯 Stop-and-Reverse Strategy Settings", expanded=False):
         )
 
       # Кнопка сохранения настроек
-      if st.button("💾 Сохранить настройки SAR", type="primary"):
+      if st.button("💾 Сохранить настройки SAR", type="primary", key="save_sar_config"):
         try:
           # Обновляем конфигурацию
           updated_sar_config = sar_config.copy()
@@ -2818,3 +3323,4 @@ if auto_refresh:
   except:
     # Fallback без автообновления
     st.sidebar.info("Автообновление недоступно. Используйте кнопку 'Обновить данные'")
+

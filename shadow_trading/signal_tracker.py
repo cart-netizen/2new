@@ -100,7 +100,35 @@ class SignalTracker:
     self.config = shadow_config
     self._apply_config_settings()
 
-    asyncio.create_task(self._batch_processor())
+    # asyncio.create_task(self._batch_processor())
+    self._batch_processor_task = None
+    self._initialize_batch_processor()
+
+  def _initialize_batch_processor(self):
+    """Безопасная инициализация batch processor"""
+    try:
+      # Проверяем, есть ли запущенный event loop
+      try:
+        loop = asyncio.get_running_loop()
+        # Если loop запущен, создаем задачу
+        self._batch_processor_task = loop.create_task(self._batch_processor())
+      except RuntimeError:
+        # Если нет запущенного loop, откладываем инициализацию
+        logger.debug("Event loop не запущен, batch processor будет инициализирован позже")
+        self._batch_processor_task = None
+    except Exception as e:
+      logger.warning(f"Не удалось инициализировать batch processor: {e}")
+      self._batch_processor_task = None
+
+  # ДОБАВИТЬ МЕТОД ДЛЯ ЛЕНИВОЙ ИНИЦИАЛИЗАЦИИ:
+  async def _ensure_batch_processor(self):
+    """Убеждается что batch processor запущен"""
+    if self._batch_processor_task is None or self._batch_processor_task.done():
+      try:
+        self._batch_processor_task = asyncio.create_task(self._batch_processor())
+        logger.debug("Batch processor инициализирован")
+      except Exception as e:
+        logger.error(f"Ошибка инициализации batch processor: {e}")
 
   async def _batch_processor(self):
     """Пакетная обработка операций БД для уменьшения блокировок"""
@@ -232,14 +260,48 @@ class SignalTracker:
     except Exception as e:
       logger.error(f"Ошибка пакетного обновления сигналов: {e}")
 
-  async def _save_signal_to_db_async(self, analysis: SignalAnalysis):
-    """Асинхронное сохранение через очередь"""
-    operation = {
-      'type': 'insert',
-      'analysis': analysis,
-      'timestamp': time.time()
-    }
-    await self._pending_operations.put(operation)
+  async def _save_signal_to_db(self, analysis: SignalAnalysis):
+    """Сохраняет сигнал в БД"""
+    try:
+      # Убеждаемся что batch processor запущен
+      await self._ensure_batch_processor()
+
+      # Остальной код метода остается без изменений
+      await self._pending_operations.put(('save_signal', analysis))
+
+    except Exception as e:
+      logger.error(f"Ошибка добавления операции в очередь: {e}")
+      # Fallback - прямое сохранение в БД
+      await self._direct_save_signal(analysis)
+
+  async def _direct_save_signal(self, analysis: SignalAnalysis):
+    """Прямое сохранение в БД без очереди (fallback)"""
+    try:
+      query = """
+        INSERT OR REPLACE INTO signal_analysis 
+        (signal_id, symbol, signal_type, entry_price, entry_time, confidence, source,
+         indicators_triggered, ml_prediction_data, market_regime, volatility_level,
+         was_filtered, filter_reasons, outcome, exit_price, exit_time, profit_loss_pct,
+         max_favorable_excursion_pct, max_adverse_excursion_pct, volume_at_signal, price_action_score)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      """
+
+      params = (
+        analysis.signal_id, analysis.symbol, analysis.signal_type.value,
+        analysis.entry_price, analysis.entry_time, analysis.confidence, analysis.source,
+        json.dumps(analysis.indicators_triggered), json.dumps(analysis.ml_prediction_data),
+        analysis.market_regime, analysis.volatility_level, analysis.was_filtered,
+        json.dumps([r.value for r in analysis.filter_reasons]) if analysis.filter_reasons else None,
+        analysis.outcome, analysis.exit_price, analysis.exit_time, analysis.profit_loss_pct,
+        analysis.max_favorable_excursion_pct, analysis.max_adverse_excursion_pct,
+        analysis.volume_at_signal, analysis.price_action_score
+      )
+
+      await self.db_manager._execute(query, params)
+      logger.debug(f"Сигнал {analysis.signal_id} сохранен напрямую в БД")
+
+    except Exception as e:
+      logger.error(f"Ошибка прямого сохранения сигнала: {e}")
 
   async def _update_signal_in_db_async(self, analysis: SignalAnalysis):
     """Асинхронное обновление через очередь"""
@@ -572,6 +634,12 @@ class SignalTracker:
       result = await self.db_manager._execute(query, (cutoff_date,), fetch='one')
 
       if result:
+        # Считаем только завершенные сделки для винрейта
+        completed_signals = (result['profitable_signals'] or 0) + (result['loss_signals'] or 0)
+        win_rate = 0.0
+        if completed_signals > 0:
+          win_rate = (result['profitable_signals'] / completed_signals * 100)
+
         return {
           'total_signals': result['total_signals'] or 0,
           'profitable_signals': result['profitable_signals'] or 0,
@@ -582,8 +650,8 @@ class SignalTracker:
           'avg_confidence': result['avg_confidence'] or 0.0,
           'max_win_pct': result['max_win_pct'] or 0.0,
           'max_loss_pct': result['max_loss_pct'] or 0.0,
-          'win_rate': (result['profitable_signals'] / result['total_signals'] * 100) if result[
-                                                                                          'total_signals'] > 0 else 0.0
+          'win_rate': win_rate,
+          'completed_signals': completed_signals
         }
 
       return {}
@@ -591,26 +659,76 @@ class SignalTracker:
     except Exception as e:
       logger.error(f"Ошибка получения статистики сигналов: {e}")
 
-  async def _save_signal_to_db(self, analysis: SignalAnalysis):
-    """Сохранить анализ сигнала в БД"""
+  async def sync_with_real_trades(self, symbol: str, trade_data: Dict):
+    """Синхронизирует результаты Shadow сигнала с реальной сделкой"""
     try:
-      await self.db_manager._execute(
-        """INSERT INTO signal_analysis (
-            signal_id, symbol, signal_type, entry_price, entry_time, confidence, source,
-            indicators_triggered, ml_prediction_data, market_regime, volatility_level,
-            was_filtered, filter_reasons, volume_at_signal, price_action_score
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-          analysis.signal_id, analysis.symbol, analysis.signal_type.value,
-          analysis.entry_price, analysis.entry_time, analysis.confidence, analysis.source,
-          json.dumps(analysis.indicators_triggered), json.dumps(analysis.ml_prediction_data),
-          analysis.market_regime, analysis.volatility_level,
-          analysis.was_filtered, json.dumps([r.value for r in analysis.filter_reasons]),
-          analysis.volume_at_signal, analysis.price_action_score
+      # Находим последний pending сигнал для символа
+      query = """
+        SELECT signal_id, entry_price, entry_time 
+        FROM signal_analysis 
+        WHERE symbol = ? AND outcome = 'pending'
+        ORDER BY entry_time DESC
+        LIMIT 1
+      """
+
+      result = await self.db_manager._execute(query, (symbol,), fetch='one')
+
+      if result:
+        signal_id = result['signal_id']
+
+        # Обновляем сигнал результатами реальной сделки
+        update_query = """
+          UPDATE signal_analysis 
+          SET outcome = ?,
+              exit_price = ?,
+              exit_time = ?,
+              profit_loss_pct = ?,
+              profit_loss_usdt = ?,
+              updated_at = ?
+          WHERE signal_id = ?
+        """
+
+        # Определяем outcome на основе profit_loss
+        outcome = 'profitable' if trade_data.get('profit_loss', 0) > 0 else 'loss'
+
+        await self.db_manager._execute(
+          update_query,
+          (
+            outcome,
+            trade_data.get('close_price'),
+            trade_data.get('close_timestamp'),
+            trade_data.get('profit_pct', 0),
+            trade_data.get('profit_loss', 0),
+            datetime.now(),
+            signal_id
+          )
         )
-      )
+
+        logger.info(f"✅ Синхронизирован Shadow сигнал {signal_id} с реальной сделкой {symbol}")
+
     except Exception as e:
-      logger.error(f"Ошибка сохранения сигнала в БД: {e}")
+      logger.error(f"Ошибка синхронизации с реальной сделкой: {e}")
+
+  # async def _save_signal_to_db(self, analysis: SignalAnalysis):
+  #   """Сохранить анализ сигнала в БД"""
+  #   try:
+  #     await self.db_manager._execute(
+  #       """INSERT INTO signal_analysis (
+  #           signal_id, symbol, signal_type, entry_price, entry_time, confidence, source,
+  #           indicators_triggered, ml_prediction_data, market_regime, volatility_level,
+  #           was_filtered, filter_reasons, volume_at_signal, price_action_score
+  #       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+  #       (
+  #         analysis.signal_id, analysis.symbol, analysis.signal_type.value,
+  #         analysis.entry_price, analysis.entry_time, analysis.confidence, analysis.source,
+  #         json.dumps(analysis.indicators_triggered), json.dumps(analysis.ml_prediction_data),
+  #         analysis.market_regime, analysis.volatility_level,
+  #         analysis.was_filtered, json.dumps([r.value for r in analysis.filter_reasons]),
+  #         analysis.volume_at_signal, analysis.price_action_score
+  #       )
+  #     )
+  #   except Exception as e:
+  #     logger.error(f"Ошибка сохранения сигнала в БД: {e}")
 
   async def get_signals_by_symbol(self, symbol: str, days: int = 30) -> List[Dict]:
     """Получить сигналы по символу"""

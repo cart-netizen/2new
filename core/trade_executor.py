@@ -132,6 +132,11 @@ class TradeExecutor:
         order_id = order_response.get('orderId')
         logger.info(f"✅ Ордер на открытие {symbol} успешно принят биржей. OrderID: {order_id}")
 
+        # Убеждаемся, что strategy_name записан в метаданные
+        if not signal.metadata:
+          signal.metadata = {}
+        signal.metadata['strategy_name'] = signal.strategy_name
+
         # Теперь этот метод будет возвращать созданную запись из БД
         trade_details = await self.db_manager.add_trade_with_signal(
           signal=signal,
@@ -160,7 +165,7 @@ class TradeExecutor:
 
         return True, trade_details
         # Возвращаем успех и детали сделки
-        return True, trade_details
+
       else:
         if order_response:
           # Если ответ есть, но в нем ошибка

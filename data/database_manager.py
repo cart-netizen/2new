@@ -543,14 +543,14 @@ class AdvancedDatabaseManager:
     """Добавляет сделку и возвращает полную информацию"""
     query = '''
         INSERT INTO trades (
-            symbol, order_id, strategy, side, open_timestamp, open_price,
+            symbol, order_id, strategy, strategy_name, side, open_timestamp, open_price,
             quantity, leverage, confidence, stop_loss, take_profit, metadata, status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
     '''
 
     metadata_json = json.dumps(signal.metadata) if signal.metadata else None
     params = (
-      signal.symbol, order_id, signal.strategy_name, signal.signal_type.value,
+      signal.symbol, order_id, signal.strategy_name, signal.strategy_name, signal.signal_type.value,
       signal.timestamp, signal.price, quantity, leverage,
       signal.confidence, signal.stop_loss, signal.take_profit, metadata_json
     )

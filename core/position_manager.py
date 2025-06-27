@@ -36,6 +36,7 @@ class PositionManager:
     self.risk_manager = risk_manager
     self.config_manager = ConfigManager()
     self.config = self.config_manager.load_config()
+    self.trading_system = None
     # self.integrated_system: Optional[IntegratedTradingSystem] = None
 
   async def load_open_positions(self):
@@ -353,6 +354,32 @@ class PositionManager:
                 # Удаляем из кэша, если она там была
                 if symbol in self.open_positions:
                   del self.open_positions[symbol]
+
+                # Синхронизируем с Shadow Trading
+                if hasattr(self, 'trading_system') and self.trading_system and self.trading_system.shadow_trading:
+                  # Получаем shadow_tracking_id из метаданных сделки
+                  metadata = trade.get('metadata')
+                  if metadata:
+                    try:
+                      import json
+                      metadata_dict = json.loads(metadata) if isinstance(metadata, str) else metadata
+                      shadow_tracking_id = metadata_dict.get('shadow_tracking_id')
+
+                      if shadow_tracking_id:
+                        # Определяем исход на основе PnL
+                        from shadow_trading.signal_tracker import SignalOutcome
+                        outcome = SignalOutcome.PROFITABLE if net_pnl > 0 else SignalOutcome.LOSS
+
+                        # Финализируем сигнал в Shadow Trading
+                        await self.trading_system.shadow_trading.signal_tracker.finalize_signal(
+                          shadow_tracking_id,
+                          close_price,
+                          datetime.now(),
+                          outcome
+                        )
+                        logger.info(f"✅ Shadow Trading сигнал {shadow_tracking_id} синхронизирован")
+                    except Exception as e:
+                      logger.warning(f"Не удалось синхронизировать с Shadow Trading: {e}")
               else:
                 # Если не нашли исполненной сделки, используем старый метод "принудительного закрытия"
                 logger.warning(f"Не удалось найти исполненную сделку для {symbol}. Принудительное закрытие с PnL=0.")

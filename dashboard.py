@@ -788,6 +788,26 @@ def get_bot_pid():
     return status.get('pid')
   return None
 
+# def is_bot_run():
+#   """Проверяет, запущен ли процесс бота по PID из файла состояния."""
+#   try:
+#     status = state_manager.get_status()
+#     if status and status.get('status') == 'running':
+#       pid = status.get('pid')
+#       if pid and psutil.pid_exists(pid):
+#         # Дополнительная проверка, что это действительно наш процесс
+#         try:
+#           process = psutil.Process(pid)
+#           # Проверяем, что процесс связан с Python и main.py
+#           cmdline = process.cmdline()
+#           if cmdline and any('main.py' in arg for arg in cmdline):
+#             return True
+#         except (psutil.NoSuchProcess, psutil.AccessDenied):
+#           pass
+#     return False
+#   except Exception as e:
+#     print(f"Ошибка проверки статуса бота: {e}")
+#     return False
 def is_bot_run():
   """Проверяет, запущен ли процесс бота по PID из файла состояния."""
   try:
@@ -795,20 +815,22 @@ def is_bot_run():
     if status and status.get('status') == 'running':
       pid = status.get('pid')
       if pid and psutil.pid_exists(pid):
-        # Дополнительная проверка, что это действительно наш процесс
         try:
           process = psutil.Process(pid)
-          # Проверяем, что процесс связан с Python и main.py
-          cmdline = process.cmdline()
-          if cmdline and any('main.py' in arg for arg in cmdline):
-            return True
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-          pass
+          # Проверяем что процесс жив
+          if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+            # Проверяем, что это действительно наш процесс
+            cmdline = process.cmdline()
+            if cmdline and any('main.py' in arg for arg in cmdline):
+              return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+          # Процесс умер, обновляем статус
+          state_manager.set_status('stopped', None)
+          return False
     return False
   except Exception as e:
     print(f"Ошибка проверки статуса бота: {e}")
     return False
-
 
 def start_bot():
   """Запускает main.py как отдельный процесс и сохраняет его PID."""
@@ -1253,9 +1275,9 @@ with tab3:
         st.dataframe(source_df, use_container_width=True)
 
       # Рекомендации по оптимизации
-      # recommendations = get_shadow_recommendations_safely(days)
+      recommendations = get_shadow_recommendations_safely(days)
 
-      # if recommendations.get('recommendations'):
+      if recommendations.get('recommendations'):
         st.write("**💡 Рекомендации по оптимизации:**")
 
         high_priority = [r for r in recommendations['recommendations'] if r['priority'] == 'high']
@@ -3255,22 +3277,25 @@ with st.expander("🎯 Stop-and-Reverse Strategy Settings", expanded=False):
       st.subheader("📈 Статус стратегии")
 
       try:
-        # Получаем статус SAR стратегии из состояния
         sar_status = state_manager.get_custom_data('sar_strategy_status')
-
         if sar_status:
-          col1, col2, col3 = st.columns(3)
+          st.divider()
+          st.subheader("🎯 Stop-and-Reverse Strategy")
+
+          col1, col2, col3, col4 = st.columns(4)
 
           with col1:
             st.metric(
               "Отслеживаемые символы",
-              sar_status.get('monitored_symbols_count', 0)
+              sar_status.get('monitored_symbols_count', 0),
+              delta=f"из {sar_status.get('total_symbols_checked', 0)} проверенных"
             )
 
           with col2:
             st.metric(
               "Активные позиции",
-              sar_status.get('current_positions_count', 0)
+              sar_status.get('current_positions_count', 0),
+              delta="SAR позиций"
             )
 
           with col3:
@@ -3279,39 +3304,109 @@ with st.expander("🎯 Stop-and-Reverse Strategy Settings", expanded=False):
               from datetime import datetime
 
               last_update_dt = datetime.fromisoformat(last_update)
-              time_diff = datetime.now() - last_update_dt
+              minutes_ago = (datetime.now() - last_update_dt).total_seconds() / 60
               st.metric(
                 "Последнее обновление",
-                f"{time_diff.seconds // 60} мин назад"
+                f"{int(minutes_ago)} мин назад",
+                delta="обновление символов"
               )
 
-          # Список отслеживаемых символов
-          monitored_symbols = sar_status.get('monitored_symbols', [])
-          if monitored_symbols:
-            st.subheader("📋 Отслеживаемые символы")
+          with col4:
+            st.metric(
+              "Режим рынка",
+              sar_status.get('market_conditions', {}).get('overall_trend', 'N/A')
+            )
 
-            # Разбиваем символы на колонки для компактного отображения
-            cols = st.columns(4)
-            for i, symbol in enumerate(monitored_symbols):
-              col_idx = i % 4
-              with cols[col_idx]:
-                st.write(f"• {symbol}")
+          # График параметров SAR
+          if 'parameter_history' in sar_status and sar_status['parameter_history']:
+            st.subheader("📊 Адаптивные параметры SAR")
 
-          # Текущие позиции
-          current_positions = sar_status.get('current_positions', [])
-          if current_positions:
-            st.subheader("💼 Текущие позиции SAR")
-            for position in current_positions:
-              st.write(f"🔹 {position}")
+            param_df = pd.DataFrame(sar_status['parameter_history'])
+            if not param_df.empty:
+              param_df['timestamp'] = pd.to_datetime(param_df['timestamp'])
 
-        else:
-          st.info("ℹ️ Статус SAR стратегии пока недоступен")
+              fig = go.Figure()
+
+              # Добавляем линии для каждого параметра
+              for param in ['acceleration', 'sensitivity', 'confidence_threshold']:
+                if param in param_df.columns:
+                  fig.add_trace(go.Scatter(
+                    x=param_df['timestamp'],
+                    y=param_df[param],
+                    mode='lines+markers',
+                    name=param.replace('_', ' ').title()
+                  ))
+
+              fig.update_layout(
+                title="Динамика адаптивных параметров",
+                xaxis_title="Время",
+                yaxis_title="Значение",
+                height=300
+              )
+
+              st.plotly_chart(fig, use_container_width=True)
 
       except Exception as e:
-        st.error(f"❌ Ошибка получения статуса SAR: {e}")
-
+        st.error(f"❌ Ошибка загрузки настроек SAR: {e}")
     except Exception as e:
       st.error(f"❌ Ошибка загрузки настроек SAR: {e}")
+    #     # Получаем статус SAR стратегии из состояния
+    #     sar_status = state_manager.get_custom_data('sar_strategy_status')
+    #
+    #     if sar_status:
+    #       col1, col2, col3 = st.columns(3)
+    #
+    #       with col1:
+    #         st.metric(
+    #           "Отслеживаемые символы",
+    #           sar_status.get('monitored_symbols_count', 0)
+    #         )
+    #
+    #       with col2:
+    #         st.metric(
+    #           "Активные позиции",
+    #           sar_status.get('current_positions_count', 0)
+    #         )
+    #
+    #       with col3:
+    #         last_update = sar_status.get('last_symbol_update')
+    #         if last_update:
+    #           from datetime import datetime
+    #
+    #           last_update_dt = datetime.fromisoformat(last_update)
+    #           time_diff = datetime.now() - last_update_dt
+    #           st.metric(
+    #             "Последнее обновление",
+    #             f"{time_diff.seconds // 60} мин назад"
+    #           )
+    #
+    #       # Список отслеживаемых символов
+    #       monitored_symbols = sar_status.get('monitored_symbols', [])
+    #       if monitored_symbols:
+    #         st.subheader("📋 Отслеживаемые символы")
+    #
+    #         # Разбиваем символы на колонки для компактного отображения
+    #         cols = st.columns(4)
+    #         for i, symbol in enumerate(monitored_symbols):
+    #           col_idx = i % 4
+    #           with cols[col_idx]:
+    #             st.write(f"• {symbol}")
+    #
+    #       # Текущие позиции
+    #       current_positions = sar_status.get('current_positions', [])
+    #       if current_positions:
+    #         st.subheader("💼 Текущие позиции SAR")
+    #         for position in current_positions:
+    #           st.write(f"🔹 {position}")
+    #
+    #     else:
+    #       st.info("ℹ️ Статус SAR стратегии пока недоступен")
+    #
+    #   except Exception as e:
+    #     st.error(f"❌ Ошибка получения статуса SAR: {e}")
+    #
+    # except Exception as e:
+    #   st.error(f"❌ Ошибка загрузки настроек SAR: {e}")
 
 
 # --- Автообновление ---

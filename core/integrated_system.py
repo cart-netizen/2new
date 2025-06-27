@@ -187,6 +187,7 @@ class IntegratedTradingSystem:
       settings=self.config,
       risk_manager=self.risk_manager
     )
+
     self.trade_executor.integrated_system = self
     if self.shadow_trading:
       self.trade_executor.shadow_trading = self.shadow_trading
@@ -240,7 +241,7 @@ class IntegratedTradingSystem:
     self._correlation_update_interval = 3600  # Обновление корреляций каждый час
     self._last_correlation_update = 0
     self._correlation_task: Optional[asyncio.Task] = None
-
+    self.position_manager.trading_system = self
     self.signal_quality_analyzer = SignalQualityAnalyzer(self.data_fetcher, self.db_manager)
     self.min_quality_score = 0.6  # Минимальный балл качества для исполнения
 
@@ -3168,6 +3169,26 @@ class IntegratedTradingSystem:
 
       # Загрузка открытых позиций
       await self.position_manager.load_open_positions()
+
+      logger.info("Инициализация режимов рынка...")
+      initial_regimes = {}
+      for symbol in self.active_symbols[:20]:  # Топ 20 символов
+        try:
+          regime = await self.get_market_regime(symbol)
+          if regime:
+            initial_regimes[symbol] = {
+              'regime': regime.primary_regime.value,
+              'confidence': regime.confidence,
+              'trend_strength': regime.trend_strength,
+              'volatility': regime.volatility_level,
+              'duration': 'Just started'
+            }
+        except Exception as e:
+          logger.debug(f"Не удалось определить режим для {symbol}: {e}")
+
+      if initial_regimes:
+        self.state_manager.set_custom_data('market_regimes', initial_regimes)
+        logger.info(f"✅ Инициализированы режимы для {len(initial_regimes)} символов")
 
       # Запуск фоновых задач
       self.is_running = True

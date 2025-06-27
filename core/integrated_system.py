@@ -140,7 +140,10 @@ class IntegratedTradingSystem:
 
     try:
 
-      self.sar_strategy = StopAndReverseStrategy(self.config, self.data_fetcher)
+      self.sar_strategy = StopAndReverseStrategy(
+        config=self.config,
+        data_fetcher=self.data_fetcher
+      )
       self.strategy_manager.add_strategy(self.sar_strategy)
       logger.info("✅ Stop-and-Reverse стратегия зарегистрирована")
     except Exception as e:
@@ -1436,6 +1439,37 @@ class IntegratedTradingSystem:
               self.active_symbols, timeframe=Timeframe.ONE_HOUR
             ))
             logger.info("Запущено переобучение модели")
+        # Обработка команды экспорта отчета SAR
+        elif command_name == 'export_sar_report':
+          if hasattr(self, 'sar_strategy') and self.sar_strategy:
+            report_path = self.sar_strategy.export_performance_report()
+            if report_path:
+              logger.info(f"Отчет SAR стратегии сохранен: {report_path}")
+
+        # Обновляем метрики SAR стратегии для дашборда
+        if hasattr(self, 'sar_strategy') and self.sar_strategy:
+          try:
+            sar_metrics = self.sar_strategy.get_dashboard_metrics()
+            self.state_manager.set_custom_data('sar_strategy_performance', sar_metrics)
+            logger.debug(f"SAR метрики обновлены для дашборда: {len(sar_metrics)} параметров")
+          except Exception as e:
+            logger.error(f"Ошибка обновления SAR метрик: {e}")
+
+        if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
+          try:
+            performance_summary = self.adaptive_selector.get_performance_summary()
+
+            # Извлекаем только веса для удобства
+            weights = {}
+            for strategy_name, perf in performance_summary.items():
+              weights[strategy_name] = perf.get('weight', 1.0)
+
+            self.state_manager.set_custom_data('adaptive_weights', weights)
+            self.state_manager.set_custom_data('strategy_performance_summary', performance_summary)
+            logger.debug(f"Адаптивные веса обновлены: {len(weights)} стратегий")
+          except Exception as e:
+            logger.error(f"Ошибка обновления адаптивных весов: {e}")
+
 
       interval = self.config.get('general_settings', {}).get('monitoring_interval_seconds', 30)
       await asyncio.sleep(interval)

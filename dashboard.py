@@ -1,5 +1,7 @@
 # dashboard.py
 import sys
+from collections import deque
+import json
 
 import numpy as np
 import psutil
@@ -28,6 +30,7 @@ from config import settings
 from config.config_manager import ConfigManager
 from streamlit_autorefresh import st_autorefresh
 
+from shadow_trading.dashboard_extensions import setup_shadow_dashboard_integration
 
 # --- Настройка страницы ---
 st.set_page_config(
@@ -1393,8 +1396,28 @@ with tabs[0]:
         df_open['current_pnl'] = (df_open['current_price'] - df_open['open_price']) * df_open['quantity']
         df_open['current_pnl_pct'] = ((df_open['current_price'] - df_open['open_price']) / df_open['open_price']) * 100
 
-      display_cols = ['open_timestamp', 'symbol', 'side', 'quantity', 'open_price', 'current_pnl', 'current_pnl_pct']
+      display_cols = ['open_timestamp', 'symbol', 'side', 'quantity', 'open_price']
+
+      # Добавляем колонки PnL если они есть
+      if 'current_price' in df_open.columns and 'open_price' in df_open.columns:
+        # Рассчитываем текущий PnL
+        df_open['current_pnl'] = (df_open['current_price'] - df_open['open_price']) * df_open.get('quantity', 0)
+        df_open['current_pnl_pct'] = ((df_open['current_price'] - df_open['open_price']) / df_open['open_price']) * 100
+        display_cols.extend(['current_price', 'current_pnl', 'current_pnl_pct'])
+
+      # Проверяем какие колонки действительно существуют
       available_cols = [col for col in display_cols if col in df_open.columns]
+
+      if available_cols:
+        df_display = df_open[available_cols].copy()
+
+        # Форматирование времени
+        if 'open_timestamp' in df_display.columns:
+          df_display['open_timestamp'] = pd.to_datetime(df_display['open_timestamp']).dt.strftime('%H:%M:%S')
+      else:
+        # Если нет нужных колонок, показываем все доступные
+        df_display = df_open.copy()
+        st.info("Показаны все доступные данные (стандартные колонки не найдены)")
 
       # Форматирование
       df_display = df_open[available_cols].copy()
@@ -1411,9 +1434,38 @@ with tabs[0]:
 
 
       # styled_df = df_display.style.applymap(color_pnl, subset=['current_pnl',
-      #                                                          'current_pnl_pct'] if 'current_pnl' in df_display.columns else [])
-      styled_df = df_display.style.map(lambda x: 'color: green' if x > 0 else 'color: red',subset=['profit_pct', 'profit_usd'])
-      st.dataframe(styled_df, use_container_width=True)
+      # 'current_pnl_pct'] if 'current_pnl' in df_display.columns else [])
+      try:
+        # Определяем какие колонки PnL есть в данных
+        pnl_columns = []
+        possible_pnl_cols = ['current_pnl', 'current_pnl_pct', 'profit_pct', 'profit_usd', 'profit_loss']
+
+        for col in possible_pnl_cols:
+          if col in df_display.columns:
+            pnl_columns.append(col)
+
+        if pnl_columns:
+          # Применяем стили только к существующим колонкам PnL
+          def color_pnl(val):
+            if pd.isna(val):
+              return ''
+            try:
+              num_val = float(val)
+              return 'color: green' if num_val > 0 else 'color: red' if num_val < 0 else 'color: gray'
+            except (ValueError, TypeError):
+              return ''
+
+
+          styled_df = df_display.style.map(color_pnl, subset=pnl_columns)
+          st.dataframe(styled_df, use_container_width=True)
+        else:
+          # Если нет колонок PnL, показываем без стилей
+          st.dataframe(df_display, use_container_width=True)
+
+      except Exception as e:
+        # Fallback: показываем данные без стилей
+        st.warning(f"Ошибка применения стилей: {e}")
+        st.dataframe(df_display, use_container_width=True)
     else:
       st.info("Нет активных позиций")
 
@@ -1571,7 +1623,9 @@ with tabs[1]:
       st.plotly_chart(fig_profit, use_container_width=True)
 
     # Адаптивные веса (если доступны)
+    st.divider()
     adaptive_weights = state_manager.get_custom_data('adaptive_weights')
+
     if adaptive_weights:
       st.subheader("⚖️ Адаптивные веса стратегий")
 
@@ -1585,9 +1639,182 @@ with tabs[1]:
 
       df_weights = pd.DataFrame(weights_data)
       st.dataframe(df_weights, use_container_width=True, hide_index=True)
-  else:
-    st.info("Нет данных о производительности стратегий")
+    else:
+      st.info("ℹ️ Адаптивные веса стратегий пока недоступны")
 
+      # Показываем почему нет данных
+      with st.expander("🔍 Отладка адаптивных весов"):
+        st.write("Возможные причины:")
+        st.write("• Бот не запущен")
+        st.write("• AdaptiveStrategySelector не инициализирован")
+        st.write("• Недостаточно сделок для расчета весов")
+        st.write("• Данные не обновляются в state_manager")
+#---------------------------------------------------------------------------------------------------------------------
+# st.divider()
+
+sar_performance = state_manager.get_custom_data('sar_strategy_performance')
+st.sidebar.write(f"SAR данные: {'✅ найдены' if sar_performance else '❌ отсутствуют'}")
+
+sar_performance = state_manager.get_custom_data('sar_strategy_performance')
+if sar_performance:
+  st.subheader("🎯 Производительность SAR стратегии")
+
+  col1, col2, col3, col4 = st.columns(4)
+
+  with col1:
+    st.metric(
+      "Общие сделки",
+      sar_performance.get('total_trades', 0),
+      delta=f"+{sar_performance.get('recent_trades_count', 0)} за период"
+    )
+
+  with col2:
+    win_rate = sar_performance.get('win_rate', 0) * 100
+    st.metric(
+      "Win Rate",
+      f"{win_rate:.1f}%",
+      delta=f"{sar_performance.get('recent_win_rate', 0) * 100:.1f}% недавних"
+    )
+
+  with col3:
+    st.metric(
+      "Profit Factor",
+      f"{sar_performance.get('profit_factor', 0):.2f}",
+      delta=f"Общая прибыль: {sar_performance.get('total_profit', 0):.2f} USDT"
+    )
+
+  with col4:
+    avg_trade = sar_performance.get('avg_profit_per_trade', 0)
+    st.metric(
+      "Средн./сделка",
+      f"{avg_trade:.2f} USDT",
+      delta="положительная" if avg_trade > 0 else "отрицательная"
+    )
+
+  # График адаптивных параметров
+  if 'parameter_history' in sar_performance:
+    st.subheader("📊 История адаптации параметров")
+    param_history = sar_performance['parameter_history']
+
+    if param_history:
+      df_params = pd.DataFrame(param_history)
+      df_params['timestamp'] = pd.to_datetime(df_params['timestamp'])
+
+      fig_params = px.line(
+        df_params,
+        x='timestamp',
+        y=['acceleration', 'sensitivity', 'confidence_threshold'],
+        title="Динамика адаптивных параметров SAR"
+      )
+      st.plotly_chart(fig_params, use_container_width=True)
+
+  # Кнопка экспорта отчета SAR
+  if st.button("📄 Экспортировать отчет SAR"):
+    state_manager.set_command('export_sar_report')
+    st.toast("Запрос на экспорт отчета SAR отправлен!")
+#-------------------------------------------test_--------------------------
+  with st.sidebar.expander("🔍 Отладка данных", expanded=False):
+    st.write("**Проверка state_manager:**")
+
+    # Проверяем все custom_data
+    all_custom_data = state_manager._read_state().get('custom_data', {})
+    st.write(f"Всего ключей в custom_data: {len(all_custom_data)}")
+
+    for key in all_custom_data.keys():
+      st.write(f"• {key}")
+
+    st.write("**Специфичные проверки:**")
+
+    # SAR данные
+    sar_data = state_manager.get_custom_data('sar_strategy_performance')
+    st.write(f"SAR данные: {'✅' if sar_data else '❌'}")
+    if sar_data:
+      st.write(f"Содержит ключей: {len(sar_data)}")
+      st.json(sar_data)
+
+    # Адаптивные веса
+    adaptive_weights = state_manager.get_custom_data('adaptive_weights')
+    st.write(f"Адаптивные веса: {'✅' if adaptive_weights else '❌'}")
+    if adaptive_weights:
+      st.json(adaptive_weights)
+
+    # Активные стратегии
+    active_strategies = state_manager.get_custom_data('active_strategies')
+    st.write(f"Активные стратегии: {'✅' if active_strategies else '❌'}")
+    if active_strategies:
+      st.json(active_strategies)
+    t.sidebar.divider()
+    st.sidebar.subheader("🧪 Тестирование")
+
+    if st.sidebar.button("Создать тестовые данные SAR"):
+      from datetime import datetime, timedelta
+
+      test_sar = {
+        'total_trades': 25,
+        'winning_trades': 17,
+        'losing_trades': 8,
+        'win_rate': 0.68,
+        'recent_win_rate': 0.75,
+        'profit_factor': 2.1,
+        'total_profit': 245.30,
+        'total_loss': 117.20,
+        'avg_profit_per_trade': 5.12,
+        'recent_trades_count': 12,
+        'last_update': datetime.now().isoformat(),
+        'current_parameters': {
+          'acceleration': 0.025,
+          'max_acceleration': 0.2,
+          'sensitivity': 0.82,
+          'confidence_threshold': 0.73,
+          'stop_loss_atr_multiplier': 1.8,
+          'take_profit_atr_multiplier': 3.2
+        },
+        'parameter_history': [
+          {
+            'timestamp': (datetime.now() - timedelta(hours=2)).isoformat(),
+            'acceleration': 0.02,
+            'sensitivity': 0.8,
+            'confidence_threshold': 0.7,
+            'total_trades': 20,
+            'win_rate': 0.65
+          },
+          {
+            'timestamp': datetime.now().isoformat(),
+            'acceleration': 0.025,
+            'sensitivity': 0.82,
+            'confidence_threshold': 0.73,
+            'total_trades': 25,
+            'win_rate': 0.68
+          }
+        ],
+        'monitored_symbols': 15,
+        'active_positions': 3,
+        'market_regime': 'trending',
+        'trend_strength': 0.78
+      }
+
+      state_manager.set_custom_data('sar_strategy_performance', test_sar)
+      st.sidebar.success("✅ Тестовые данные SAR созданы!")
+
+    if st.sidebar.button("Создать тестовые адаптивные веса"):
+      test_weights = {
+        'Live_ML_Strategy': 1.2,
+        'Ichimoku_Cloud': 0.8,
+        'Dual_Thrust': 1.1,
+        'Mean_Reversion_BB': 0.9,
+        'Momentum_Spike': 1.3,
+        'Grid_Trading': 0.7,
+        'Stop_and_Reverse': 1.15
+      }
+
+      state_manager.set_custom_data('adaptive_weights', test_weights)
+      st.sidebar.success("✅ Тестовые адаптивные веса созданы!")
+
+    if st.sidebar.button("Очистить тестовые данные"):
+      state_manager.set_custom_data('sar_strategy_performance', None)
+      state_manager.set_custom_data('adaptive_weights', None)
+      st.sidebar.info("🗑️ Тестовые данные очищены")
+#--------------------------------------------------------------------------------------------------
 # --- Вкладка: Стратегии ---
 with tabs[2]:
   st.header("🎯 Управление стратегиями")

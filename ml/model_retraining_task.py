@@ -1563,7 +1563,7 @@ class MLFeedbackLoop:
 #
 #         # Мок объекты
 #         class MockDataFetcher:
-#           async def get_historical_data(self, symbol, timeframe, limit):
+#           async def get_historical_candles(self, symbol, timeframe, limit):
 #             return test_data.head(limit)
 #
 #         class MockMLModel:

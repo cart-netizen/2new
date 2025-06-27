@@ -316,14 +316,39 @@ class PositionManager:
                   except Exception as e:
                     logger.error(f"Ошибка отправки обратной связи: {e}")
 
-                if hasattr(self, 'integrated_system') and self.integrated_system and hasattr(self.integrated_system,
-                                                                                             'sar_strategy'):
-                  if self.integrated_system.sar_strategy and symbol in self.integrated_system.sar_strategy.current_positions:
-                    await self.integrated_system.sar_strategy.handle_position_update(symbol, {
-                      'profit_loss': net_pnl,
-                      'close_price': close_price,
-                      'close_timestamp': close_timestamp
-                    })
+                # Уведомляем SAR стратегию об обновлении позиции для адаптивного обучения
+                if (hasattr(self, 'integrated_system') and self.integrated_system and
+                    hasattr(self.integrated_system, 'sar_strategy') and
+                    self.integrated_system.sar_strategy):
+
+                  try:
+                    # Проверяем, что позиция действительно принадлежит SAR стратегии
+                    if symbol in getattr(self.integrated_system.sar_strategy, 'current_positions', {}):
+                      await self.integrated_system.sar_strategy.handle_position_update(symbol, {
+                        'profit_loss': net_pnl,
+                        'close_price': close_price,
+                        'close_timestamp': close_timestamp,
+                        'close_reason': locals().get('close_reason', 'position_manager'),
+                        'open_price': locals().get('open_price', trade.get('open_price', 0)),
+                        'net_pnl': net_pnl,
+                        # 'close_reason': locals().get('close_reason', 'position_manager_close'),
+                        # 'open_price': position_data.get('open_price', 0),
+                      })
+                      logger.debug(f"SAR стратегия уведомлена об обновлении позиции {symbol}")
+
+                    # Также обновляем общую производительность стратегии
+                    if hasattr(self.integrated_system, 'adaptive_selector'):
+                      await self.integrated_system.adaptive_selector.update_strategy_performance(
+                        'SAR_Strategy',
+                        {
+                          'profit_loss': net_pnl,
+                          'symbol': symbol,
+                          'close_timestamp': close_timestamp,
+                          'regime': getattr(self.integrated_system.sar_strategy, 'current_market_regime', 'unknown')
+                        }
+                      )
+                  except Exception as e:
+                    logger.error(f"Ошибка при уведомлении SAR стратегии об обновлении позиции {symbol}: {e}")
 
                 # Удаляем из кэша, если она там была
                 if symbol in self.open_positions:

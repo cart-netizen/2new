@@ -212,6 +212,7 @@ class IntegratedTradingSystem:
     self.account_balance: Optional[RiskMetrics] = None
     self.is_running = False
     self._monitoring_task: Optional[asyncio.Task] = None
+    self._fast_monitoring_task: Optional[asyncio.Task] = None
 
     # Инициализируем RetrainingManager без лишних зависимостей
     self.retraining_manager = ModelRetrainingManager(data_fetcher=self.data_fetcher)
@@ -1437,40 +1438,7 @@ class IntegratedTradingSystem:
               self.active_symbols, timeframe=Timeframe.ONE_HOUR
             ))
             logger.info("Запущено переобучение модели")
-        # Обработка команды экспорта отчета SAR
-        elif command_name == 'export_sar_report':
-          if hasattr(self, 'sar_strategy') and self.sar_strategy:
-            report_path = self.sar_strategy.export_performance_report()
-            if report_path:
-              logger.info(f"Отчет SAR стратегии сохранен: {report_path}")
 
-        # Обновляем метрики SAR стратегии для дашборда
-        if hasattr(self, 'sar_strategy') and self.sar_strategy:
-          try:
-            sar_metrics = self.sar_strategy.get_dashboard_metrics()
-            self.state_manager.set_custom_data('sar_strategy_performance', sar_metrics)
-            logger.debug(f"SAR метрики обновлены для дашборда: {len(sar_metrics)} параметров")
-          except Exception as e:
-            logger.error(f"Ошибка обновления SAR метрик: {e}")
-
-        if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
-          try:
-            performance_summary = self.adaptive_selector.get_performance_summary()
-
-            # Извлекаем только веса для удобства
-            weights = {}
-            for strategy_name, perf in performance_summary.items():
-              weights[strategy_name] = perf.get('weight', 1.0)
-
-            self.state_manager.set_custom_data('adaptive_weights', weights)
-            self.state_manager.set_custom_data('strategy_performance_summary', performance_summary)
-            logger.debug(f"Адаптивные веса обновлены: {len(weights)} стратегий")
-          except Exception as e:
-            logger.error(f"Ошибка обновления адаптивных весов: {e}")
-
-
-      interval = self.config.get('general_settings', {}).get('monitoring_interval_seconds', 30)
-      await asyncio.sleep(interval)
 
   async def _prepare_signal_metadata(self, symbol: str, signal: TradingSignal, data: pd.DataFrame) -> Dict[str, Any]:
       """Подготовка метаданных сигнала для Shadow Trading"""
@@ -2765,25 +2733,7 @@ class IntegratedTradingSystem:
 
           # Параллельная обработка батча символов
           tasks = []
-# -------------
-# # Проверяем сигналы в ожидании
-#       pending_signals = self.state_manager.get_pending_signals()
-#       if pending_signals:
-#         tasks = [self._check_and_execute_pending_signal(s, d) for s, d in pending_signals.items()]
-#         await asyncio.gather(*tasks)
-#
-#       # Ищем новые сигналы
-#       open_and_pending = set(self.position_manager.open_positions.keys()) | set(pending_signals.keys())
-#       symbols_for_new_search = [s for s in self.active_symbols if s not in open_and_pending]
-#
-#       if symbols_for_new_search:
-#         use_enhanced = self.config.get('ml_settings', {}).get('use_enhanced_processing', True)
-#         if use_enhanced and self.enhanced_ml_model:
-#           tasks = [self._monitor_symbol_for_entry_enhanced(symbol) for symbol in symbols_for_new_search]
-#         else:
-#           tasks = [self._monitor_symbol_for_entry(symbol) for symbol in symbols_for_new_search]
-#         await asyncio.gather(*tasks)
-# --------------
+
           # 1. Проверяем ожидающие сигналы
           for symbol in batch:
             if symbol in self.state_manager.get_pending_signals():
@@ -2858,6 +2808,22 @@ class IntegratedTradingSystem:
             if self.retraining_manager:
               self.retraining_manager.export_performance_report()
 
+          elif command_name == 'update_strategies':
+            # Обновляем активные стратегии
+            active_strategies = self.state_manager.get_custom_data('active_strategies')
+            if active_strategies and hasattr(self, 'adaptive_selector'):
+              for strategy_name, is_active in active_strategies.items():
+                self.adaptive_selector.active_strategies[strategy_name] = is_active
+              logger.info(f"Стратегии обновлены: {active_strategies}")
+
+          elif command_name == 'retrain_model':
+            # Запускаем переобучение
+            if self.retraining_manager:
+              asyncio.create_task(self.retraining_manager.retrain_model(
+                self.active_symbols, timeframe=Timeframe.ONE_HOUR
+              ))
+              logger.info("Запущено переобучение модели")
+
           elif command_name == 'update_ml_models':
             # Обновляем состояние ML моделей
             ml_state = self.state_manager.get_custom_data('ml_models_state')
@@ -2874,6 +2840,13 @@ class IntegratedTradingSystem:
             if symbol:
               stats = self.market_regime_detector.get_regime_statistics(symbol)
               self.state_manager.set_custom_data(f"regime_stats_{symbol}", stats)
+
+          # Обработка команды экспорта отчета SAR
+          elif command_name == 'export_sar_report':
+            if hasattr(self, 'sar_strategy') and self.sar_strategy:
+              report_path = self.sar_strategy.export_performance_report()
+              if report_path:
+                logger.info(f"Отчет SAR стратегии сохранен: {report_path}")
 
           elif command_name == 'reload_sar_config':
             logger.info("🔄 Перезагрузка конфигурации SAR стратегии...")
@@ -2901,6 +2874,33 @@ class IntegratedTradingSystem:
           # Очищаем команду после выполнения
           self.state_manager.clear_command()
 
+          if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
+            try:
+              performance_summary = self.adaptive_selector.get_performance_summary()
+
+              # Извлекаем только веса для удобства
+              weights = {}
+              for strategy_name, perf in performance_summary.items():
+                weights[strategy_name] = perf.get('weight', 1.0)
+
+              self.state_manager.set_custom_data('adaptive_weights', weights)
+              self.state_manager.set_custom_data('strategy_performance_summary', performance_summary)
+              logger.debug(f"Адаптивные веса обновлены: {len(weights)} стратегий")
+            except Exception as e:
+              logger.error(f"Ошибка обновления адаптивных весов: {e}")
+
+          # Обновляем метрики SAR стратегии для дашборда
+          if hasattr(self, 'sar_strategy') and self.sar_strategy:
+            try:
+              sar_metrics = self.sar_strategy.get_dashboard_metrics()
+              self.state_manager.set_custom_data('sar_strategy_performance', sar_metrics)
+              logger.debug(f"SAR метрики обновлены для дашборда: {len(sar_metrics)} параметров")
+            except Exception as e:
+              logger.error(f"Ошибка обновления SAR метрик: {e}")
+
+          interval = self.config.get('general_settings', {}).get('monitoring_interval_seconds', 30)
+          await asyncio.sleep(interval)
+
         # Ожидание перед следующим циклом
         await asyncio.sleep(monitoring_interval)
 
@@ -2910,6 +2910,80 @@ class IntegratedTradingSystem:
       except Exception as e:
         logger.error(f"Ошибка в оптимизированном цикле мониторинга: {e}", exc_info=True)
         await asyncio.sleep(monitoring_interval)
+
+  async def _fast_position_monitoring_loop(self):
+    """
+    Быстрый цикл для частого мониторинга открытых позиций.
+    Проверяет критические условия выхода каждые 5-10 секунд.
+    """
+    while self.is_running:
+      try:
+        if self.position_manager.open_positions:
+          logger.debug(f"Быстрая проверка {len(self.position_manager.open_positions)} позиций...")
+
+          # Получаем текущий баланс для риск-менеджмента
+          account_balance = self.account_balance
+
+          # Создаем задачи для параллельной проверки каждой позиции
+          tasks = []
+          for symbol in list(self.position_manager.open_positions.keys()):
+            task = self._check_critical_exit_conditions(symbol, account_balance)
+            tasks.append(task)
+
+          # Выполняем все проверки параллельно
+          if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Ждем перед следующей проверкой
+        await asyncio.sleep(5)  # Проверка каждые 5 секунд
+
+      except Exception as e:
+        logger.error(f"Ошибка в быстром цикле мониторинга: {e}", exc_info=True)
+        await asyncio.sleep(10)
+
+  async def _check_critical_exit_conditions(self, symbol: str, account_balance: Optional[RiskMetrics]):
+    """
+    Проверяет критические условия для немедленного выхода из позиции.
+    Вызывается из быстрого цикла мониторинга.
+    """
+    try:
+      position_data = self.position_manager.open_positions.get(symbol)
+      if not position_data:
+        return
+
+      # Получаем текущую цену
+      ticker = await self.connector.fetch_ticker(symbol)
+      if not ticker:
+        return
+
+      current_price = ticker.get('last', 0)
+      if current_price <= 0:
+        return
+
+      # 1. Проверка жесткого SL/TP
+      exit_reason = self.position_manager._check_sl_tp(position_data, current_price)
+
+      # 2. Проверка критической просадки (если цена упала более чем на X%)
+      if not exit_reason:
+        open_price = float(position_data.get('open_price', 0))
+        if open_price > 0:
+          side = position_data.get('side')
+          price_change_pct = ((current_price - open_price) / open_price) * 100
+
+          # Критическая просадка - 5% (можно настроить)
+          critical_loss_pct = 5.0
+
+          if (side == 'BUY' and price_change_pct < -critical_loss_pct) or \
+              (side == 'SELL' and price_change_pct > critical_loss_pct):
+            exit_reason = f"Критическая просадка: {abs(price_change_pct):.2f}%"
+
+      # Если найдена причина для выхода - закрываем позицию
+      if exit_reason:
+        logger.warning(f"⚠️ СРОЧНЫЙ ВЫХОД для {symbol}: {exit_reason}")
+        await self.trade_executor.close_position(symbol=symbol)
+
+    except Exception as e:
+      logger.error(f"Ошибка при проверке критических условий для {symbol}: {e}")
 
   async def _check_pending_signal_for_entry(self, symbol: str):
     """Проверяет ожидающий сигнал на точку входа с использованием продвинутой логики"""
@@ -3195,6 +3269,21 @@ class IntegratedTradingSystem:
 
       # Оптимизированный мониторинг
       self._monitoring_task = asyncio.create_task(self._monitoring_loop_optimized())
+      self._fast_monitoring_task = asyncio.create_task(self._fast_position_monitoring_loop())
+
+      # Ждем завершения любого из циклов
+      done, pending = await asyncio.wait(
+        [self._monitoring_task, self._fast_monitoring_task],
+        return_when=asyncio.FIRST_COMPLETED
+      )
+
+      # Отменяем оставшиеся задачи
+      for task in pending:
+        task.cancel()
+        try:
+          await task
+        except asyncio.CancelledError:
+          pass
 
       # Периодическое переобучение моделей
       self._retraining_task = asyncio.create_task(self._periodic_retraining())

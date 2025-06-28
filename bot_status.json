@@ -1,0 +1,242 @@
+{
+    "bot_status": {
+        "status": "running",
+        "pid": 9828
+    },
+    "latest_metrics": {
+        "total_balance_usdt": 10.44500686,
+        "available_balance_usdt": 10.45072027,
+        "unrealized_pnl_total": 0.0,
+        "daily_loss_limit_pct": 0.02,
+        "current_daily_loss_usdt": 0.0,
+        "max_position_size_pct": 0.1,
+        "realized_pnl_total": -51.45647886
+    },
+    "open_positions": [],
+    "pending_entry_signals": {},
+    "model_info": {
+        "error": "asdict() should be called on dataclass instances"
+    },
+    "custom_data": {
+        "active_strategies": {
+            "Live_ML_Strategy": true,
+            "Ichimoku_Cloud": true,
+            "Dual_Thrust": false,
+            "Mean_Reversion_BB": true,
+            "Momentum_Spike": true,
+            "Grid_Trading": false,
+            "Stop_and_Reverse": true
+        },
+        "sar_strategy_status": {
+            "strategy_name": "Stop_and_Reverse",
+            "monitored_symbols_count": 6,
+            "monitored_symbols": [
+                "DBRUSDT",
+                "MELANIAUSDT",
+                "JTOUSDT",
+                "XEMUSDT",
+                "SOONUSDT",
+                "LISTAUSDT"
+            ],
+            "current_positions_count": 0,
+            "current_positions": [],
+            "last_symbol_update": "2025-06-28T13:42:52.501715",
+            "config": {
+                "min_signal_score": 4,
+                "chop_threshold": 60,
+                "adx_threshold": 25,
+                "use_shadow_system": true,
+                "use_ml_confirmation": false,
+                "min_daily_volume_usd": 1000000
+            }
+        },
+        "sar_strategy_performance": {
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "win_rate": 0.0,
+            "recent_win_rate": 0.0,
+            "profit_factor": 0.0,
+            "total_profit": 0.0,
+            "total_loss": 0.0,
+            "avg_profit_per_trade": 0.0,
+            "recent_trades_count": 0,
+            "last_update": "2025-06-28T13:42:31.488413",
+            "current_parameters": {
+                "acceleration": 0.02,
+                "max_acceleration": 0.2,
+                "sensitivity": 0.8,
+                "confidence_threshold": 0.7,
+                "stop_loss_atr_multiplier": 1.5,
+                "take_profit_atr_multiplier": 3.0
+            },
+            "parameter_history": [],
+            "monitored_symbols": 6,
+            "active_positions": 0,
+            "market_regime": "unknown",
+            "trend_strength": 0.5
+        },
+        "adaptive_weights": {
+            "Unknown": 1.0
+        },
+        "strategy_performance_summary": {
+            "Unknown": {
+                "active": false,
+                "weight": 1.0,
+                "total_trades": 341,
+                "win_rate": 0.299,
+                "recent_win_rate": 0.1,
+                "profit_factor": 0.67,
+                "total_profit": -3.9,
+                "last_update": "2025-06-28T13:42:31.487084"
+            }
+        },
+        "market_regimes": {
+            "BTCUSDT": {
+                "regime": "squeeze",
+                "confidence": 0.5,
+                "trend_strength": 0.020501550590777646,
+                "volatility": 0.27233140884034296,
+                "duration": "Just started"
+            },
+            "ETHUSDT": {
+                "regime": "squeeze",
+                "confidence": 0.5,
+                "trend_strength": -0.0404996698642126,
+                "volatility": 0.260375465906816,
+                "duration": "Just started"
+            },
+            "SOLUSDT": {
+                "regime": "ranging",
+                "confidence": 0.8,
+                "trend_strength": 0.4608144970801292,
+                "volatility": 0.3665789583275806,
+                "duration": "Just started"
+            },
+            "XRPUSDT": {
+                "regime": "trend_up",
+                "confidence": 0.5,
+                "trend_strength": 0.6025976578849108,
+                "volatility": 0.4318709524550674,
+                "duration": "Just started"
+            },
+            "SEIUSDT": {
+                "regime": "weak_trend_up",
+                "confidence": 0.5,
+                "trend_strength": 0.2544226951998736,
+                "volatility": 0.3241149121935579,
+                "duration": "Just started"
+            },
+            "FARTCOINUSDT": {
+                "regime": "ranging",
+                "confidence": 0.8,
+                "trend_strength": 0.8312377018918291,
+                "volatility": 0.39804209647922834,
+                "duration": "Just started"
+            },
+            "SUIUSDT": {
+                "regime": "ranging",
+                "confidence": 0.8,
+                "trend_strength": 0.4420586078991805,
+                "volatility": 0.41153888377199666,
+                "duration": "Just started"
+            },
+            "1000PEPEUSDT": {
+                "regime": "ranging",
+                "confidence": 1.0,
+                "trend_strength": 0.014083318730814712,
+                "volatility": 0.35860357236857165,
+                "duration": "Just started"
+            },
+            "DOGEUSDT": {
+                "regime": "ranging",
+                "confidence": 1.0,
+                "trend_strength": 0.07512388109402994,
+                "volatility": 0.3392612926182984,
+                "duration": "Just started"
+            },
+            "WIFUSDT": {
+                "regime": "trend_up",
+                "confidence": 0.5,
+                "trend_strength": 0.4517312929581123,
+                "volatility": 0.25186430008313826,
+                "duration": "Just started"
+            },
+            "HYPEUSDT": {
+                "regime": "ranging",
+                "confidence": 1.0,
+                "trend_strength": 0.008504331332665191,
+                "volatility": 0.21950197365777038,
+                "duration": "Just started"
+            },
+            "BANANAS31USDT": {
+                "regime": "ranging",
+                "confidence": 1.0,
+                "trend_strength": 0.11396997378234755,
+                "volatility": 0.25237947713946796,
+                "duration": "Just started"
+            },
+            "SAHARAUSDT": {
+                "regime": "ranging",
+                "confidence": 0.8,
+                "trend_strength": -0.8829816364782628,
+                "volatility": 0.23655277211915546,
+                "duration": "Just started"
+            },
+            "APTUSDT": {
+                "regime": "ranging",
+                "confidence": 0.8,
+                "trend_strength": -0.6166094004037996,
+                "volatility": 0.20533505736046428,
+                "duration": "Just started"
+            },
+            "AAVEUSDT": {
+                "regime": "ranging",
+                "confidence": 1.0,
+                "trend_strength": -0.0576051139440541,
+                "volatility": 0.3719638697904962,
+                "duration": "Just started"
+            },
+            "HIFIUSDT": {
+                "regime": "trend_up",
+                "confidence": 0.5,
+                "trend_strength": 0.9452990579376852,
+                "volatility": 0.28666767592803166,
+                "duration": "Just started"
+            },
+            "VIRTUALUSDT": {
+                "regime": "ranging",
+                "confidence": 0.8,
+                "trend_strength": 0.36581842639158496,
+                "volatility": 0.25260510732936264,
+                "duration": "Just started"
+            },
+            "ADAUSDT": {
+                "regime": "ranging",
+                "confidence": 1.0,
+                "trend_strength": 0.036951783130020795,
+                "volatility": 0.3275098587801284,
+                "duration": "Just started"
+            },
+            "PENGUUSDT": {
+                "regime": "strong_trend_up",
+                "confidence": 0.8999999999999999,
+                "trend_strength": 1.0,
+                "volatility": 0.592853144506694,
+                "duration": "Just started"
+            },
+            "MOVEUSDT": {
+                "regime": "ranging",
+                "confidence": 0.8,
+                "trend_strength": -0.46589892149210044,
+                "volatility": 0.2723751321381101,
+                "duration": "Just started"
+            }
+        }
+    },
+    "command": {
+        "name": "reload_sar_config",
+        "data": null,
+        "timestamp": "2025-06-28T12:00:21.062916"
+    }
+}

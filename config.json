@@ -42,15 +42,21 @@
         "use_adx_filter": true,
         "adx_threshold": 20,
         "use_volatility_filter": true,
-        "max_atr_percentage": 15.0,
+        "max_atr_percentage": 20.0,
         "use_aroon_filter": true,
         "use_psar_exit": true,
         "use_btc_trend_filter": true,
         "use_atr_trailing_stop": true,
         "atr_ts_multiplier": 1.0,
         "sl_multiplier": 0.15,
+        "use_reverse_function": true,
         "tp_multiplier": 2.5,
-        "ltf_entry_timeframe": "5m"
+        "ltf_entry_timeframe": "1m",
+        "fast_monitoring_interval": 5,
+        "min_profit_for_reverse_pct": 0.225,
+        "use_partial_profit_taking": true,
+        "partial_tp_target_pct": 2.0,
+        "partial_close_percentage": 30
     },
     "general_settings": {
         "symbol_selection_mode": "dynamic",
@@ -78,5 +84,119 @@
         "enabled": true,
         "use_enhanced_config": true,
         "config_file": "config/enhanced_shadow_trading_config.json"
+    },
+    "stop_and_reverse_strategy": {
+        "enabled": true,
+        "description": "Профессиональная SAR стратегия с многоуровневой фильтрацией",
+        "market_regime_filters": {
+            "chop_period": 14,
+            "chop_threshold": 40,
+            "adx_period": 14,
+            "adx_threshold": 25,
+            "atr_period": 14,
+            "atr_multiplier": 1.25
+        },
+        "psar_settings": {
+            "psar_start": 0.02,
+            "psar_step": 0.02,
+            "psar_max": 0.2
+        },
+        "confirmation_indicators": {
+            "rsi_period": 14,
+            "rsi_overbought": 70,
+            "rsi_oversold": 30,
+            "macd_fast": 12,
+            "macd_slow": 26,
+            "macd_signal": 9,
+            "mfi_period": 14,
+            "mfi_overbought": 80,
+            "mfi_oversold": 20,
+            "aroon_period": 25
+        },
+        "macro_trend_filter": {
+            "ema_short": 50,
+            "ema_long": 200,
+            "timeframe": "1H"
+        },
+        "hma_rsi_trend": {
+            "hma_fast_period": 14,
+            "hma_slow_period": 28,
+            "hma_rsi_period": 14,
+            "hma_adx_threshold": 20,
+            "timeframe": "4H"
+        },
+        "ichimoku_settings": {
+            "ichimoku_conversion": 9,
+            "ichimoku_base": 26,
+            "ichimoku_span_b": 52,
+            "ichimoku_displacement": 26
+        },
+        "signal_scoring": {
+            "min_signal_score": 4,
+            "psar_score_weight": 1,
+            "divergence_score_weight": 2,
+            "extreme_zone_score_weight": 1,
+            "aroon_score_weight": 1,
+            "macro_alignment_score_weight": 1
+        },
+        "risk_management": {
+            "commission_rate": 0.00075,
+            "min_profit_protection_multiplier": 3,
+            "max_positions_per_strategy": 5,
+            "position_size_multiplier": 1.0
+        },
+        "symbol_selection": {
+            "min_daily_volume_usd": 1000000,
+            "max_monitored_symbols": 50,
+            "update_interval_hours": 1,
+            "volume_lookback_days": 7
+        },
+        "shadow_system_integration": {
+            "use_shadow_system": true,
+            "shadow_weight": 0.3,
+            "min_shadow_score": 0.4
+        },
+        "ml_integration": {
+            "use_ml_confirmation": false,
+            "ml_weight": 0.2,
+            "ml_confidence_threshold": 0.6
+        },
+        "timeframe_settings": {
+            "primary_timeframe": "15m",
+            "confirmation_timeframes": [
+                "30m",
+                "1H"
+            ],
+            "macro_timeframe": "1H",
+            "hma_timeframe": "4H"
+        },
+        "advanced_filters": {
+            "min_atr_value": 0.0001,
+            "max_spread_percentage": 0.1,
+            "min_liquidity_score": 0.7,
+            "correlation_filter_enabled": true,
+            "max_correlation_threshold": 0.8
+        },
+        "performance_tracking": {
+            "track_individual_components": true,
+            "save_signal_history": true,
+            "max_history_days": 30,
+            "detailed_logging": false
+        },
+        "emergency_controls": {
+            "max_daily_trades": 20,
+            "max_consecutive_losses": 5,
+            "daily_loss_limit_percentage": 3.0,
+            "volatility_circuit_breaker": 5.0
+        },
+        "chop_threshold": 60,
+        "adx_threshold": 25,
+        "atr_multiplier": 1.25,
+        "psar_start": 0.02,
+        "psar_step": 0.02,
+        "psar_max": 0.2,
+        "min_signal_score": 4,
+        "min_daily_volume_usd": 1000000,
+        "max_monitored_symbols": 100
     }
 }

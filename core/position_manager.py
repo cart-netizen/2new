@@ -201,24 +201,39 @@ class PositionManager:
                 continue
 
         # --- ПРИОРИТЕТ 4: STOP AND REVERSE ---
-        # Теперь вызываем _check_reversal_exit, передавая ему LTF данные
         if not exit_reason:
           reverse_signal = await self._check_reversal_exit(position_data, ltf_data)
           if reverse_signal:
-            logger.info(f"Инициирован Stop and Reverse для {symbol}.")
-            close_success = await self.trade_executor.close_position(symbol=symbol)
-            if not close_success: continue
+            logger.info(f"🔄 Обнаружен сигнал разворота для {symbol}")
 
-            await asyncio.sleep(3)
+            # Проверяем, можем ли использовать функцию reverse
+            use_reverse = self.config.get('strategy_settings', {}).get('use_reverse_function', True)
 
-            if account_balance:
-              # Важно: передаем htf_data в risk_manager, так как он ожидает полный набор признаков
-              risk_decision = await self.risk_manager.validate_signal(reverse_signal, symbol,
-                                                                      account_balance.available_balance_usdt)
-              if risk_decision.get('approved'):
-                logger.info(f"SAR для {symbol}: Риск-менеджер одобрил новую позицию.")
-                quantity = risk_decision.get('recommended_size')
-                await self.trade_executor.execute_trade(reverse_signal, symbol, quantity)
+            if use_reverse and hasattr(self.trade_executor, 'reverse_position'):
+              # Используем новую функцию reverse
+              reverse_success = await self.trade_executor.reverse_position(
+                symbol=symbol,
+                current_position=position_data,
+                new_signal=reverse_signal,
+                force=False  # Требуем проверку прибыльности
+              )
+
+              if reverse_success:
+                logger.info(f"✅ Позиция {symbol} успешно развернута")
+                # Обновляем статистику
+                if hasattr(self, 'trading_system') and self.trading_system:
+                  await self.trading_system.update_strategy_performance(
+                    symbol, 'reverse', True
+                  )
+              else:
+                logger.warning(f"Не удалось развернуть позицию {symbol}, выполняем обычное закрытие")
+                # Fallback к обычному закрытию + новый вход
+                await self._execute_standard_exit_and_reentry(symbol, position_data, reverse_signal,
+                                                              account_balance)
+            else:
+              # Стандартный путь: закрытие + новый вход
+              await self._execute_standard_exit_and_reentry(symbol, position_data, reverse_signal,
+                                                            account_balance)
 
         if exit_reason:
           logger.info(f"ВЫХОД для {symbol}: Обнаружен сигнал на закрытие. Причина: {exit_reason}")
@@ -228,6 +243,36 @@ class PositionManager:
       except Exception as e:
         logger.error(f"Ошибка при динамическом управлении позицией {symbol}: {e}", exc_info=True)
 
+  async def _execute_standard_exit_and_reentry(self, symbol: str, position_data: Dict,
+                                               reverse_signal: TradingSignal, account_balance: Optional[RiskMetrics]):
+    """
+    Стандартная процедура: закрытие текущей позиции и открытие новой.
+    """
+    try:
+      # Закрываем текущую позицию
+      close_success = await self.trade_executor.close_position(symbol=symbol)
+      if not close_success:
+        logger.error(f"Не удалось закрыть позицию {symbol} для разворота")
+        return
+
+      # Ждем подтверждения закрытия
+      await asyncio.sleep(3)
+
+      # Открываем новую позицию в противоположном направлении
+      if account_balance:
+        risk_decision = await self.risk_manager.validate_signal(
+          reverse_signal, symbol, account_balance.available_balance_usdt
+        )
+
+        if risk_decision.get('approved'):
+          logger.info(f"Риск-менеджер одобрил новую позицию после разворота {symbol}")
+          quantity = risk_decision.get('recommended_size')
+          await self.trade_executor.execute_trade(reverse_signal, symbol, quantity)
+        else:
+          logger.warning(f"Риск-менеджер отклонил новую позицию после разворота {symbol}")
+
+    except Exception as e:
+      logger.error(f"Ошибка при стандартном развороте {symbol}: {e}")
 
   async def reconcile_filled_orders(self):
         """
@@ -399,96 +444,189 @@ class PositionManager:
   #     logger.info(f"Новая позиция по {symbol} добавлена в кэш PositionManager.")
   #   else:
   #     logger.error("Попытка добавить в кэш сделку без ключа 'symbol'.")
-  async def _check_reversal_exit(self, position: Dict, ltf_data: pd.DataFrame) -> Optional[TradingSignal]:
+  async def _check_reversal_exit(self, position: Dict, data: pd.DataFrame) -> Optional[TradingSignal]:
     """
-    Проверяет сигнал на разворот и возвращает ГОТОВЫЙ СИГНАЛ для новой сделки, если разворот оправдан.
+    Улучшенная версия: проверяет необходимость разворота позиции,
+    используя стратегии и подтверждение от нескольких индикаторов.
     """
-    current_price = ltf_data['close'].iloc[-1]
-    open_price = float(position.get('open_price', 0))
-    if open_price == 0: return None
+    try:
+      symbol = position['symbol']
+      current_side = position.get('side')
 
-    pnl_multiplier = 1 if position.get('side') == 'BUY' else -1
-    unrealized_pnl_pct = ((current_price - open_price) / open_price) * pnl_multiplier * 100  # В процентах
+      # 1. Получаем сигналы от стратегий через integrated_system
+      if hasattr(self, 'trading_system') and self.trading_system:
+        # Проверяем SAR стратегию
+        if hasattr(self.trading_system, 'sar_strategy') and self.trading_system.sar_strategy:
+          sar_signal = await self.trading_system.sar_strategy.check_exit_conditions(
+            symbol, data, position
+          )
+          if sar_signal and sar_signal.is_reversal:
+            logger.info(f"SAR стратегия обнаружила сигнал разворота для {symbol}")
 
-    # ИЗМЕНИТЬ: Снизить порог для обнаружения разворота
-    if unrealized_pnl_pct <= -1.0:  # Если убыток больше 1%
-      logger.info(f"Позиция {position['symbol']} в убытке {unrealized_pnl_pct:.2f}%, проверяем разворот")
-    else:
+            # Подтверждаем другими индикаторами
+            confirmations = await self._confirm_reversal_signal(
+              symbol, data, current_side, sar_signal
+            )
+
+            if confirmations >= 2:  # Минимум 2 подтверждения
+              logger.info(f"Разворот подтвержден {confirmations} индикаторами")
+              return sar_signal
+
+      # 2. Альтернативная проверка через базовые индикаторы
+      # Если стратегии недоступны или не дали сигнала
+      reversal_conditions = 0
+
+      # EMA crossover
+      if 'ema_12' in data.columns and 'ema_26' in data.columns:
+        ema_fast = data['ema_12'].iloc[-1]
+        ema_slow = data['ema_26'].iloc[-1]
+        prev_ema_fast = data['ema_12'].iloc[-2]
+        prev_ema_slow = data['ema_26'].iloc[-2]
+
+        if current_side == 'BUY':
+          # Медвежий кроссовер для выхода из лонга
+          if prev_ema_fast > prev_ema_slow and ema_fast < ema_slow:
+            reversal_conditions += 1
+        else:
+          # Бычий кроссовер для выхода из шорта
+          if prev_ema_fast < prev_ema_slow and ema_fast > ema_slow:
+            reversal_conditions += 1
+
+      # RSI экстремумы
+      if 'rsi' in data.columns:
+        rsi = data['rsi'].iloc[-1]
+        if current_side == 'BUY' and rsi > 75:  # Перекупленность
+          reversal_conditions += 1
+        elif current_side == 'SELL' and rsi < 25:  # Перепроданность
+          reversal_conditions += 1
+
+      # MACD дивергенция
+      if all(col in data.columns for col in ['macd', 'macd_signal']):
+        macd = data['macd'].iloc[-1]
+        signal = data['macd_signal'].iloc[-1]
+        prev_macd = data['macd'].iloc[-2]
+        prev_signal = data['macd_signal'].iloc[-2]
+
+        if current_side == 'BUY':
+          if prev_macd > prev_signal and macd < signal:
+            reversal_conditions += 1
+        else:
+          if prev_macd < prev_signal and macd > signal:
+            reversal_conditions += 1
+
+      # Если достаточно условий для разворота
+      if reversal_conditions >= 2:
+        # Создаем сигнал разворота
+        new_signal_type = SignalType.SELL if current_side == 'BUY' else SignalType.BUY
+
+        reversal_signal = TradingSignal(
+          symbol=symbol,
+          signal_type=new_signal_type,
+          price=data['close'].iloc[-1],
+          confidence=0.6 + (reversal_conditions * 0.1),  # Базовая + бонус за подтверждения
+          strategy="reversal_exit",
+          timeframe=position.get('timeframe', '1h'),
+          volume=data['volume'].iloc[-1] if 'volume' in data.columns else 0,
+          timestamp=datetime.now(),
+          metadata={
+            'reversal_conditions': reversal_conditions,
+            'original_side': current_side,
+            'position_pnl_pct': self._calculate_current_pnl(position, data['close'].iloc[-1])
+          }
+        )
+
+        return reversal_signal
+
       return None
 
-    opposite_signal_type = SignalType.SELL if position.get('side') == 'BUY' else SignalType.BUY
-
-    # ДОБАВИТЬ: Дополнительные проверки для подтверждения разворота
-    # Проверяем EMA кроссовер
-    if 'ema_12' not in ltf_data.columns:
-      ltf_data['ema_12'] = ta.ema(ltf_data['close'], length=12)
-      ltf_data['ema_26'] = ta.ema(ltf_data['close'], length=26)
-
-    ema_12 = ltf_data['ema_12'].iloc[-1]
-    ema_26 = ltf_data['ema_26'].iloc[-1]
-
-    # Подтверждаем разворот через EMA
-    if position.get('side') == 'BUY' and ema_12 < ema_26:
-      logger.info(f"EMA подтверждает разворот для SELL на {position['symbol']}")
-    elif position.get('side') == 'SELL' and ema_12 > ema_26:
-      logger.info(f"EMA подтверждает разворот для BUY на {position['symbol']}")
-    else:
+    except Exception as e:
+      logger.error(f"Ошибка при проверке разворота для {position['symbol']}: {e}")
       return None
 
-    reverse_signal_candidate = TradingSignal(
-      signal_type=opposite_signal_type,
-      symbol=position['symbol'],
-      price=current_price,
-      confidence=0.85,  # Снизить с 0.99
-      strategy_name="ReversalSAR",
-      timestamp=datetime.now()
-    )
+  async def _confirm_reversal_signal(self, symbol: str, data: pd.DataFrame,
+                               current_side: str, signal: TradingSignal) -> int:
+    """
+    Подтверждает сигнал разворота дополнительными индикаторами.
+    Возвращает количество подтверждений.
+    """
+    confirmations = 0
 
-    is_strong_reverse, _ = await self.signal_filter.filter_signal(reverse_signal_candidate, ltf_data)
-    if not is_strong_reverse:
-      return None
+    try:
+      # 1. Проверка объемов
+      if 'volume' in data.columns and len(data) > 20:
+        avg_volume = data['volume'].rolling(20).mean().iloc[-1]
+        current_volume = data['volume'].iloc[-1]
+        if current_volume > avg_volume * 1.5:  # Повышенный объем
+          confirmations += 1
 
-    commission_rate = 0.00075
-    safety_buffer_pct = commission_rate * 3  # Упростить расчет
+      # 2. Проверка волатильности (ATR)
+      if 'atr' in data.columns:
+        atr = data['atr'].iloc[-1]
+        price = data['close'].iloc[-1]
+        atr_pct = (atr / price) * 100
+        if atr_pct > 1.5:  # Высокая волатильность
+          confirmations += 1
 
-    # ИЗМЕНИТЬ условие - разрешаем разворот даже при небольшом убытке
-    if unrealized_pnl_pct > -10.0:  # Не разворачиваем при убытке больше 10%
-      logger.info(f"Обнаружен разворот для {position['symbol']}. PnL: {unrealized_pnl_pct:.2f}%")
-      return reverse_signal_candidate
-    else:
-      logger.info(f"Разворот для {position['symbol']} отклонен - слишком большой убыток: {unrealized_pnl_pct:.2f}%")
-      return None
-  # async def _check_reversal_exit(self, position: Dict, ltf_data: pd.DataFrame) -> Optional[TradingSignal]:
-  #   """
-  #   Проверяет сигнал на разворот и возвращает ГОТОВЫЙ СИГНАЛ для новой сделки, если разворот оправдан.
-  #   """
-  #   current_price = ltf_data['close'].iloc[-1]
-  #   open_price = float(position.get('open_price', 0))
-  #   if open_price == 0: return None
-  #
-  #   pnl_multiplier = 1 if position.get('side') == 'BUY' else -1
-  #   unrealized_pnl_pct = ((current_price - open_price) / open_price) * pnl_multiplier
-  #
-  #   if unrealized_pnl_pct <= 0.005: return None
-  #
-  #   opposite_signal_type = SignalType.SELL if position.get('side') == 'BUY' else SignalType.BUY
-  #   reverse_signal_candidate = TradingSignal(
-  #     signal_type=opposite_signal_type, symbol=position['symbol'], price=current_price,
-  #     confidence=0.99, strategy_name="ReversalSAR", timestamp=datetime.now()
-  #   )
-  #
-  #   is_strong_reverse, _ = await self.signal_filter.filter_signal(reverse_signal_candidate, ltf_data)
-  #   if not is_strong_reverse: return None
-  #
-  #   commission_rate = 0.00075
-  #   safety_buffer_pct = (commission_rate * 3) * 1.5
-  #
-  #   if unrealized_pnl_pct > safety_buffer_pct:
-  #     logger.info(f"Обнаружен экономически выгодный разворот для {position['symbol']}.")
-  #     return reverse_signal_candidate
-  #   else:
-  #     logger.info(f"Разворот для {position['symbol']} обнаружен, но прибыль недостаточна.")
-  #     return None
+      # 3. Проверка моментума
+      if len(data) > 10:
+        momentum = (data['close'].iloc[-1] - data['close'].iloc[-10]) / data['close'].iloc[-10] * 100
+        if (current_side == 'BUY' and momentum < -2) or \
+            (current_side == 'SELL' and momentum > 2):
+          confirmations += 1
+
+      # 4. Проверка структуры рынка (Higher High/Lower Low)
+      if self._check_market_structure_break(data, current_side):
+        confirmations += 1
+
+      logger.debug(f"Разворот {symbol}: получено {confirmations} подтверждений")
+      return confirmations
+
+    except Exception as e:
+      logger.error(f"Ошибка при подтверждении разворота: {e}")
+      return 0
+
+  def _check_market_structure_break(self, data: pd.DataFrame, current_side: str) -> bool:
+    """
+    Проверяет нарушение структуры рынка (пробой последнего high/low).
+    """
+    try:
+      if len(data) < 20:
+        return False
+
+      # Находим последние локальные экстремумы
+      highs = data['high'].rolling(5).max()
+      lows = data['low'].rolling(5).min()
+
+      current_price = data['close'].iloc[-1]
+
+      if current_side == 'BUY':
+        # Для лонга: проверяем пробой последнего значимого low
+        recent_low = lows.iloc[-10:-1].min()
+        return current_price < recent_low
+      else:
+        # Для шорта: проверяем пробой последнего значимого high
+        recent_high = highs.iloc[-10:-1].max()
+        return current_price > recent_high
+
+    except Exception:
+      return False
+
+  def _calculate_current_pnl(self, position: Dict, current_price: float) -> float:
+    """
+    Рассчитывает текущий PnL позиции в процентах.
+    """
+    try:
+      open_price = float(position.get('open_price', 0))
+      if open_price == 0:
+        return 0.0
+
+      side = position.get('side')
+      if side == 'BUY':
+        return ((current_price - open_price) / open_price) * 100
+      else:
+        return ((open_price - current_price) / open_price) * 100
+    except Exception:
+      return 0.0
 
   def add_position_to_cache(self, trade: Dict):
     """Добавляет информацию о новой сделке в кэш открытых позиций."""
@@ -550,43 +688,91 @@ class PositionManager:
     # --- КОНЕЦ НОВОГО БЛОКА ---
 
   def _check_atr_trailing_stop(self, position: Dict, data: pd.DataFrame) -> Optional[str]:
-    """Проверяет, нужно ли выходить из сделки по трейлинг-стопу на основе ATR."""
+    """
+    Улучшенная версия трейлинг-стопа на основе ATR с поддержкой Chandelier Exit.
+    """
     strategy_settings = self.config.get('strategy_settings', {})
     if not strategy_settings.get('use_atr_trailing_stop', True):
       return None
 
     if 'atr' not in data.columns or data['atr'].isnull().all():
-      logger.warning(f"ATR не найден в данных для {position['symbol']}, проверка трейлинг-стопа пропущена.")
+      logger.warning(f"ATR не найден в данных для {position['symbol']}")
       return None
 
     side = position.get('side')
     current_price = data['close'].iloc[-1]
     atr_value = data['atr'].iloc[-1]
     atr_multiplier = strategy_settings.get('atr_ts_multiplier', 2.5)
-
-    # --- ПРОВЕРКА НА БЕЗУБЫТОЧНОСТЬ (по вашему запросу) ---
     open_price = float(position.get('open_price', 0))
-    if open_price == 0: return None
 
-    # Минимальная прибыль для закрытия должна покрывать 3 комиссии с запасом 70%
-    commission_rate = 0.00075
-    breakeven_buffer = (commission_rate * 3) * 1.7
+    if open_price == 0:
+      return None
 
-    # Для LONG позиции
+    # Расчет комиссий и минимальной прибыли
+    commission_rate = 0.00075  # Taker fee
+    min_profit_buffer = (commission_rate * 3) * 1.7  # 3 комиссии с запасом 70%
+
+    # Получаем максимальную/минимальную цену с момента входа
+    # Это ключевое отличие Chandelier Exit от обычного ATR stop
+    entry_index = position.get('entry_bar_index', -20)  # По умолчанию последние 20 баров
+
+    if entry_index < 0:
+      # Если не знаем точный индекс входа, используем последние N баров
+      lookback_bars = min(abs(entry_index), len(data))
+      recent_data = data.tail(lookback_bars)
+    else:
+      recent_data = data.iloc[entry_index:]
+
+    # Chandelier Exit логика
     if side == 'BUY':
-      trailing_stop_price = current_price - (atr_value * atr_multiplier)
-      # Мы выходим, только если цена пробила наш трейлинг-стоп И мы все еще в плюсе с учетом буфера
-      if trailing_stop_price > current_price > open_price * (1 + breakeven_buffer):
-        return f"Трейлинг-стоп по ATR для BUY сработал: цена {current_price:.4f} < Stop {trailing_stop_price:.4f}"
+      # Для лонга: стоп следует за максимумом минус ATR
+      highest_high = recent_data['high'].max()
+      chandelier_stop = highest_high - (atr_value * atr_multiplier)
 
-    # Для SHORT позиции
+      # Дополнительная защита: стоп не может быть ниже цены входа + минимальная прибыль
+      minimum_stop = open_price * (1 + min_profit_buffer)
+      effective_stop = max(chandelier_stop, minimum_stop)
+
+      # Проверяем, пробита ли цена
+      if current_price < effective_stop:
+        profit_pct = ((current_price - open_price) / open_price) * 100
+        return (f"Chandelier Exit сработал для BUY: цена {current_price:.4f} < "
+                f"Stop {effective_stop:.4f} (прибыль: {profit_pct:.2f}%)")
+
     elif side == 'SELL':
-      trailing_stop_price = current_price + (atr_value * atr_multiplier)
-      # Аналогичная проверка для шорта
-      if trailing_stop_price < current_price < open_price * (1 - breakeven_buffer):
-        return f"Трейлинг-стоп по ATR для SELL сработал: цена {current_price:.4f} > Stop {trailing_stop_price:.4f}"
+      # Для шорта: стоп следует за минимумом плюс ATR
+      lowest_low = recent_data['low'].min()
+      chandelier_stop = lowest_low + (atr_value * atr_multiplier)
+
+      # Защита для шорта
+      minimum_stop = open_price * (1 - min_profit_buffer)
+      effective_stop = min(chandelier_stop, minimum_stop)
+
+      # Проверяем пробитие
+      if current_price > effective_stop:
+        profit_pct = ((open_price - current_price) / open_price) * 100
+        return (f"Chandelier Exit сработал для SELL: цена {current_price:.4f} > "
+                f"Stop {effective_stop:.4f} (прибыль: {profit_pct:.2f}%)")
 
     return None
+
+  def update_position_extremes(self, symbol: str, current_price: float, high: float, low: float):
+    """
+    Обновляет экстремумы для позиции (используется для Chandelier Exit).
+    """
+    if symbol not in self.open_positions:
+      return
+
+    position = self.open_positions[symbol]
+
+    # Инициализируем если не существует
+    if 'highest_since_entry' not in position:
+      position['highest_since_entry'] = high
+      position['lowest_since_entry'] = low
+    else:
+      # Обновляем экстремумы
+      position['highest_since_entry'] = max(position['highest_since_entry'], high)
+      position['lowest_since_entry'] = min(position['lowest_since_entry'], low)
 
   async def monitor_single_position(self, symbol: str) -> bool:
     """Мониторит одну конкретную позицию"""

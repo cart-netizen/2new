@@ -585,3 +585,155 @@ class TradeExecutor:
     except Exception as e:
       logger.error(f"Критическая ошибка при исполнении сетки {grid_signal.symbol}: {e}", exc_info=True)
       return False
+
+  async def reverse_position(self, symbol: str, current_position: Dict,
+                               new_signal: TradingSignal, force: bool = False) -> bool:
+      """
+      Безопасно разворачивает позицию используя функцию Bybit "обратный".
+
+      Args:
+          symbol: Торговый символ
+          current_position: Текущая открытая позиция
+          new_signal: Новый сигнал в противоположном направлении
+          force: Принудительный разворот без проверки прибыльности
+
+      Returns:
+          bool: True если разворот успешен
+      """
+      try:
+        # 1. Проверка базовых условий
+        if not current_position or not new_signal:
+          logger.error(f"Недостаточно данных для разворота позиции {symbol}")
+          return False
+
+        current_side = current_position.get('side')
+        new_side = 'BUY' if new_signal.signal_type == SignalType.BUY else 'SELL'
+
+        # Проверяем, что действительно нужен разворот
+        if (current_side == 'BUY' and new_side == 'BUY') or \
+            (current_side == 'SELL' and new_side == 'SELL'):
+          logger.warning(f"Попытка развернуть позицию {symbol} в том же направлении")
+          return False
+
+        # 2. Проверка прибыльности (если не force)
+        if not force:
+          open_price = float(current_position.get('open_price', 0))
+          current_price = new_signal.price
+
+          # Расчет текущей прибыли с учетом направления
+          if current_side == 'BUY':
+            profit_pct = ((current_price - open_price) / open_price) * 100
+          else:
+            profit_pct = ((open_price - current_price) / open_price) * 100
+
+          # Минимальная прибыль для разворота (покрытие 2x комиссий + буфер)
+          commission_rate = 0.00075  # Taker fee
+          min_profit_for_reverse = (commission_rate * 2) * 100 * 1.5  # 0.225%
+
+          if profit_pct < min_profit_for_reverse:
+            logger.warning(
+              f"Разворот {symbol} отклонен: прибыль {profit_pct:.3f}% "
+              f"меньше минимальной {min_profit_for_reverse:.3f}%"
+            )
+            return False
+
+        # 3. Проверка силы нового сигнала
+        min_confidence = self.config.get('strategy_settings', {}).get(
+          'signal_confidence_threshold', 0.4
+        )
+        if new_signal.confidence < min_confidence * 1.2:  # Требуем на 20% выше обычного
+          logger.warning(
+            f"Разворот {symbol} отклонен: недостаточная уверенность "
+            f"{new_signal.confidence:.2f} < {min_confidence * 1.2:.2f}"
+          )
+          return False
+
+        # 4. Получаем текущий размер позиции
+        current_size = float(current_position.get('position_size', 0))
+        if current_size <= 0:
+          logger.error(f"Некорректный размер позиции для {symbol}: {current_size}")
+          return False
+
+        # 5. Выполняем разворот через API Bybit
+        logger.info(f"🔄 Инициирую разворот позиции {symbol}: {current_side} -> {new_side}")
+
+        # Для Bybit v5 используем обычный рыночный ордер с reduceOnly=false
+        # Размер должен быть в 2 раза больше текущей позиции для полного разворота
+        reverse_size = current_size * 2
+
+        params = {
+          'symbol': symbol,
+          'side': new_side,
+          'orderType': 'Market',
+          'qty': str(reverse_size),
+          'reduceOnly': False,  # Важно: false для разворота
+          'timeInForce': 'ImmediateOrCancel'
+        }
+
+        # Устанавливаем SL/TP для новой позиции
+        sl_tp_levels = await self.risk_manager.calculate_unified_sl_tp(
+          new_signal,
+          method='dynamic'
+        )
+
+        if sl_tp_levels.get('stop_loss'):
+          params['stopLoss'] = str(sl_tp_levels['stop_loss'])
+        if sl_tp_levels.get('take_profit'):
+          params['takeProfit'] = str(sl_tp_levels['take_profit'])
+
+        # Отправляем ордер
+        order_response = await self.connector.place_order(**params)
+
+        if order_response and order_response.get('orderId'):
+          order_id = order_response['orderId']
+          logger.info(f"✅ Разворот позиции {symbol} успешно инициирован. OrderID: {order_id}")
+
+          # 6. Обновляем БД - закрываем старую позицию
+          if current_position.get('db_trade_id'):
+            close_price = new_signal.price
+            self.db_manager.update_close_trade(
+              current_position['db_trade_id'],
+              close_price=close_price,
+              close_order_id=order_id,
+              close_reason="REVERSE"
+            )
+
+          # 7. Записываем новую позицию
+          new_trade_data = {
+            'symbol': symbol,
+            'order_id': order_id,
+            'signal_data': new_signal.to_dict(),
+            'entry_price': new_signal.price,
+            'quantity': current_size,  # Новый размер после разворота
+            'side': new_side,
+            'leverage': current_position.get('leverage', 10),
+            'stop_loss': sl_tp_levels.get('stop_loss'),
+            'take_profit': sl_tp_levels.get('take_profit'),
+            'strategy_name': new_signal.strategy,
+            'confidence': new_signal.confidence,
+            'reverse_from': current_position.get('order_id')  # Ссылка на предыдущую позицию
+          }
+
+          self.db_manager.add_trade_with_signal(new_trade_data)
+
+          # 8. Обновляем кэш позиций
+          self.position_manager.open_positions[symbol] = {
+            'symbol': symbol,
+            'side': new_side,
+            'position_size': current_size,
+            'open_price': new_signal.price,
+            'order_id': order_id,
+            'is_reversed': True,
+            'reversed_from': current_position.get('order_id'),
+            'timestamp': datetime.now()
+          }
+
+          return True
+
+        else:
+          logger.error(f"❌ Не удалось развернуть позицию {symbol}. Ответ: {order_response}")
+          return False
+
+      except Exception as e:
+        logger.error(f"Критическая ошибка при развороте позиции {symbol}: {e}", exc_info=True)
+        return False

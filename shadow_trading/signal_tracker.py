@@ -265,7 +265,11 @@ class SignalTracker:
     try:
       # Убеждаемся что batch processor запущен
       await self._ensure_batch_processor()
-
+      operation = {
+        'type': 'insert',  # Указываем правильный тип операции
+        'analysis': analysis,
+        'timestamp': time.time()
+      }
       # Остальной код метода остается без изменений
       await self._pending_operations.put(('save_signal', analysis))
 

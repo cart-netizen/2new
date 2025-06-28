@@ -3216,7 +3216,7 @@ class IntegratedTradingSystem:
       # await self.periodic_regime_analysis()
 
       # Обновление статуса
-      self.state_manager.set_status('running')
+      self.state_manager.set_status('running', os.getpid())
 
       # Добавить задачу проверки ROI
       self._roi_check_task = asyncio.create_task(self.periodic_roi_check())

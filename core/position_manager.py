@@ -144,7 +144,7 @@ class PositionManager:
     if not hasattr(self, '_last_order_check'):
       self._last_order_check = datetime.now()
 
-    if (datetime.now() - self._last_order_check).seconds > 60:  # Каждую минуту
+    if (datetime.now() - self._last_order_check).seconds > 30:  # Каждую минуту
       await self.track_pending_orders()
       self._last_order_check = datetime.now()
 

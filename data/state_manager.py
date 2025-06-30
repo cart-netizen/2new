@@ -2,8 +2,10 @@
 
 import json
 import os
+import shutil
 from datetime import datetime, date
 from enum import Enum
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 
 from core.schemas import RiskMetrics
@@ -31,27 +33,124 @@ class StateManager:
     Упрощенный менеджер состояний, использующий JSON-файл для избежания блокировок БД.
     """
     def __init__(self, state_file: str = "bot_status.json"):
-        self.state_file = state_file
+        # self.state_file = state_file
+
+        self.state_file = Path(state_file)
+
+    # def _read_state(self) -> Dict[str, Any]:
+    #     """Читает состояние из JSON-файла."""
+    #     try:
+    #         if os.path.exists(self.state_file):
+    #             with open(self.state_file, 'r') as f:
+    #                 return json.load(f)
+    #     except (IOError, json.JSONDecodeError) as e:
+    #         logger.error(f"Ошибка чтения файла состояния: {e}")
+    #     # Возвращаем состояние по умолчанию, если файл не найден или поврежден
+    #     return {'bot_status': {'status': 'stopped', 'pid': None}, 'latest_metrics': {}}
+    #
+    # def _write_state(self, state: Dict[str, Any]):
+    #     """Записывает состояние в JSON-файл."""
+    #     try:
+    #         with open(self.state_file, 'w', encoding='utf-8') as f:
+    #             # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+    #             json.dump(state, f, indent=4, cls=CustomJSONEncoder)
+    #     except IOError as e:
+    #         logger.error(f"Ошибка записи в файл состояния: {e}")
 
     def _read_state(self) -> Dict[str, Any]:
-        """Читает состояние из JSON-файла."""
+        """Читает состояние из файла с защитой от ошибок"""
         try:
-            if os.path.exists(self.state_file):
-                with open(self.state_file, 'r') as f:
-                    return json.load(f)
-        except (IOError, json.JSONDecodeError) as e:
-            logger.error(f"Ошибка чтения файла состояния: {e}")
-        # Возвращаем состояние по умолчанию, если файл не найден или поврежден
-        return {'bot_status': {'status': 'stopped', 'pid': None}, 'latest_metrics': {}}
+            # Используем Path объект правильно
+            if not self.state_file.exists():
+                return {}
+
+            # Проверяем размер файла
+            file_size = self.state_file.stat().st_size
+            if file_size == 0:
+                logger.warning("Файл состояния пуст, инициализируем новый")
+                return {}
+
+            # Читаем содержимое
+            with open(self.state_file, 'r', encoding='utf-8') as f:
+                content = f.read().strip()
+
+            # Проверяем содержимое
+            if not content:
+                logger.warning("Файл состояния содержит пустую строку")
+                return {}
+
+            try:
+                return json.loads(content)
+            except json.JSONDecodeError as e:
+                logger.error(f"Ошибка парсинга JSON: {e}")
+                logger.error(f"Содержимое файла (первые 100 символов): {content[:100]}...")
+
+                # Создаем резервную копию
+                backup_path = str(self.state_file) + '.backup'
+                shutil.copy(str(self.state_file), backup_path)
+                logger.info(f"Создана резервная копия: {backup_path}")
+
+                # Возвращаем пустое состояние
+                return {}
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка чтения состояния: {e}")
+            return {}
 
     def _write_state(self, state: Dict[str, Any]):
-        """Записывает состояние в JSON-файл."""
+        """Записывает состояние в файл атомарно"""
         try:
-            with open(self.state_file, 'w', encoding='utf-8') as f:
-                # --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-                json.dump(state, f, indent=4, cls=CustomJSONEncoder)
-        except IOError as e:
-            logger.error(f"Ошибка записи в файл состояния: {e}")
+            # Создаем временный файл
+            temp_path = str(self.state_file) + '.tmp'
+
+            # Записываем во временный файл
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2, ensure_ascii=False, default=str)
+
+            # Атомарно заменяем основной файл
+            # Для Windows используем replace, для Unix - rename
+            import platform
+            if platform.system() == 'Windows':
+                # На Windows нужно сначала удалить целевой файл
+                if self.state_file.exists():
+                    self.state_file.unlink()
+                Path(temp_path).rename(self.state_file)
+            else:
+                # На Unix системах rename атомарна
+                Path(temp_path).rename(self.state_file)
+
+        except Exception as e:
+            logger.error(f"Ошибка записи состояния: {e}")
+            # Удаляем временный файл если он остался
+            temp_path = str(self.state_file) + '.tmp'
+            if Path(temp_path).exists():
+                try:
+                    Path(temp_path).unlink()
+                except:
+                    pass
+
+    def initialize_state(self):
+        """Инициализирует файл состояния если его нет"""
+        try:
+            # Создаем директорию если нужно
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Если файла нет, создаем с базовой структурой
+            if not self.state_file.exists():
+                initial_state = {
+                    'status': 'stopped',
+                    'metrics': {},
+                    'commands': {},
+                    'model_info': {},
+                    'open_positions': {},
+                    'pending_signals': {},
+                    'created_at': datetime.now().isoformat()
+                }
+                self._write_state(initial_state)
+                logger.info(f"Инициализирован новый файл состояния: {self.state_file}")
+
+        except Exception as e:
+            logger.error(f"Ошибка инициализации состояния: {e}")
 
     # --- Публичные методы (теперь они СИНХРОННЫЕ) ---
 

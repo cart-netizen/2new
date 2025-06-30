@@ -52,6 +52,7 @@
         "use_reverse_function": true,
         "tp_multiplier": 2.5,
         "ltf_entry_timeframe": "1m",
+
         "fast_monitoring_interval": 5,
         "min_profit_for_reverse_pct": 0.225,
         "use_partial_profit_taking": true,
@@ -164,6 +165,7 @@
         "timeframe_settings": {
             "primary_timeframe": "15m",
             "confirmation_timeframes": [
+                "5m",
                 "30m",
                 "1H"
             ],

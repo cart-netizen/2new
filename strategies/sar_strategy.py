@@ -247,6 +247,13 @@ class StopAndReverseStrategy(BaseStrategy):
         Реализует полную логику из исследования
         """
         try:
+            components = SARSignalComponents()
+
+            # Расчет индикаторов (предполагаем что они уже рассчитаны в data)
+            psar_value = data['psar'].iloc[-1] if 'psar' in data.columns else None
+            rsi_value = data['rsi'].iloc[-1] if 'rsi' in data.columns else 50.0
+            adx_value = data['adx'].iloc[-1] if 'adx' in data.columns else 20.0
+
             # Проверяем минимальное количество данных
             min_required = max(200, self.ema_long, self.ichimoku_span_b + self.ichimoku_displacement)
             if len(data) < min_required:
@@ -281,25 +288,40 @@ class StopAndReverseStrategy(BaseStrategy):
             
             # Формируем итоговый сигнал
             confidence = self._calculate_signal_confidence(signal_components, shadow_score)
-            
+
+            config = getattr(self, 'config', {})
+            strategy_settings = config.get('strategy_settings', {})
+            ltf_str = strategy_settings.get('ltf_entry_timeframe', '15m')
+
+            config = getattr(self, 'config', {})
+            strategy_settings = config.get('strategy_settings', {})
+            ltf_str = strategy_settings.get('ltf_entry_timeframe', '15m')
+            # psar_value = data['psar'].iloc[-1]
+            # Создаем сигнал с правильными параметрами
             signal = TradingSignal(
-                symbol=symbol,
                 signal_type=signal_type,
+                symbol=symbol,
+                price=float(data['close'].iloc[-1]),  # Используем price вместо entry_price
                 confidence=confidence,
-                entry_price=float(data['close'].iloc[-1]),
-                timestamp=datetime.now(),
                 strategy_name=self.strategy_name,
-                timeframe=Timeframe.FIFTEEN_MINUTES,
+                timestamp=datetime.now(),
                 metadata={
                     'sar_components': signal_components.__dict__,
+                    'components': components.__dict__,
+                    'psar_value': float(psar_value) if psar_value else None,
+                    'rsi': float(rsi_value),
+                    'adx': float(adx_value),
                     'shadow_score': shadow_score,
                     'filter_reason': filter_reason,
+                    'volume': float(data['volume'].iloc[-1]) if 'volume' in data.columns else 0,
+                    'timeframe': ltf_str,  # Сохраняем в metadata как строку
                     'signal_score': signal_components.total_score,
                     'min_required_score': self.min_signal_score,
-                    'protection_checks': 'passed'
+                    'protection_checks': 'passed',
+                    'entry_timeframe': ltf_str
                 }
             )
-            
+
             logger.info(f"✅ SAR сигнал сгенерирован для {symbol}: {signal_type.value}, confidence={confidence:.3f}, score={signal_components.total_score}")
             return signal
             
@@ -1670,3 +1692,71 @@ class StopAndReverseStrategy(BaseStrategy):
 
         except Exception as e:
             logger.error(f"Ошибка обновления метрик производительности SAR: {e}")
+
+    async def check_exit_conditions(self, symbol: str, data: pd.DataFrame,
+                                    position: Dict) -> Optional[TradingSignal]:
+        """
+        Проверяет условия выхода для открытой позиции.
+        Возвращает сигнал разворота если условия соблюдены.
+        """
+        try:
+            if len(data) < 20:
+                return None
+
+            current_price = data['close'].iloc[-1]
+            position_side = position.get('side')
+
+            # Рассчитываем PSAR если не в данных
+            if 'psar' not in data.columns:
+                psar_df = ta.psar(data['high'], data['low'], data['close'])
+                if psar_df is not None and not psar_df.empty:
+                    psar_col = [col for col in psar_df.columns if
+                                'PSAR' in col and 'PSARl' not in col and 'PSARs' not in col]
+                    if psar_col:
+                        data['psar'] = psar_df[psar_col[0]]
+
+            if 'psar' not in data.columns:
+                return None
+
+            psar_value = data['psar'].iloc[-1]
+
+            # Проверяем сигнал разворота
+            is_reversal = False
+            new_signal_type = None
+
+            if position_side == 'BUY' and current_price < psar_value:
+                # Разворот из лонга в шорт
+                is_reversal = True
+                new_signal_type = SignalType.SELL
+            elif position_side == 'SELL' and current_price > psar_value:
+                # Разворот из шорта в лонг
+                is_reversal = True
+                new_signal_type = SignalType.BUY
+
+            if is_reversal:
+                # Создаем сигнал разворота с ПРАВИЛЬНЫМИ параметрами
+                reversal_signal = TradingSignal(
+                    symbol=symbol,
+                    signal_type=new_signal_type,
+                    price=current_price,
+                    confidence=0.7,  # Базовая уверенность для SAR разворота
+                    strategy_name="SAR_Reversal",  # Используем strategy_name вместо strategy
+                    timestamp=datetime.now(),
+                    metadata={
+                        'psar_value': float(psar_value),
+                        'is_reversal': True,
+                        'original_side': position_side,
+                        'timeframe': data.attrs.get('timeframe', '1h'),
+                        'volume': float(data['volume'].iloc[-1]) if 'volume' in data.columns else 0
+                    }
+                )
+                # Добавляем флаг как атрибут после создания
+                reversal_signal.is_reversal = True
+
+                return reversal_signal
+
+            return None
+
+        except Exception as e:
+            logger.error(f"Ошибка проверки условий выхода SAR для {symbol}: {e}")
+            return None

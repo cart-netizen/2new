@@ -342,6 +342,48 @@ class PositionManager:
                   commission=commission, close_timestamp=close_timestamp
                 )
 
+                # Обновляем статистику стратегий
+                # Обновляем статистику стратегий через trading_system
+                if hasattr(self, 'trading_system') and self.trading_system:
+                  if hasattr(self.trading_system, 'adaptive_selector'):
+                    await self.trading_system.adaptive_selector.update_strategy_performance(
+                      trade.get('strategy_name', 'Unknown'),
+                      net_pnl > 0,
+                      abs(net_pnl)
+                    )
+
+                # --- ДОБАВИТЬ ЗДЕСЬ СИНХРОНИЗАЦИЮ С SHADOW TRADING ---
+                # Синхронизируем с Shadow Trading после успешного обновления БД
+                if hasattr(self, 'trading_system') and self.trading_system:
+                  try:
+                    shadow_manager = getattr(self.trading_system, 'shadow_trading', None)
+                    if shadow_manager and hasattr(shadow_manager, 'signal_tracker'):
+                      # Используем правильные переменные из контекста
+                      profit_pct = ((close_price - open_price) / open_price * 100) if side == 'BUY' \
+                        else ((open_price - close_price) / open_price * 100)
+
+                      # Передаем данные о закрытой сделке
+                      trade_result = {
+                        'symbol': symbol,
+                        'close_price': close_price,
+                        'close_timestamp': close_timestamp,
+                        'profit_loss': net_pnl,
+                        'profit_pct': profit_pct,
+                        'order_id': trade.get('order_id')
+                      }
+
+                      # Синхронизируем
+                      await shadow_manager.signal_tracker.sync_with_real_trades(symbol, trade_result)
+                      logger.info(f"✅ Shadow Trading синхронизирован для {symbol}")
+
+                  except Exception as e:
+                    logger.error(f"Ошибка синхронизации Shadow Trading: {e}")
+                # --- КОНЕЦ БЛОКА SHADOW TRADING ---
+
+                # Вызываем callback для ML обратной связи
+                if hasattr(self, 'trading_system') and self.trading_system:
+                  await self.trading_system.process_trade_feedback(trade['id'])
+
                 integrated_system = getattr(self.trade_executor, 'integrated_system', None)
                 if integrated_system and hasattr(integrated_system, 'process_trade_feedback'):
                   try:
@@ -433,8 +475,121 @@ class PositionManager:
           except Exception as e:
             logger.error(f"Ошибка при сверке сделок для {symbol}: {e}", exc_info=True)
 
+        # 2. Полный метод reconcile_filled_orders с использованием fetch_positions_batch:
 
-
+  # async def reconcile_filled_orders(self):
+  #   """Оптимизированная версия с батчевой загрузкой позиций"""
+  #
+  #   # Получаем ВСЕ позиции одним запросом вместо N запросов
+  #   try:
+  #     all_positions_response = await self.connector._make_request(
+  #       'GET',
+  #       '/v5/position/list',
+  #       {'category': 'linear', 'settleCoin': 'USDT'},
+  #       use_cache=False
+  #     )
+  #
+  #     all_positions = all_positions_response.get('list', []) if all_positions_response else []
+  #
+  #     # Создаем быстрый lookup по символам
+  #     active_positions = {}
+  #     for pos in all_positions:
+  #       if float(pos.get('size', 0)) > 0:
+  #         active_positions[pos['symbol']] = pos
+  #
+  #     logger.debug(f"Получено {len(active_positions)} активных позиций с биржи")
+  #
+  #   except Exception as e:
+  #     logger.error(f"Ошибка получения всех позиций: {e}")
+  #     # Fallback на старый метод
+  #     active_positions = {}
+  #
+  #   # Получаем открытые сделки из БД
+  #   open_trades_in_db = await self.db_manager.get_all_open_trades()
+  #   if not open_trades_in_db:
+  #     return
+  #
+  #   logger.debug(f"Сверка {len(open_trades_in_db)} сделок с биржей")
+  #
+  #   for trade in open_trades_in_db:
+  #     symbol = trade.get('symbol')
+  #     if not symbol:
+  #       continue
+  #
+  #     try:
+  #       # ОПТИМИЗАЦИЯ: используем уже загруженные данные вместо отдельного запроса
+  #       is_still_open = symbol in active_positions
+  #
+  #       if not is_still_open:
+  #         logger.info(f"Позиция по {symbol} больше не активна на бирже. Поиск исполненной сделки...")
+  #
+  #         # Ищем в истории исполнений
+  #         executions = await self.connector.get_execution_history(symbol=symbol, limit=20)
+  #         closing_exec = None
+  #
+  #         for exec_trade in executions:
+  #           if exec_trade.get('closedSize') and float(exec_trade.get('closedSize', 0)) > 0:
+  #             closing_exec = exec_trade
+  #             break
+  #
+  #         if closing_exec:
+  #           # Расчет PnL
+  #           open_price = float(trade['open_price'])
+  #           close_price = float(closing_exec['execPrice'])
+  #           quantity = float(trade['quantity'])
+  #           commission = float(closing_exec.get('execFee', 0))
+  #           side = trade.get('side')
+  #
+  #           gross_pnl = (close_price - open_price) * quantity if side == 'BUY' else (
+  #                                                                                         open_price - close_price) * quantity
+  #           net_pnl = gross_pnl - commission
+  #           close_timestamp = datetime.fromtimestamp(int(closing_exec['execTime']) / 1000)
+  #
+  #           logger.info(f"ПОДТВЕРЖДЕНИЕ ЗАКРЫТИЯ для {symbol}: Чистый PnL: {net_pnl:.4f}")
+  #
+  #           # Обновляем БД
+  #           await self.db_manager.update_close_trade(
+  #             trade['id'],
+  #             close_timestamp=close_timestamp,
+  #             close_price=close_price,
+  #             profit_loss=net_pnl,
+  #             commission=commission,
+  #             close_reason='exchange_execution'
+  #           )
+  #
+  #           # Обновляем статистику
+  #           if hasattr(self, 'trading_system') and self.trading_system:
+  #             if hasattr(self.trading_system, 'adaptive_selector'):
+  #               await self.trading_system.adaptive_selector.update_strategy_performance(
+  #                 trade.get('strategy_name', 'Unknown'),
+  #                 net_pnl > 0,
+  #                 abs(net_pnl)
+  #               )
+  #
+  #           # Синхронизация с Shadow Trading
+  #           if hasattr(self, 'trading_system') and self.trading_system:
+  #             try:
+  #               shadow_manager = getattr(self.trading_system, 'shadow_trading', None)
+  #               if shadow_manager and hasattr(shadow_manager, 'signal_tracker'):
+  #                 profit_pct = ((close_price - open_price) / open_price * 100) if side == 'BUY' \
+  #                   else ((open_price - close_price) / open_price * 100)
+  #
+  #                 trade_result = {
+  #                   'symbol': symbol,
+  #                   'close_price': close_price,
+  #                   'close_timestamp': close_timestamp,
+  #                   'profit_loss': net_pnl,
+  #                   'profit_pct': profit_pct,
+  #                   'order_id': trade.get('order_id')
+  #                 }
+  #
+  #                 await shadow_manager.signal_tracker.sync_with_real_trades(symbol, trade_result)
+  #                 logger.info(f"✅ Shadow Trading синхронизирован для {symbol}")
+  #
+  #             except Exception as e:
+  #               logger.error(f"Ошибка синхронизации Shadow Trading: {e}")
+  #     except Exception as e:
+  #      logger.error(f"Ошибка при сверке сделки {symbol}: {e}")
 
   # def add_position_to_cache(self, trade: Dict):
   #   """Добавляет информацию о новой сделке в кэш открытых позиций."""
@@ -640,7 +795,7 @@ class PositionManager:
   def _check_psar_exit(self, position: Dict, data: pd.DataFrame) -> Optional[str]:
     """
     Проверяет, нужно ли выходить из сделки по сигналу Parabolic SAR,
-    с обязательной проверкой на безубыточность.
+    с ПРАВИЛЬНОЙ проверкой на безубыточность включая ВСЕ комиссии.
     """
     if 'psar' not in data.columns or data['psar'].isnull().all():
       return None
@@ -651,7 +806,7 @@ class PositionManager:
     open_price = float(position.get('open_price', 0))
 
     if open_price == 0:
-      return None  # Не можем проверить, если цена входа неизвестна
+      return None
 
     # Определяем, есть ли сигнал на выход по PSAR
     is_psar_exit_signal = False
@@ -660,32 +815,51 @@ class PositionManager:
     elif side == 'SELL' and current_price > psar_value:
       is_psar_exit_signal = True
 
-    # Если сигнала на выход нет, прекращаем проверку
     if not is_psar_exit_signal:
       return None
 
-    # --- НОВЫЙ БЛОК: ПРОВЕРКА НА БЕЗУБЫТОЧНОСТЬ ---
-    # Если сигнал на выход есть, сначала проверяем, выгодно ли это
+    # --- ИСПРАВЛЕННАЯ ПРОВЕРКА НА БЕЗУБЫТОЧНОСТЬ ---
+    # Комиссии: открытие + закрытие
+    commission_rate = 0.00075  # Taker fee 0.075%
+    total_commission_rate = commission_rate * 2  # За вход и выход
 
-    # Минимальная прибыль для закрытия должна покрывать хотя бы комиссию за закрытие
-    commission_rate = 0.00075  # Средняя комиссия тейкера ~0.075%
+    # Добавляем небольшой буфер для гарантии прибыльности
+    min_profit_buffer = 0.001  # 0.1% дополнительно
+    total_required_move = total_commission_rate + min_profit_buffer  # ~0.25%
 
-    # Для LONG позиции: выходим, только если цена закрытия выше цены входа + комиссия
-    if side == 'BUY' and current_price > open_price * (1 + commission_rate):
-      logger.info(f"Выход по PSAR для BUY ({position['symbol']}) подтвержден как безубыточный.")
-      return f"Parabolic SAR для BUY сработал: цена {current_price:.4f} < PSAR {psar_value:.4f}"
+    # Расчет фактической прибыли с учетом направления
+    if side == 'BUY':
+      # Для лонга: (текущая - открытие) / открытие
+      actual_profit_pct = ((current_price - open_price) / open_price)
+      is_profitable = actual_profit_pct > total_required_move
 
-    # Для SHORT позиции: выходим, только если цена закрытия ниже цены входа - комиссия
-    elif side == 'SELL' and current_price < open_price * (1 - commission_rate):
-      logger.info(f"Выход по PSAR для SELL ({position['symbol']}) подтвержден как безубыточный.")
-      return f"Parabolic SAR для SELL сработал: цена {current_price:.4f} > PSAR {psar_value:.4f}"
+      if is_profitable:
+        net_profit_pct = (actual_profit_pct - total_commission_rate) * 100
+        logger.info(
+          f"✅ Выход по PSAR для BUY ({position['symbol']}) подтвержден. "
+          f"Чистая прибыль: {net_profit_pct:.3f}%"
+        )
+        return f"Parabolic SAR для BUY: цена {current_price:.4f} < PSAR {psar_value:.4f}"
 
-    else:
-      # Если сигнал PSAR есть, но закрытие приведет к убытку, мы его игнорируем
-      logger.debug(
-        f"Сигнал на выход по PSAR для {position['symbol']} проигнорирован, т.к. сделка не является безубыточной.")
-      return None
-    # --- КОНЕЦ НОВОГО БЛОКА ---
+    elif side == 'SELL':
+      # Для шорта: (открытие - текущая) / открытие
+      actual_profit_pct = ((open_price - current_price) / open_price)
+      is_profitable = actual_profit_pct > total_required_move
+
+      if is_profitable:
+        net_profit_pct = (actual_profit_pct - total_commission_rate) * 100
+        logger.info(
+          f"✅ Выход по PSAR для SELL ({position['symbol']}) подтвержден. "
+          f"Чистая прибыль: {net_profit_pct:.3f}%"
+        )
+        return f"Parabolic SAR для SELL: цена {current_price:.4f} > PSAR {psar_value:.4f}"
+
+    # Если сигнал есть, но выход приведет к убытку
+    logger.debug(
+      f"❌ PSAR сигнал для {position['symbol']} отклонен - недостаточная прибыль. "
+      f"Требуется минимум {total_required_move * 100:.3f}% движения"
+    )
+    return None
 
   def _check_atr_trailing_stop(self, position: Dict, data: pd.DataFrame) -> Optional[str]:
     """

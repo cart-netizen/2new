@@ -1364,80 +1364,80 @@ class IntegratedTradingSystem:
       logger.error(f"Ошибка при установке плеча для {symbol}: {e}", exc_info=True)
       return False
 
-  async def _monitoring_loop(self):
-    """
-    Главный цикл, управляющий всей логикой.
-    """
-    await self.position_manager.load_open_positions()
-    while self.is_running:
-      logger.info("--- Начало нового цикла мониторинга ---")
-      await self.update_account_balance()
-      if self.account_balance:
-        self.state_manager.update_metrics(self.account_balance)
-
-      # Управляем открытыми позициями
-      await self.position_manager.manage_open_positions(self.account_balance)
-      # Сверяем закрытые сделки
-      await self.position_manager.reconcile_filled_orders()
-      # Обновляем состояние для дашборда
-      self.state_manager.update_open_positions(self.position_manager.open_positions)
-
-      # Проверяем сигналы в ожидании
-      pending_signals = self.state_manager.get_pending_signals()
-      if pending_signals:
-        tasks = [self._check_pending_signal_for_entry(s) for s in pending_signals.keys()]
-        await asyncio.gather(*tasks)
-
-      # Ищем новые сигналы
-      open_and_pending = set(self.position_manager.open_positions.keys()) | set(pending_signals.keys())
-      symbols_for_new_search = [s for s in self.active_symbols if s not in open_and_pending]
-
-      if symbols_for_new_search:
-        use_enhanced = self.config.get('ml_settings', {}).get('use_enhanced_processing', True)
-        if use_enhanced and self.enhanced_ml_model:
-          tasks = [self._monitor_symbol_for_entry_enhanced(symbol) for symbol in symbols_for_new_search]
-        else:
-          tasks = [self._monitor_symbol_for_entry(symbol) for symbol in symbols_for_new_search]
-        await asyncio.gather(*tasks)
-
-      # --- НОВЫЙ БЛОК: ПРОВЕРКА КОМАНД ИЗ ДАШБОРДА ---
-      command_data = self.state_manager.get_command()
-      if command_data:
-        command_name = command_data.get('name')
-        logger.info(f"Получена новая команда из дашборда: {command_name}")
-
-        # Очищаем команду, чтобы не выполнять ее повторно
-        self.state_manager.clear_command()
-      # --- КОНЕЦ НОВОГО БЛОКА ---
-
-        if command_name == 'generate_report':
-          if self.retraining_manager:
-            self.retraining_manager.export_performance_report()
-
-
-        elif command_name == 'update_ml_models':
-          # Обновляем состояние ML моделей
-          ml_state = self.state_manager.get_custom_data('ml_models_state')
-          if ml_state:
-            self.use_enhanced_ml = ml_state.get('use_enhanced_ml', True)
-            self.use_base_ml = ml_state.get('use_base_ml', True)
-            logger.info(f"ML модели обновлены: Enhanced={self.use_enhanced_ml}, Base={self.use_base_ml}")
-
-        elif command_name == 'update_strategies':
-          # Обновляем активные стратегии
-          active_strategies = self.state_manager.get_custom_data('active_strategies')
-          if active_strategies and hasattr(self, 'adaptive_selector'):
-            for strategy_name, is_active in active_strategies.items():
-              self.adaptive_selector.active_strategies[strategy_name] = is_active
-            logger.info(f"Стратегии обновлены: {active_strategies}")
-
-        elif command_name == 'retrain_model':
-          # Запускаем переобучение
-          if self.retraining_manager:
-            asyncio.create_task(self.retraining_manager.retrain_model(
-              self.active_symbols, timeframe=Timeframe.ONE_HOUR
-            ))
-            logger.info("Запущено переобучение модели")
+  # async def _monitoring_loop(self):
+  #   """
+  #   Главный цикл, управляющий всей логикой.
+  #   """
+  #   await self.position_manager.load_open_positions()
+  #   while self.is_running:
+  #     logger.info("--- Начало нового цикла мониторинга ---")
+  #     await self.update_account_balance()
+  #     if self.account_balance:
+  #       self.state_manager.update_metrics(self.account_balance)
+  #
+  #     # Управляем открытыми позициями
+  #     await self.position_manager.manage_open_positions(self.account_balance)
+  #     # Сверяем закрытые сделки
+  #     await self.position_manager.reconcile_filled_orders()
+  #     # Обновляем состояние для дашборда
+  #     self.state_manager.update_open_positions(self.position_manager.open_positions)
+  #
+  #     # Проверяем сигналы в ожидании
+  #     pending_signals = self.state_manager.get_pending_signals()
+  #     if pending_signals:
+  #       tasks = [self._check_pending_signal_for_entry(s) for s in pending_signals.keys()]
+  #       await asyncio.gather(*tasks)
+  #
+  #     # Ищем новые сигналы
+  #     open_and_pending = set(self.position_manager.open_positions.keys()) | set(pending_signals.keys())
+  #     symbols_for_new_search = [s for s in self.active_symbols if s not in open_and_pending]
+  #
+  #     if symbols_for_new_search:
+  #       use_enhanced = self.config.get('ml_settings', {}).get('use_enhanced_processing', True)
+  #       if use_enhanced and self.enhanced_ml_model:
+  #         tasks = [self._monitor_symbol_for_entry_enhanced(symbol) for symbol in symbols_for_new_search]
+  #       else:
+  #         tasks = [self._monitor_symbol_for_entry(symbol) for symbol in symbols_for_new_search]
+  #       await asyncio.gather(*tasks)
+  #
+  #     # --- НОВЫЙ БЛОК: ПРОВЕРКА КОМАНД ИЗ ДАШБОРДА ---
+  #     command_data = self.state_manager.get_command()
+  #     if command_data:
+  #       command_name = command_data.get('name')
+  #       logger.info(f"Получена новая команда из дашборда: {command_name}")
+  #
+  #       # Очищаем команду, чтобы не выполнять ее повторно
+  #       self.state_manager.clear_command()
+  #     # --- КОНЕЦ НОВОГО БЛОКА ---
+  #
+  #       if command_name == 'generate_report':
+  #         if self.retraining_manager:
+  #           self.retraining_manager.export_performance_report()
+  #
+  #
+  #       elif command_name == 'update_ml_models':
+  #         # Обновляем состояние ML моделей
+  #         ml_state = self.state_manager.get_custom_data('ml_models_state')
+  #         if ml_state:
+  #           self.use_enhanced_ml = ml_state.get('use_enhanced_ml', True)
+  #           self.use_base_ml = ml_state.get('use_base_ml', True)
+  #           logger.info(f"ML модели обновлены: Enhanced={self.use_enhanced_ml}, Base={self.use_base_ml}")
+  #
+  #       elif command_name == 'update_strategies':
+  #         # Обновляем активные стратегии
+  #         active_strategies = self.state_manager.get_custom_data('active_strategies')
+  #         if active_strategies and hasattr(self, 'adaptive_selector'):
+  #           for strategy_name, is_active in active_strategies.items():
+  #             self.adaptive_selector.active_strategies[strategy_name] = is_active
+  #           logger.info(f"Стратегии обновлены: {active_strategies}")
+  #
+  #       elif command_name == 'retrain_model':
+  #         # Запускаем переобучение
+  #         if self.retraining_manager:
+  #           asyncio.create_task(self.retraining_manager.retrain_model(
+  #             self.active_symbols, timeframe=Timeframe.ONE_HOUR
+  #           ))
+  #           logger.info("Запущено переобучение модели")
 
 
   async def _prepare_signal_metadata(self, symbol: str, signal: TradingSignal, data: pd.DataFrame) -> Dict[str, Any]:
@@ -1991,23 +1991,36 @@ class IntegratedTradingSystem:
 
   async def periodic_regime_analysis(self):
     """Периодический анализ и экспорт статистики режимов"""
+    # Ждем немного перед первым запуском
+    await asyncio.sleep(300)  # 5 минут
+
     while self.is_running:
       try:
-        await asyncio.sleep(3600 * 4)  # Каждые 4 часа
-
         # Экспортируем статистику
         await self.export_regime_statistics()
 
-        # Анализируем эффективность режимов
-        for symbol in self.active_symbols:
+        # Анализируем эффективность режимов для топ-50 символов
+        symbols_to_analyze = self.active_symbols[:50]  # Ограничиваем для производительности
+
+        for symbol in symbols_to_analyze:
+          if not self.is_running:  # Проверка на остановку
+            break
+
           stats = self.market_regime_detector.get_regime_statistics(symbol)
           if stats and stats.get('total_observations', 0) > 100:
             logger.info(f"Статистика режимов для {symbol}:")
             logger.info(f"  Распределение: {stats.get('regime_distribution')}")
             logger.info(f"  Средние метрики: {stats.get('average_metrics')}")
 
+        # Ждем 4 часа до следующего анализа
+        await asyncio.sleep(3600 * 4)
+
+      except asyncio.CancelledError:
+        logger.info("Периодический анализ режимов остановлен")
+        break
       except Exception as e:
         logger.error(f"Ошибка периодического анализа режимов: {e}")
+        await asyncio.sleep(600)  # При ошибке ждем 10 минут
 
 
   # async def start(self):
@@ -2079,44 +2092,82 @@ class IntegratedTradingSystem:
 
 
   async def stop(self):
+    """Корректная остановка всех компонентов системы"""
     if not self.is_running:
       logger.warning("Система не запущена.")
       return
 
+    logger.info("Инициирована остановка торговой системы...")
     self.is_running = False
-    # ++ СООБЩАЕМ, ЧТО БОТ ОСТАНОВЛЕН ++
-    self.state_manager.set_status('stopped')
-    logger.info("Остановка торговой системы...")
 
-    if self._correlation_task and not self._correlation_task.done():
-      self._correlation_task.cancel()
-      with suppress(asyncio.CancelledError):
-        await self._correlation_task
+    # Список всех задач для остановки
+    tasks_to_cancel = []
 
-    # Отменяем все задачи мониторинга
-    if self._monitoring_task:
-      self._monitoring_task.cancel()
-      try:
-        await self._monitoring_task
-      except asyncio.CancelledError:
-        logger.info("Цикл мониторинга успешно отменен.")
+    # Собираем все активные задачи
+    if hasattr(self, '_monitoring_task') and self._monitoring_task:
+      tasks_to_cancel.append(self._monitoring_task)
 
-    if self._retraining_task:
-      # Вызываем новый метод stop_scheduled_retraining
-      self.retraining_manager.stop_scheduled_retraining()  # <--- УБЕДИТЕСЬ, ЧТО ВЫЗОВ ВЫГЛЯДИТ ТАК
-      self._retraining_task.cancel()
-      with suppress(asyncio.CancelledError):
-        await self._retraining_task
+    if hasattr(self, '_fast_monitoring_task') and self._fast_monitoring_task:
+      tasks_to_cancel.append(self._fast_monitoring_task)
 
-    if self._evaluation_task:
-      self._evaluation_task.cancel()
-      with suppress(asyncio.CancelledError):
-        await self._evaluation_task
+    if hasattr(self, '_retraining_task') and self._retraining_task:
+      tasks_to_cancel.append(self._retraining_task)
 
-    if self._time_sync_task:
-      self._time_sync_task.cancel()
-      with suppress(asyncio.CancelledError):
-        await self._time_sync_task
+    if hasattr(self, '_time_sync_task') and self._time_sync_task:
+      tasks_to_cancel.append(self._time_sync_task)
+
+    if hasattr(self, '_time_sync_loop_task') and self._time_sync_loop_task:
+      tasks_to_cancel.append(self._time_sync_loop_task)
+
+    if hasattr(self, '_cache_cleanup_task') and self._cache_cleanup_task:
+      tasks_to_cancel.append(self._cache_cleanup_task)
+
+    if hasattr(self, '_correlation_task') and self._correlation_task:
+      tasks_to_cancel.append(self._correlation_task)
+
+    if hasattr(self, '_evaluation_task') and self._evaluation_task:
+      tasks_to_cancel.append(self._evaluation_task)
+
+    if hasattr(self, '_regime_analysis_task') and self._regime_analysis_task:
+      tasks_to_cancel.append(self._regime_analysis_task)
+    # if not self.is_running:
+    #   logger.warning("Система не запущена.")
+    #   return
+    #
+    # self.is_running = False
+    # # ++ СООБЩАЕМ, ЧТО БОТ ОСТАНОВЛЕН ++
+    # self.state_manager.set_status('stopped')
+    # logger.info("Остановка торговой системы...")
+    #
+    # if self._correlation_task and not self._correlation_task.done():
+    #   self._correlation_task.cancel()
+    #   with suppress(asyncio.CancelledError):
+    #     await self._correlation_task
+    #
+    # # Отменяем все задачи мониторинга
+    # if self._monitoring_task:
+    #   self._monitoring_task.cancel()
+    #   try:
+    #     await self._monitoring_task
+    #   except asyncio.CancelledError:
+    #     logger.info("Цикл мониторинга успешно отменен.")
+    #
+    # if self._retraining_task:
+    #   # Вызываем новый метод stop_scheduled_retraining
+    #   self.retraining_manager.stop_scheduled_retraining()  # <--- УБЕДИТЕСЬ, ЧТО ВЫЗОВ ВЫГЛЯДИТ ТАК
+    #   self._retraining_task.cancel()
+    #   with suppress(asyncio.CancelledError):
+    #     await self._retraining_task
+    #
+    # if self._evaluation_task:
+    #   self._evaluation_task.cancel()
+    #   with suppress(asyncio.CancelledError):
+    #     await self._evaluation_task
+    #
+    # if self._time_sync_task:
+    #   self._time_sync_task.cancel()
+    #   with suppress(asyncio.CancelledError):
+    #     await self._time_sync_task
 
     if self.shadow_trading:
       try:
@@ -2143,14 +2194,30 @@ class IntegratedTradingSystem:
       except Exception as e:
         logger.error(f"Ошибка остановки Shadow Trading: {e}")
 
-    # Закрываем соединения коннектора
-    if self.connector:
-      await self.connector.close()
+    # # Закрываем соединения коннектора
+    # if self.connector:
+    #   await self.connector.close()
     # Экспортируем финальную статистику
     if hasattr(self, 'adaptive_selector'):
       self.adaptive_selector.export_adaptation_history(
         f"logs/final_adaptation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
       )
+    # Отменяем все задачи
+    for task in tasks_to_cancel:
+      if not task.done():
+        task.cancel()
+
+    # Ждем завершения всех задач
+    if tasks_to_cancel:
+      await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+    # Обновляем состояние
+    self.state_manager.set_status('stopped')
+
+    # Закрываем соединения
+    if hasattr(self.db_manager, 'close'):
+      await self.db_manager.close()
+
 
     logger.info("Торговая система остановлена.")
 
@@ -2709,10 +2776,22 @@ class IntegratedTradingSystem:
     monitoring_interval = self.config.get('general_settings', {}).get('monitoring_interval_seconds', 60)
     batch_size = 5  # Обрабатываем символы батчами
 
+    # Счетчики для отслеживания
+    cycle_count = 0
+    last_activity_time = datetime.now()
+
     await self.position_manager.load_open_positions()
 
     while self.is_running:
       try:
+        cycle_start_time = datetime.now()
+        cycle_count += 1
+
+        # Проверка на зависание
+        if (datetime.now() - last_activity_time).seconds > 300:  # 5 минут
+          logger.warning("Обнаружено возможное зависание, перезагружаем позиции")
+          await self.position_manager.load_open_positions()
+
         # Обновляем баланс один раз за цикл
         await self.update_account_balance()
         # Обновляем метрики баланса для дашборда
@@ -2720,7 +2799,7 @@ class IntegratedTradingSystem:
           self.state_manager.update_metrics(self.account_balance)
 
         # Управляем открытыми позициями
-        await self.position_manager.manage_open_positions(self.account_balance)
+
         await self._update_dashboard_metrics()
 
 
@@ -2916,6 +2995,9 @@ class IntegratedTradingSystem:
     Быстрый цикл для частого мониторинга открытых позиций.
     Проверяет критические условия выхода каждые 5-10 секунд.
     """
+    # Ждем немного перед началом, чтобы основной цикл успел инициализироваться
+    await asyncio.sleep(5)
+
     while self.is_running:
       try:
         if self.position_manager.open_positions:
@@ -2937,6 +3019,9 @@ class IntegratedTradingSystem:
         # Ждем перед следующей проверкой
         await asyncio.sleep(5)  # Проверка каждые 5 секунд
 
+      except asyncio.CancelledError:
+        logger.info("Быстрый цикл мониторинга отменен")
+        break
       except Exception as e:
         logger.error(f"Ошибка в быстром цикле мониторинга: {e}", exc_info=True)
         await asyncio.sleep(10)
@@ -3180,12 +3265,18 @@ class IntegratedTradingSystem:
     while self.is_running:
       try:
         await asyncio.sleep(3600)  # Каждый час
+
+        logger.info("Начало периодической синхронизации времени...")
         await self.connector.sync_time()
-        logger.debug("Выполнена периодическая синхронизация времени")
+        logger.info("✅ Синхронизация времени завершена успешно")
+
       except asyncio.CancelledError:
+        logger.info("Периодическая синхронизация времени отменена")
         break
       except Exception as e:
         logger.error(f"Ошибка при синхронизации времени: {e}")
+        # Продолжаем работу даже при ошибке
+        await asyncio.sleep(60)  # Подождем минуту перед следующей попыткой
 
   async def start_optimized(self):
     """
@@ -3267,42 +3358,46 @@ class IntegratedTradingSystem:
       # Запуск фоновых задач
       self.is_running = True
 
-      # Оптимизированный мониторинг
+      # Обновляем статус
+      self.state_manager.set_status('running')
+
+      logger.info("Запускаем фоновые задачи...")
+
+      # 1. Основной оптимизированный мониторинг
       self._monitoring_task = asyncio.create_task(self._monitoring_loop_optimized())
+      logger.info("✅ Запущен основной цикл мониторинга")
+
+      # 2. Быстрый мониторинг позиций
       self._fast_monitoring_task = asyncio.create_task(self._fast_position_monitoring_loop())
+      logger.info("✅ Запущен быстрый цикл мониторинга позиций")
 
-      # Ждем завершения любого из циклов
-      done, pending = await asyncio.wait(
-        [self._monitoring_task, self._fast_monitoring_task],
-        return_when=asyncio.FIRST_COMPLETED
-      )
-
-      # Отменяем оставшиеся задачи
-      for task in pending:
-        task.cancel()
-        try:
-          await task
-        except asyncio.CancelledError:
-          pass
-
-      # Периодическое переобучение моделей
+      # 3. Периодическое переобучение моделей
       self._retraining_task = asyncio.create_task(self._periodic_retraining())
+      logger.info("✅ Запущено периодическое переобучение")
 
-      # Периодическая синхронизация времени
+      # 4. Периодическая синхронизация времени
       self._time_sync_task = asyncio.create_task(self._periodic_time_sync())
-
-      # Дополнительная задача синхронизации для совместимости
       self._time_sync_loop_task = asyncio.create_task(self._time_sync_loop())
+      logger.info("✅ Запущена синхронизация времени")
 
-      # Периодическая очистка кэшей
+      # 5. Периодическая очистка кэшей
       self._cache_cleanup_task = asyncio.create_task(self.cleanup_caches())
+      logger.info("✅ Запущена очистка кэшей")
 
+      # 6. Обновление корреляций портфеля
       self._correlation_task = asyncio.create_task(self._update_portfolio_correlations())
+      logger.info("✅ Запущено обновление корреляций")
 
-      # Запускаем периодическую оценку стратегий
+      # 7. Периодическая оценка стратегий
       self._evaluation_task = asyncio.create_task(self.periodic_strategy_evaluation())
+      logger.info("✅ Запущена оценка стратегий")
 
-      # await self.periodic_regime_analysis()
+      # 8. Периодический анализ режимов рынка
+      self._regime_analysis_task = asyncio.create_task(self.periodic_regime_analysis())
+      logger.info("✅ Запущен периодический анализ режимов рынка")
+
+      logger.info("🚀 Все фоновые задачи успешно запущены")
+
 
       # Обновление статуса
       self.state_manager.set_status('running', os.getpid())
@@ -3917,6 +4012,10 @@ class IntegratedTradingSystem:
   def _save_ml_feedback(self, feedback_data: Dict[str, Any]):
     """Сохраняет обратную связь для ML моделей"""
     try:
+      if not hasattr(self.db_manager, 'pool') or not self.db_manager.pool._initialized:
+        logger.warning("Пул соединений БД не инициализирован для сохранения ML feedback")
+        return
+
       # Создаем таблицу если не существует
       self.db_manager.conn.execute("""
               CREATE TABLE IF NOT EXISTS ml_feedback (
@@ -3952,7 +4051,8 @@ class IntegratedTradingSystem:
   async def _adapt_risk_parameters(self, symbol: str, trade_result: Dict[str, Any]):
     """Адаптирует параметры риска на основе результатов"""
     # Анализируем результаты последних N сделок
-    recent_trades = self.db_manager.get_recent_closed_trades(symbol, limit=20)
+    all_recent_trades = await self.db_manager.get_recent_closed_trades(limit=50)
+    recent_trades = [t for t in all_recent_trades if t.get('symbol') == symbol][:20]
 
     if len(recent_trades) >= 10:
       wins = sum(1 for t in recent_trades if t['profit_loss'] > 0)
@@ -4078,4 +4178,28 @@ class IntegratedTradingSystem:
 
       except Exception as e:
         logger.error(f"Ошибка периодической проверки ROI: {e}")
+
+  async def _handle_generate_report(self):
+    """Обработка команды генерации отчета"""
+    try:
+      logger.info("Генерация отчета по запросу из дашборда...")
+      # Здесь логика генерации отчета
+      if hasattr(self, 'shadow_trading') and self.shadow_trading:
+        from main import generate_shadow_trading_reports
+        await generate_shadow_trading_reports(self)
+    except Exception as e:
+      logger.error(f"Ошибка генерации отчета: {e}")
+
+  async def _handle_retrain_model(self):
+    """Обработка команды переобучения модели"""
+    try:
+      logger.info("Запуск переобучения модели по запросу из дашборда...")
+      if self.retraining_manager:
+        # Запускаем переобучение для топ символов
+        top_symbols = self.active_symbols[:50]
+        asyncio.create_task(
+          self.retraining_manager.check_and_retrain_if_needed(top_symbols)
+        )
+    except Exception as e:
+      logger.error(f"Ошибка запуска переобучения: {e}")
 

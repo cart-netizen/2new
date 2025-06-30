@@ -162,8 +162,36 @@ class SignalTracker:
         logger.error(f"Ошибка в пакетном процессоре: {e}")
         await asyncio.sleep(1)
 
-  async def _process_batch(self, batch: List[Dict]):
-    """Обработка пакета операций"""
+  # async def _process_batch(self, batch: List[Dict]):
+  #   """Обработка пакета операций"""
+  #   if not batch:
+  #     return
+  #
+  #   try:
+  #     # Группируем операции по типу
+  #     inserts = []
+  #     updates = []
+  #
+  #     for operation in batch:
+  #       if operation['type'] == 'insert':
+  #         inserts.append(operation)
+  #       elif operation['type'] == 'update':
+  #         updates.append(operation)
+  #
+  #     # Пакетная вставка
+  #     if inserts:
+  #       await self._batch_insert_signals(inserts)
+  #
+  #     # Пакетное обновление
+  #     if updates:
+  #       await self._batch_update_signals(updates)
+  #
+  #     logger.debug(f"Обработан пакет: {len(inserts)} вставок, {len(updates)} обновлений")
+  #
+  #   except Exception as e:
+  #     logger.error(f"Ошибка обработки пакета операций: {e}")
+  async def _process_batch(self, batch: List):
+    """Обработка пакета операций с правильной обработкой типов"""
     if not batch:
       return
 
@@ -173,10 +201,30 @@ class SignalTracker:
       updates = []
 
       for operation in batch:
-        if operation['type'] == 'insert':
-          inserts.append(operation)
-        elif operation['type'] == 'update':
-          updates.append(operation)
+        # Обрабатываем разные форматы операций
+        if isinstance(operation, tuple) and len(operation) >= 2:
+          # Формат: (operation_type, data)
+          op_type = operation[0]
+          op_data = operation[1]
+
+          if op_type == 'save_signal':
+            inserts.append({
+              'type': 'insert',
+              'analysis': op_data
+            })
+          elif op_type == 'update_signal':
+            updates.append({
+              'type': 'update',
+              'analysis': op_data
+            })
+        elif isinstance(operation, dict):
+          # Новый формат с явным типом
+          if operation.get('type') == 'insert':
+            inserts.append(operation)
+          elif operation.get('type') == 'update':
+            updates.append(operation)
+        else:
+          logger.warning(f"Неизвестный формат операции: {type(operation)}")
 
       # Пакетная вставка
       if inserts:
@@ -190,6 +238,17 @@ class SignalTracker:
 
     except Exception as e:
       logger.error(f"Ошибка обработки пакета операций: {e}")
+      # При ошибке пытаемся обработать каждую операцию отдельно
+      for operation in batch:
+        try:
+          if isinstance(operation, tuple) and operation[0] == 'save_signal':
+            await self._direct_save_signal(operation[1])
+          elif isinstance(operation, dict) and operation.get('type') == 'insert':
+            await self._direct_save_signal(operation['analysis'])
+        except Exception as individual_error:
+          logger.error(f"Ошибка обработки отдельной операции: {individual_error}")
+
+
 
   async def _batch_insert_signals(self, insert_operations: List[Dict]):
     """Пакетная вставка сигналов"""
@@ -1185,39 +1244,52 @@ class PerformanceAnalyzer:
     except Exception as e:
       logger.warning(f"Ошибка анализа упущенной возможности: {e}")
 
-  async def get_hourly_performance(self, days: int = 30) -> Dict[int, Dict[str, float]]:
-    """Производительность по часам суток"""
+  async def get_hourly_performance(self, days: int = 7) -> Dict[int, Dict[str, Any]]:
+    """Анализ производительности по часам дня"""
     try:
       cutoff_date = datetime.now() - timedelta(days=days)
 
       query = """
-            SELECT 
-                CAST(strftime('%H', entry_time) AS INTEGER) as hour,
-                COUNT(*) as total_signals,
-                COUNT(CASE WHEN outcome = 'profitable' THEN 1 END) as profitable_signals,
-                AVG(CASE WHEN outcome IN ('profitable', 'loss') THEN profit_loss_pct END) as avg_return
-            FROM signal_analysis 
-            WHERE entry_time >= ? AND outcome IN ('profitable', 'loss')
-            GROUP BY hour
-            ORDER BY hour
-        """
+        SELECT 
+          CAST(strftime('%H', entry_time) AS INTEGER) as hour,
+          COUNT(*) as total,
+          COUNT(CASE WHEN outcome = 'profitable' THEN 1 END) as profitable,
+          COUNT(CASE WHEN outcome = 'loss' THEN 1 END) as losses,
+          AVG(CASE WHEN outcome = 'profitable' THEN profit_loss_pct END) as avg_win_pct,
+          AVG(CASE WHEN outcome = 'loss' THEN profit_loss_pct END) as avg_loss_pct
+        FROM signal_analysis
+        WHERE entry_time >= ? AND outcome IN ('profitable', 'loss')
+        GROUP BY hour
+        ORDER BY hour
+      """
 
       results = await self.db_manager._execute(query, (cutoff_date,), fetch='all')
 
-      hourly_performance = {}
-      for row in results:
-        hour = row['hour']
-        total = row['total_signals']
-        profitable = row['profitable_signals'] or 0
-        win_rate = (profitable / total * 100) if total > 0 else 0
+      hourly_stats = {}
+      if results:
+        for row in results:
+          # Правильно извлекаем hour из словаря или кортежа
+          if isinstance(row, dict):
+            hour = row.get('hour', 0)
+          else:
+            hour = row[0] if row else 0
 
-        hourly_performance[hour] = {
-          'total_signals': total,
-          'win_rate_pct': round(win_rate, 2),
-          'avg_return_pct': round(row['avg_return'] or 0, 2)
-        }
+          completed = (row.get('profitable', 0) if isinstance(row, dict) else row[2]) + \
+                      (row.get('losses', 0) if isinstance(row, dict) else row[3])
 
-      return hourly_performance
+          win_rate = 0
+          if completed > 0:
+            profitable = row.get('profitable', 0) if isinstance(row, dict) else row[2]
+            win_rate = (profitable / completed) * 100
+
+          hourly_stats[hour] = {
+            'total_signals': row.get('total', 0) if isinstance(row, dict) else row[1],
+            'win_rate_pct': round(win_rate, 1),
+            'avg_win_pct': round(row.get('avg_win_pct', 0) if isinstance(row, dict) else (row[4] or 0), 2),
+            'avg_loss_pct': round(row.get('avg_loss_pct', 0) if isinstance(row, dict) else (row[5] or 0), 2)
+          }
+
+      return hourly_stats
 
     except Exception as e:
       logger.error(f"Ошибка анализа по часам: {e}")

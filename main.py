@@ -125,25 +125,34 @@ async def main():
     # Запускаем отчеты в фоне
     asyncio.create_task(periodic_shadow_reports())
 
-    # Основной цикл торговли
+    # Основной цикл мониторинга состояния
     report_counter = 0
     while not stop_event.is_set() and trading_system.is_running:
-      trading_system.display_balance()
-      trading_system.display_active_symbols()
+      # Основная работа происходит в фоновых задачах (_monitoring_loop_optimized и _fast_position_monitoring_loop)
+      # Здесь только выводим статус каждую минуту
+
+      if report_counter % 5 == 0:  # Каждые 5 минут
+        trading_system.display_balance()
+        trading_system.display_active_symbols()
 
       # Выводим статистику производительности
       if hasattr(trading_system, '_monitoring_cycles') and trading_system._monitoring_cycles % 10 == 0:
         await trading_system._log_performance_stats()
-      # Периодический отчет Shadow Trading (каждые 30 минут)
-      report_counter += 1
+
+      # Периодический отчет Shadow Trading
       if report_counter % 30 == 0:  # Каждые 30 минут
-        await generate_shadow_trading_reports(trading_system)
+        try:
+          await generate_shadow_trading_reports(trading_system)
+        except Exception as e:
+          logger.error(f"Ошибка генерации отчета: {e}")
 
+      report_counter += 1
 
+      # Ждем 60 секунд или сигнал остановки
       try:
         await asyncio.wait_for(stop_event.wait(), timeout=60)
       except asyncio.TimeoutError:
-        pass
+        continue  # Продолжаем цикл
 
   except asyncio.CancelledError:
     logger.info("Основная задача была отменена.")

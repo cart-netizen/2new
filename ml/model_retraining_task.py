@@ -13,7 +13,7 @@ from dataclasses import dataclass, asdict
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
-from aiogram.dispatcher.middlewares import manager
+# from aiogram.dispatcher.middlewares import manager
 from logger_setup import setup_logging
 from core.enums import Timeframe
 from data.database_manager import AdvancedDatabaseManager

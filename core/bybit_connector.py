@@ -6,6 +6,7 @@ import time
 import json
 import asyncio
 from collections import defaultdict
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 import aiohttp
@@ -429,7 +430,7 @@ class BybitConnector:
     }
     return (await self._make_request('GET', endpoint, params, use_cache=True) or {}).get('list', [])
 
-  async def get_kline_batch(self, symbols: List[str], interval: str, limit: int = 200) -> Dict[str, List]:
+  async def get_kline_batch(self, symbols: List[str], interval: str, limit: int = 200) -> dict[str, BaseException]:
     """Получает свечи для нескольких символов параллельно"""
     tasks = []
     for symbol in symbols:
@@ -540,3 +541,35 @@ class BybitConnector:
 
     logger.info(f"Получено {len(all_instruments)} инструментов категории {category}")
     return all_instruments
+
+
+
+  async def fetch_ticker(self, symbol: str) -> Optional[Dict]:
+      """Получает текущие данные по тикеру"""
+      try:
+        endpoint = "/v5/market/tickers"
+        params = {
+          'category': 'linear',
+          'symbol': symbol
+        }
+
+        result = await self._make_request('GET', endpoint, params, use_cache=True)
+
+        if result and result.get('list') and len(result['list']) > 0:
+          ticker = result['list'][0]
+          return {
+            'symbol': ticker.get('symbol'),
+            'last': float(ticker.get('lastPrice', 0)),
+            'bid': float(ticker.get('bid1Price', 0)),
+            'ask': float(ticker.get('ask1Price', 0)),
+            'high': float(ticker.get('highPrice24h', 0)),
+            'low': float(ticker.get('lowPrice24h', 0)),
+            'volume': float(ticker.get('volume24h', 0)),
+            'timestamp': datetime.now()
+          }
+
+        return None
+
+      except Exception as e:
+        logger.error(f"Ошибка получения тикера {symbol}: {e}")
+        return None

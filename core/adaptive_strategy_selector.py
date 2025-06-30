@@ -178,56 +178,137 @@ class AdaptiveStrategySelector:
     except Exception as e:
       logger.error(f"Ошибка загрузки исторической производительности: {e}")
 
-  def update_strategy_performance(self, strategy_name: str, trade_result: Dict[str, Any]):
-    """Обновляет производительность стратегии после закрытия сделки"""
+  # def update_strategy_performance(self, strategy_name: str, trade_result: Dict[str, Any]):
+  async def update_strategy_performance(self, strategy_name: str, is_profitable: bool,
+                                          profit_amount: float, symbol: str = None):
+    """Обновляет производительность стратегии после закрытия сделки
+        Args:
+        strategy_name: Название стратегии
+        is_profitable: Прибыльная ли была сделка
+        profit_amount: Сумма прибыли/убытка (абсолютное значение)
+        symbol: Символ (опционально, для детальной статистики)
+
+
+    """
     try:
+      # Создаем запись если стратегия новая
       if strategy_name not in self.strategy_performance:
         self.strategy_performance[strategy_name] = StrategyPerformance(strategy_name)
 
       perf = self.strategy_performance[strategy_name]
-      profit_loss = trade_result.get('profit_loss', 0)
+      perf.total_trades += 1
 
       # Обновляем базовые метрики
-      perf.total_trades += 1
-      if profit_loss > 0:
+      if is_profitable:
         perf.winning_trades += 1
-        perf.total_profit += profit_loss
+        perf.total_profit += profit_amount
       else:
         perf.losing_trades += 1
-        perf.total_loss += abs(profit_loss)
+        perf.total_loss += profit_amount
 
-      # Добавляем в recent_trades
-      perf.recent_trades.append({
-        'profit': profit_loss,
+      # Определяем текущий режим рынка если возможно
+      current_regime = 'unknown'
+      if symbol and hasattr(self, 'market_regime_detector'):
+        try:
+          # Пытаемся получить последний известный режим для символа
+          if hasattr(self.market_regime_detector, 'get_current_regime'):
+            regime_info = self.market_regime_detector.get_current_regime(symbol)
+            if regime_info:
+              current_regime = str(regime_info)
+        except:
+          pass
+
+      # Добавляем в recent_trades для скользящего окна
+      trade_data = {
+        'profit': profit_amount if is_profitable else -profit_amount,
         'timestamp': datetime.now(),
-        'regime': trade_result.get('regime', 'unknown')
-      })
+        'symbol': symbol,
+        'regime': current_regime
+      }
+      perf.recent_trades.append(trade_data)
 
       # Обновляем производительность по режимам
-      regime = trade_result.get('regime', 'unknown')
-      if regime not in perf.performance_by_regime:
-        perf.performance_by_regime[regime] = {
-          'trades': 0, 'wins': 0, 'profit': 0
+      if current_regime not in perf.performance_by_regime:
+        perf.performance_by_regime[current_regime] = {
+          'trades': 0,
+          'wins': 0,
+          'profit': 0
         }
 
-      perf.performance_by_regime[regime]['trades'] += 1
-      if profit_loss > 0:
-        perf.performance_by_regime[regime]['wins'] += 1
-      perf.performance_by_regime[regime]['profit'] += profit_loss
+      perf.performance_by_regime[current_regime]['trades'] += 1
+      if is_profitable:
+        perf.performance_by_regime[current_regime]['wins'] += 1
+      perf.performance_by_regime[current_regime]['profit'] += profit_amount if is_profitable else -profit_amount
 
       # Пересчитываем метрики
       perf.update_metrics()
       perf.last_update = datetime.now()
 
-      # Проверяем необходимость адаптации
+      # Проверяем необходимость адаптации весов
       if self._should_adapt_weights(strategy_name):
         self._adapt_strategy_weight(strategy_name)
 
-      logger.info(f"Обновлена производительность {strategy_name}: "
-                  f"WR={perf.win_rate:.2f}, PF={perf.profit_factor:.2f}")
+      # Логируем обновление
+      logger.info(
+        f"Обновлена производительность {strategy_name}: "
+        f"WR={perf.win_rate:.2%}, PF={perf.profit_factor:.2f}, "
+        f"Trades={perf.total_trades}, Режим={current_regime}"
+      )
+
+      # Записываем в историю адаптаций
+      self.adaptation_history.append({
+        'timestamp': datetime.now(),
+        'strategy': strategy_name,
+        'action': 'performance_update',
+        'is_profitable': is_profitable,
+        'amount': profit_amount,
+        'symbol': symbol,
+        'regime': current_regime,
+        'new_win_rate': perf.win_rate,
+        'new_weight': perf.current_weight
+      })
+
+      # Сохраняем в БД если доступна
+      if hasattr(self, 'db_manager') and self.db_manager:
+        try:
+          await self._save_performance_to_db(strategy_name, perf)
+        except Exception as e:
+          logger.error(f"Ошибка сохранения производительности в БД: {e}")
 
     except Exception as e:
-      logger.error(f"Ошибка обновления производительности {strategy_name}: {e}")
+      logger.error(f"Ошибка обновления производительности {strategy_name}: {e}", exc_info=True)
+
+      # Если метода _save_performance_to_db нет, добавить:
+
+  async def _save_performance_to_db(self, strategy_name: str, perf: StrategyPerformance):
+      """Сохраняет метрики производительности в БД"""
+      try:
+        query = """
+            INSERT OR REPLACE INTO strategy_performance 
+            (strategy_name, total_trades, winning_trades, losing_trades, 
+             total_profit, total_loss, win_rate, profit_factor, 
+             current_weight, last_update, performance_by_regime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          """
+
+        params = (
+          strategy_name,
+          perf.total_trades,
+          perf.winning_trades,
+          perf.losing_trades,
+          perf.total_profit,
+          perf.total_loss,
+          perf.win_rate,
+          perf.profit_factor,
+          perf.current_weight,
+          perf.last_update,
+          json.dumps(perf.performance_by_regime)  # Сохраняем как JSON
+        )
+
+        await self.db_manager._execute(query, params)
+
+      except Exception as e:
+        logger.error(f"Ошибка сохранения производительности {strategy_name} в БД: {e}")
 
   def _should_adapt_weights(self, strategy_name: str) -> bool:
     """Проверяет, нужно ли адаптировать вес стратегии"""

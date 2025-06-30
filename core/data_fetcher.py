@@ -378,3 +378,34 @@ class DataFetcher:
       logger.error(f"Ошибка получения цены для {symbol}: {e}")
       return None
 
+  async def preload_market_data_batch(self, symbols: List[str], timeframe: Timeframe, limit: int = 100):
+    """Предзагружает данные для множества символов параллельно."""
+    try:
+      batch_size = 10
+      all_data = {}
+
+      for i in range(0, len(symbols), batch_size):
+        batch = symbols[i:i + batch_size]
+
+        # Параллельно загружаем данные для батча
+        tasks = []
+        for symbol in batch:
+          task = self.get_historical_candles(symbol, timeframe, limit)
+          tasks.append(task)
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for symbol, result in zip(batch, results):
+          if isinstance(result, pd.DataFrame) and not result.empty:
+            all_data[symbol] = result
+          elif isinstance(result, Exception):
+            logger.error(f"Ошибка загрузки данных для {symbol}: {result}")
+
+      logger.info(f"✅ Предзагружены данные для {len(all_data)} из {len(symbols)} символов")
+      return all_data
+
+    except Exception as e:
+      logger.error(f"Ошибка батчевой загрузки данных: {e}")
+      return {}
+
+

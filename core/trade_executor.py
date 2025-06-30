@@ -35,6 +35,30 @@ class TradeExecutor:
     self.pending_orders = {}
     self.shadow_trading = None
 
+    # Инициализируем CCXT exchange если его нет
+    if not hasattr(self.connector, 'exchange') or self.connector.exchange is None:
+      try:
+        import ccxt
+        self.connector.exchange = ccxt.bybit({
+          'apiKey': self.connector.api_key,
+          'secret': self.connector.api_secret,
+          'enableRateLimit': True,
+          'options': {
+            'defaultType': 'linear',  # USDT perpetual
+            'recvWindow': 5000
+          }
+        })
+        logger.info("CCXT exchange инициализирован в TradeExecutor")
+      except Exception as e:
+        logger.error(f"Ошибка инициализации CCXT: {e}")
+
+    self.execution_stats = {
+      'orders_placed': 0,
+      'orders_filled': 0,
+      'orders_failed': 0,
+      'total_slippage': 0.0
+    }
+
     self.execution_stats = {
       'orders_placed': 0,
       'orders_filled': 0,
@@ -183,6 +207,46 @@ class TradeExecutor:
     except Exception as e:
       logger.error(f"Критическая ошибка при исполнении сделки {symbol}: {e}", exc_info=True)
       return False, None
+
+  async def execute_trade_with_smart_pricing(self, signal: TradingSignal, symbol: str, quantity: float) -> Tuple[
+    bool, Optional[Dict]]:
+    """Использует стакан для умного размещения ордеров."""
+    try:
+      # Получаем стакан ордеров
+      order_book = await self.connector.fetch_order_book(symbol, depth=10)
+
+      if order_book and 'bids' in order_book and 'asks' in order_book:
+        best_bid = float(order_book['bids'][0][0]) if order_book['bids'] else 0
+        best_ask = float(order_book['asks'][0][0]) if order_book['asks'] else 0
+
+        # Анализируем дисбаланс объемов
+        total_bid_volume = sum(float(bid[1]) for bid in order_book['bids'][:5])
+        total_ask_volume = sum(float(ask[1]) for ask in order_book['asks'][:5])
+
+        # Корректируем размер позиции на основе ликвидности
+        if total_bid_volume > total_ask_volume * 2:
+          logger.info("Сильное давление покупателей")
+        elif total_ask_volume > total_bid_volume * 2:
+          logger.warning("Сильное давление продавцов, уменьшаем позицию")
+          quantity *= 0.8
+
+        # Используем market order но с информацией о спреде
+        spread = best_ask - best_bid
+        spread_pct = (spread / best_bid) * 100 if best_bid > 0 else 0
+
+        logger.info(f"Стакан {symbol}: bid={best_bid:.4f}, ask={best_ask:.4f}, spread={spread_pct:.3f}%")
+
+        # Если спред слишком широкий, можем отложить исполнение
+        if spread_pct > 0.5:  # Более 0.5%
+          logger.warning(f"Широкий спред {spread_pct:.3f}% для {symbol}, требуется осторожность")
+
+      # Выполняем обычное исполнение с учетом анализа
+      return await self.execute_trade(signal, symbol, quantity)
+
+    except Exception as e:
+      logger.error(f"Ошибка умного размещения: {e}")
+      # Fallback на обычное исполнение
+      return await self.execute_trade(signal, symbol, quantity)
 
   async def close_position(self, symbol: str) -> bool:
     """
@@ -389,107 +453,168 @@ class TradeExecutor:
   #       f"Не найдена открытая сделка в БД с ID {db_trade_id} или OrderID {open_order_id} для {symbol}, или она уже не 'OPEN'.")
   #     return False
 
+  # async def update_trade_status_from_exchange(self, order_id: str, symbol: str):
+  #   """
+  #   Запрашивает статус ордера с биржи и обновляет БД, если ордер исполнен (полностью или частично).
+  #   Этот метод будет вызываться периодически или по событию для ордеров, которые были отправлены на закрытие.
+  #   """
+  #   if not self.connector.exchange:
+  #     logger.error("CCXT exchange не инициализирован для обновления статуса сделки.")
+  #     return
+  #
+  #   try:
+  #     # Получаем информацию об ордере с биржи
+  #     # Bybit требует 'category' в params
+  #     order_info = await self.connector.exchange.fetch_order(order_id, symbol, params={'category': BYBIT_CATEGORY})
+  #     logger.debug(f"Информация об ордере {order_id} ({symbol}) с биржи: {order_info}")
+  #
+  #     if not order_info:
+  #       logger.warning(f"Не удалось получить информацию об ордере {order_id} ({symbol}) с биржи.")
+  #       return
+  #
+  #     order_status = order_info.get('status')  # 'closed' (исполнен), 'open', 'canceled'
+  #
+  #     # Нас интересует ордер, который был ордером на закрытие существующей позиции
+  #     # и он был исполнен ('closed' в терминах CCXT означает filled)
+  #
+  #     db_trade_record = self.db_manager.get_trade_by_order_id(
+  #       order_id)  # Это если order_id - это ID ордера на ОТКРЫТИЕ.
+  #     # Нам нужен механизм связи ордера на закрытие с ордером на открытие.
+  #
+  #     # Допустим, у нас есть ID ордера на ОТКРЫТИЕ, и мы хотим обновить его статус
+  #     # Это более сложная логика, т.к. `order_id` здесь - это ID ордера на ЗАКРЫТИЕ.
+  #     # Нужно найти соответствующую ОТКРЫТУЮ сделку в нашей БД, которую этот ордер закрыл.
+  #     # Это можно сделать, если при закрытии мы сохраняем связь, или по символу и противоположному сайду.
+  #
+  #     # Упрощенный сценарий: мы получили коллбэк, что ордер на закрытие (close_order_id) исполнился.
+  #     # Нам нужно найти исходную сделку (original_open_order_id) и обновить ее.
+  #     # В данном методе `order_id` - это ID ордера, чей статус мы проверяем.
+  #     # Если это ордер на закрытие, и он 'closed' (filled):
+  #     if order_status == 'closed':  # 'filled' в терминах биржи
+  #       filled_price = float(order_info.get('average', order_info.get('price', 0.0)))  # Средняя цена исполнения
+  #       filled_qty = float(order_info.get('filled', 0.0))
+  #       commission_cost = float(order_info.get('fee', {}).get('cost', 0.0)) if order_info.get('fee') else 0.0
+  #       # commission_currency = order_info.get('fee', {}).get('currency')
+  #
+  #       # Теперь нужно найти соответствующую ОТКРЫТУЮ сделку в нашей БД, которую этот ордер закрыл.
+  #       # Это самая сложная часть, если мы не сохранили явную связь.
+  #       # Предположим, что мы закрывали позицию по символу `symbol`.
+  #       # Ищем в БД открытую позицию по этому символу.
+  #       open_trades_in_db = self.db_manager.get_open_positions_from_db()
+  #       target_trade_to_update = None
+  #       for trade in open_trades_in_db:
+  #         if trade['symbol'] == symbol:
+  #           # Если мы закрывали часть позиции, логика усложняется.
+  #           # Для простоты, если этот ордер закрыл количество, равное открытой позиции.
+  #           if abs(filled_qty - trade['quantity']) < 1e-9:  # Сравнение float
+  #             target_trade_to_update = trade
+  #             break
+  #
+  #       if target_trade_to_update:
+  #         original_open_order_id = target_trade_to_update['order_id']
+  #         open_price_db = target_trade_to_update['open_price']
+  #         original_side_db = target_trade_to_update['side']
+  #         original_qty_db = target_trade_to_update['quantity']
+  #
+  #         # Расчет P/L
+  #         pnl = 0
+  #         if original_side_db == 'buy':  # Позиция была лонг, закрыли продажей
+  #           pnl = (filled_price - open_price_db) * original_qty_db
+  #         elif original_side_db == 'sell':  # Позиция была шорт, закрыли покупкой
+  #           pnl = (open_price_db - filled_price) * original_qty_db
+  #
+  #         # PnL с учетом кредитного плеча уже заложен в том, что quantity - это размер контракта.
+  #         # Комиссия вычитается из PnL
+  #         net_pnl = pnl - commission_cost
+  #
+  #         logger.info(f"Ордер на закрытие {order_id} для {symbol} исполнен. "
+  #                     f"Цена закрытия: {filled_price}, Кол-во: {filled_qty}, Комиссия: {commission_cost}. Расчетный P/L: {net_pnl}")
+  #
+  #         await self.db_manager.update_close_trade(
+  #           order_id=original_open_order_id,  # Обновляем запись об исходной сделке
+  #           close_timestamp=datetime.fromtimestamp(order_info['timestamp'] / 1000, tz=timezone.utc) if order_info.get(
+  #             'timestamp') else datetime.now(timezone.utc),
+  #           close_price=filled_price,
+  #           profit_loss=net_pnl,
+  #           commission=commission_cost
+  #         )
+  #       else:
+  #         logger.warning(
+  #           f"Исполнен ордер на закрытие {order_id} ({symbol}), но не найдена соответствующая открытая сделка в БД для обновления.")
+  #     elif order_status in ['open', 'partially_filled']:
+  #       logger.info(f"Ордер {order_id} ({symbol}) все еще активен (статус: {order_status}).")
+  #     elif order_status in ['canceled', 'rejected', 'expired']:
+  #       logger.warning(f"Ордер {order_id} ({symbol}) не был исполнен (статус: {order_status}).")
+  #       # Здесь может потребоваться логика для отмены/обновления в нашей БД, если это был ордер на открытие.
+  #       # Если это был ордер на закрытие, то позиция все еще открыта.
+  #
+  #   except ccxt.OrderNotFound:
+  #     logger.warning(
+  #       f"Ордер {order_id} для символа {symbol} не найден на бирже. Возможно, он был исполнен давно или ID неверен.")
+  #     # Можно проверить, есть ли он в нашей БД как открытый и пометить его как "потерянный" или "ошибка".
+  #   except Exception as e:
+  #     logger.error(f"Ошибка при обновлении статуса ордера {order_id} ({symbol}): {e}", exc_info=True)
+
   async def update_trade_status_from_exchange(self, order_id: str, symbol: str):
     """
-    Запрашивает статус ордера с биржи и обновляет БД, если ордер исполнен (полностью или частично).
-    Этот метод будет вызываться периодически или по событию для ордеров, которые были отправлены на закрытие.
+    Проверяет статус ордера с биржи.
+    Упрощенная версия - просто проверяем статус конкретного ордера.
     """
     if not self.connector.exchange:
-      logger.error("CCXT exchange не инициализирован для обновления статуса сделки.")
+      logger.error("CCXT exchange не инициализирован")
       return
 
     try:
       # Получаем информацию об ордере с биржи
-      # Bybit требует 'category' в params
-      order_info = await self.connector.exchange.fetch_order(order_id, symbol, params={'category': BYBIT_CATEGORY})
-      logger.debug(f"Информация об ордере {order_id} ({symbol}) с биржи: {order_info}")
+      order_info = await self.connector.exchange.fetch_order(
+        order_id, symbol,
+        params={'category': 'linear'}
+      )
 
       if not order_info:
-        logger.warning(f"Не удалось получить информацию об ордере {order_id} ({symbol}) с биржи.")
+        logger.warning(f"Не удалось получить информацию об ордере {order_id}")
         return
 
-      order_status = order_info.get('status')  # 'closed' (исполнен), 'open', 'canceled'
+      order_status = order_info.get('status')  # 'closed', 'open', 'canceled'
 
-      # Нас интересует ордер, который был ордером на закрытие существующей позиции
-      # и он был исполнен ('closed' в терминах CCXT означает filled)
+      # Логируем статус для отладки
+      logger.debug(f"Ордер {order_id} ({symbol}): статус = {order_status}")
 
-      db_trade_record = self.db_manager.get_trade_by_order_id(
-        order_id)  # Это если order_id - это ID ордера на ОТКРЫТИЕ.
-      # Нам нужен механизм связи ордера на закрытие с ордером на открытие.
+      # Если ордер исполнен
+      if order_status == 'closed':
+        filled_price = float(order_info.get('average', order_info.get('price', 0)))
+        filled_qty = float(order_info.get('filled', 0))
 
-      # Допустим, у нас есть ID ордера на ОТКРЫТИЕ, и мы хотим обновить его статус
-      # Это более сложная логика, т.к. `order_id` здесь - это ID ордера на ЗАКРЫТИЕ.
-      # Нужно найти соответствующую ОТКРЫТУЮ сделку в нашей БД, которую этот ордер закрыл.
-      # Это можно сделать, если при закрытии мы сохраняем связь, или по символу и противоположному сайду.
+        logger.info(
+          f"Ордер {order_id} исполнен: цена={filled_price}, кол-во={filled_qty}"
+        )
 
-      # Упрощенный сценарий: мы получили коллбэк, что ордер на закрытие (close_order_id) исполнился.
-      # Нам нужно найти исходную сделку (original_open_order_id) и обновить ее.
-      # В данном методе `order_id` - это ID ордера, чей статус мы проверяем.
-      # Если это ордер на закрытие, и он 'closed' (filled):
-      if order_status == 'closed':  # 'filled' в терминах биржи
-        filled_price = float(order_info.get('average', order_info.get('price', 0.0)))  # Средняя цена исполнения
-        filled_qty = float(order_info.get('filled', 0.0))
-        commission_cost = float(order_info.get('fee', {}).get('cost', 0.0)) if order_info.get('fee') else 0.0
-        # commission_currency = order_info.get('fee', {}).get('currency')
+        # Дальнейшая обработка должна происходить в reconcile_filled_orders
+        # который проверяет позиции и обновляет БД
 
-        # Теперь нужно найти соответствующую ОТКРЫТУЮ сделку в нашей БД, которую этот ордер закрыл.
-        # Это самая сложная часть, если мы не сохранили явную связь.
-        # Предположим, что мы закрывали позицию по символу `symbol`.
-        # Ищем в БД открытую позицию по этому символу.
-        open_trades_in_db = self.db_manager.get_open_positions_from_db()
-        target_trade_to_update = None
-        for trade in open_trades_in_db:
-          if trade['symbol'] == symbol:
-            # Если мы закрывали часть позиции, логика усложняется.
-            # Для простоты, если этот ордер закрыл количество, равное открытой позиции.
-            if abs(filled_qty - trade['quantity']) < 1e-9:  # Сравнение float
-              target_trade_to_update = trade
-              break
-
-        if target_trade_to_update:
-          original_open_order_id = target_trade_to_update['order_id']
-          open_price_db = target_trade_to_update['open_price']
-          original_side_db = target_trade_to_update['side']
-          original_qty_db = target_trade_to_update['quantity']
-
-          # Расчет P/L
-          pnl = 0
-          if original_side_db == 'buy':  # Позиция была лонг, закрыли продажей
-            pnl = (filled_price - open_price_db) * original_qty_db
-          elif original_side_db == 'sell':  # Позиция была шорт, закрыли покупкой
-            pnl = (open_price_db - filled_price) * original_qty_db
-
-          # PnL с учетом кредитного плеча уже заложен в том, что quantity - это размер контракта.
-          # Комиссия вычитается из PnL
-          net_pnl = pnl - commission_cost
-
-          logger.info(f"Ордер на закрытие {order_id} для {symbol} исполнен. "
-                      f"Цена закрытия: {filled_price}, Кол-во: {filled_qty}, Комиссия: {commission_cost}. Расчетный P/L: {net_pnl}")
-
-          await self.db_manager.update_close_trade(
-            order_id=original_open_order_id,  # Обновляем запись об исходной сделке
-            close_timestamp=datetime.fromtimestamp(order_info['timestamp'] / 1000, tz=timezone.utc) if order_info.get(
-              'timestamp') else datetime.now(timezone.utc),
-            close_price=filled_price,
-            profit_loss=net_pnl,
-            commission=commission_cost
-          )
-        else:
-          logger.warning(
-            f"Исполнен ордер на закрытие {order_id} ({symbol}), но не найдена соответствующая открытая сделка в БД для обновления.")
-      elif order_status in ['open', 'partially_filled']:
-        logger.info(f"Ордер {order_id} ({symbol}) все еще активен (статус: {order_status}).")
       elif order_status in ['canceled', 'rejected', 'expired']:
-        logger.warning(f"Ордер {order_id} ({symbol}) не был исполнен (статус: {order_status}).")
-        # Здесь может потребоваться логика для отмены/обновления в нашей БД, если это был ордер на открытие.
-        # Если это был ордер на закрытие, то позиция все еще открыта.
+        logger.warning(f"Ордер {order_id} не исполнен: {order_status}")
+
+        # Если это был ордер на открытие позиции, нужно обновить БД
+        # Находим сделку по order_id
+        trades = await self.db_manager.get_all_open_trades()
+        for trade in trades:
+          if trade.get('order_id') == order_id:
+            # Помечаем как отмененную
+            await self.db_manager.update_trade_as_closed(
+              trade['id'],
+              close_price=0,
+              pnl=0,
+              commission=0,
+              close_timestamp=datetime.now()
+            )
+            logger.info(f"Сделка {trade['id']} помечена как отмененная")
+            break
 
     except ccxt.OrderNotFound:
-      logger.warning(
-        f"Ордер {order_id} для символа {symbol} не найден на бирже. Возможно, он был исполнен давно или ID неверен.")
-      # Можно проверить, есть ли он в нашей БД как открытый и пометить его как "потерянный" или "ошибка".
+      logger.warning(f"Ордер {order_id} не найден на бирже")
     except Exception as e:
-      logger.error(f"Ошибка при обновлении статуса ордера {order_id} ({symbol}): {e}", exc_info=True)
+      logger.error(f"Ошибка проверки статуса ордера {order_id}: {e}", exc_info=True)
 
   async def execute_grid_trade(self, grid_signal: GridSignal) -> bool:
     """

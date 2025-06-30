@@ -356,6 +356,23 @@ class AdvancedDatabaseManager:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+    await self._execute("""
+            CREATE TABLE IF NOT EXISTS strategy_performance (
+                strategy_name TEXT PRIMARY KEY,
+                total_trades INTEGER NOT NULL DEFAULT 0,
+                wins INTEGER NOT NULL DEFAULT 0,
+                losses INTEGER NOT NULL DEFAULT 0,
+                win_rate REAL NOT NULL DEFAULT 0.0,
+                total_pnl REAL NOT NULL DEFAULT 0.0,
+                profit_factor REAL NOT NULL DEFAULT 0.0,
+                average_pnl REAL NOT NULL DEFAULT 0.0,
+                consecutive_wins INTEGER NOT NULL DEFAULT 0,
+                consecutive_losses INTEGER NOT NULL DEFAULT 0,
+                last_updated TEXT NOT NULL,
+                performance_by_regime TEXT
+            )
+            """)
     # Проверяем и добавляем недостающие колонки для существующей таблицы
     async with self.pool.acquire() as conn:
       cursor = await conn.execute("PRAGMA table_info(trades)")

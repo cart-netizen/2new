@@ -2844,14 +2844,14 @@ class IntegratedTradingSystem:
                 logger.error(f"Ошибка в мониторинге: {result}")
 
         # # Управляем открытыми позициями
-        # await self.position_manager.manage_open_positions(self.account_balance)
+        await self.position_manager.manage_open_positions(self.account_balance)
         # Сверяем закрытые сделки
         await self.position_manager.reconcile_filled_orders()
         # Обновляем состояние для дашборда
         self.state_manager.update_open_positions(self.position_manager.open_positions)
 
         if self.sar_strategy:
-          asyncio.create_task(await self.cleanup_sar_cache_task())
+          asyncio.create_task(self.cleanup_sar_cache_task())
           try:
             sar_status = self.sar_strategy.get_strategy_status()
             self.state_manager.set_custom_data('sar_strategy_status', sar_status)
@@ -2859,7 +2859,7 @@ class IntegratedTradingSystem:
             logger.error(f"Ошибка обновления статуса SAR: {e}")
 
         if self.sar_strategy:
-          asyncio.create_task(await self.update_sar_symbols_task())
+          asyncio.create_task(self.update_sar_symbols_task())
 
         if hasattr(self, 'update_signal_outcomes'):
           await self.update_signal_outcomes()

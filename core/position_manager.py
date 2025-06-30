@@ -380,13 +380,15 @@ class PositionManager:
                     logger.error(f"Ошибка синхронизации Shadow Trading: {e}")
                 # --- КОНЕЦ БЛОКА SHADOW TRADING ---
 
-                # Вызываем callback для ML обратной связи
-                if hasattr(self, 'trading_system') and self.trading_system:
-                  await self.trading_system.process_trade_feedback(trade['id'])
+                # # Вызываем callback для ML обратной связи
+                # if hasattr(self, 'trading_system') and self.trading_system:
+                #   await self.trading_system.process_trade_feedback(trade['id'])
+
 
                 integrated_system = getattr(self.trade_executor, 'integrated_system', None)
                 if integrated_system and hasattr(integrated_system, 'process_trade_feedback'):
                   try:
+
                     trade_result = {
                       'strategy_name': trade.get('strategy_name', 'Unknown'),
                       'profit_loss': net_pnl,

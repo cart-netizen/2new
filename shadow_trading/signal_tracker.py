@@ -1244,56 +1244,112 @@ class PerformanceAnalyzer:
     except Exception as e:
       logger.warning(f"Ошибка анализа упущенной возможности: {e}")
 
+  # async def get_hourly_performance(self, days: int = 7) -> Dict[int, Dict[str, Any]]:
+  #   """Анализ производительности по часам дня"""
+  #   try:
+  #     cutoff_date = datetime.now() - timedelta(days=days)
+  #
+  #     query = """
+  #       SELECT
+  #         CAST(strftime('%H', entry_time) AS INTEGER) as hour,
+  #         COUNT(*) as total,
+  #         COUNT(CASE WHEN outcome = 'profitable' THEN 1 END) as profitable,
+  #         COUNT(CASE WHEN outcome = 'loss' THEN 1 END) as losses,
+  #         AVG(CASE WHEN outcome = 'profitable' THEN profit_loss_pct END) as avg_win_pct,
+  #         AVG(CASE WHEN outcome = 'loss' THEN profit_loss_pct END) as avg_loss_pct
+  #       FROM signal_analysis
+  #       WHERE entry_time >= ? AND outcome IN ('profitable', 'loss')
+  #       GROUP BY hour
+  #       ORDER BY hour
+  #     """
+  #
+  #     results = await self.db_manager._execute(query, (cutoff_date,), fetch='all')
+  #
+  #     hourly_stats = {}
+  #     if results:
+  #       for row in results:
+  #         # Правильно извлекаем hour из словаря или кортежа
+  #         if isinstance(row, dict):
+  #           hour = row.get('hour', 0)
+  #         else:
+  #           hour = row[0] if row else 0
+  #
+  #         completed = (row.get('profitable', 0) if isinstance(row, dict) else row[2]) + \
+  #                     (row.get('losses', 0) if isinstance(row, dict) else row[3])
+  #
+  #         win_rate = 0
+  #         if completed > 0:
+  #           profitable = row.get('profitable', 0) if isinstance(row, dict) else row[2]
+  #           win_rate = (profitable / completed) * 100
+  #
+  #         hourly_stats[hour] = {
+  #           'total_signals': row.get('total', 0) if isinstance(row, dict) else row[1],
+  #           'win_rate_pct': round(win_rate, 1),
+  #           'avg_win_pct': round(row.get('avg_win_pct', 0) if isinstance(row, dict) else (row[4] or 0), 2),
+  #           'avg_loss_pct': round(row.get('avg_loss_pct', 0) if isinstance(row, dict) else (row[5] or 0), 2)
+  #         }
+  #
+  #     return hourly_stats
+  #
+  #   except Exception as e:
+  #     logger.error(f"Ошибка анализа по часам: {e}")
+  #     return {}
+
   async def get_hourly_performance(self, days: int = 7) -> Dict[int, Dict[str, Any]]:
-    """Анализ производительности по часам дня"""
+    """
+    Анализ производительности по часам с улучшенной обработкой ошибок.
+    """
+    logger.debug(f"Запрос почасовой производительности за {days} дней.")
     try:
       cutoff_date = datetime.now() - timedelta(days=days)
 
+      # ОБНОВЛЕННЫЙ ЗАПРОС:
+      # 1. Используем COALESCE для всех агрегатных функций, чтобы избежать NULL/None.
+      # 2. Переименовываем 'trade_hour' в 'hour' для консистентности.
       query = """
-        SELECT 
-          CAST(strftime('%H', entry_time) AS INTEGER) as hour,
-          COUNT(*) as total,
-          COUNT(CASE WHEN outcome = 'profitable' THEN 1 END) as profitable,
-          COUNT(CASE WHEN outcome = 'loss' THEN 1 END) as losses,
-          AVG(CASE WHEN outcome = 'profitable' THEN profit_loss_pct END) as avg_win_pct,
-          AVG(CASE WHEN outcome = 'loss' THEN profit_loss_pct END) as avg_loss_pct
-        FROM signal_analysis
-        WHERE entry_time >= ? AND outcome IN ('profitable', 'loss')
-        GROUP BY hour
-        ORDER BY hour
-      """
+            SELECT 
+                CAST(strftime('%H', entry_time) AS INTEGER) as hour,
+                COALESCE(COUNT(*), 0) as total_signals,
+                COALESCE(SUM(CASE WHEN outcome = 'profitable' THEN 1 ELSE 0 END), 0) as profitable_signals,
+                COALESCE(AVG(profit_loss_pct), 0.0) as avg_return_pct
+            FROM signal_analysis
+            WHERE entry_time >= ? AND outcome IN ('profitable', 'loss')
+            GROUP BY hour
+        """
 
-      results = await self.db_manager._execute(query, (cutoff_date,), fetch='all')
+      results = await self.db_manager.execute_query(query, (cutoff_date.isoformat(),))
 
       hourly_stats = {}
       if results:
         for row in results:
-          # Правильно извлекаем hour из словаря или кортежа
-          if isinstance(row, dict):
-            hour = row.get('hour', 0)
-          else:
-            hour = row[0] if row else 0
+          # Добавляем проверку, что row не None и является словарем
+          if not row or not isinstance(row, dict):
+            continue
 
-          completed = (row.get('profitable', 0) if isinstance(row, dict) else row[2]) + \
-                      (row.get('losses', 0) if isinstance(row, dict) else row[3])
+          # Теперь ключ 'hour' будет существовать всегда
+          hour = row.get('hour')
+          if hour is None:
+            continue
 
-          win_rate = 0
-          if completed > 0:
-            profitable = row.get('profitable', 0) if isinstance(row, dict) else row[2]
-            win_rate = (profitable / completed) * 100
+          total = row.get('total_signals', 0)
+          profitable = row.get('profitable_signals', 0)
+
+          # Благодаря COALESCE, avg_return_pct никогда не будет None
+          avg_return = row.get('avg_return_pct', 0.0)
+
+          win_rate = (profitable / total * 100) if total > 0 else 0.0
 
           hourly_stats[hour] = {
-            'total_signals': row.get('total', 0) if isinstance(row, dict) else row[1],
-            'win_rate_pct': round(win_rate, 1),
-            'avg_win_pct': round(row.get('avg_win_pct', 0) if isinstance(row, dict) else (row[4] or 0), 2),
-            'avg_loss_pct': round(row.get('avg_loss_pct', 0) if isinstance(row, dict) else (row[5] or 0), 2)
+            'total_signals': total,
+            'win_rate_pct': round(win_rate, 2),
+            'avg_return_pct': round(avg_return, 4)
           }
 
       return hourly_stats
 
     except Exception as e:
-      logger.error(f"Ошибка анализа по часам: {e}")
-      return {}
+      logger.error(f"Ошибка анализа по часам: {e}", exc_info=True)
+      return {"error": str(e)}
 
   async def get_symbol_performance(self, days: int = 30) -> List[Dict[str, Any]]:
       """Производительность по символам"""

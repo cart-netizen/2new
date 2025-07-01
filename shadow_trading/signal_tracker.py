@@ -443,20 +443,93 @@ class SignalTracker:
   async def ensure_tables_exist(self):
     """Убеждается, что таблицы Shadow Trading существуют"""
     try:
-      # Проверяем существование таблиц через асинхронный запрос
-      check_query = "SELECT name FROM sqlite_master WHERE type='table' AND name='signal_analysis'"
-      result = await self.db_manager._execute(check_query, fetch='one')
+        # Проверяем существование таблиц через асинхронный запрос
+        check_query = "SELECT name FROM sqlite_master WHERE type='table' AND name='signal_analysis'"
+        result = await self.db_manager._execute(check_query, fetch='one')
 
-      if not result:
-        logger.warning("Таблица signal_analysis не найдена, создаем через синхронный метод...")
-        self.setup_database_sync()
-      else:
-        logger.info("✅ Таблицы Shadow Trading уже существуют")
+        if not result:
+            logger.warning("Таблица signal_analysis не найдена, создаем...")
+            # ИСПРАВЛЕНИЕ: Используем правильный асинхронный вызов
+            await self._create_tables_async()
+        else:
+            logger.debug("✅ Таблицы Shadow Trading уже существуют")
 
     except Exception as e:
-      logger.error(f"Ошибка проверки таблиц Shadow Trading: {e}")
-      # Пытаемся создать таблицы синхронно в случае ошибки
-      self.setup_database_sync()
+        logger.error(f"Ошибка проверки таблиц Shadow Trading: {e}")
+        # В случае ошибки пытаемся создать через синхронный метод
+        try:
+            self.setup_database_sync()
+        except Exception as sync_error:
+            logger.error(f"Критическая ошибка создания таблиц: {sync_error}")
+
+  async def _create_tables_async(self):
+    """Асинхронное создание таблиц Shadow Trading"""
+    try:
+      # Таблица для анализа сигналов
+      signal_analysis_query = """
+            CREATE TABLE IF NOT EXISTS signal_analysis (
+                signal_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                signal_type TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                entry_time TIMESTAMP NOT NULL,
+                confidence REAL NOT NULL,
+                source TEXT NOT NULL,
+                indicators_triggered TEXT,
+                ml_prediction_data TEXT,
+                market_regime TEXT,
+                volatility_level TEXT,
+                was_filtered BOOLEAN DEFAULT FALSE,
+                filter_reasons TEXT,
+                outcome TEXT DEFAULT 'pending',
+                exit_price REAL,
+                exit_time TIMESTAMP,
+                profit_loss_pct REAL,
+                profit_loss_usdt REAL,
+                max_favorable_excursion_pct REAL DEFAULT 0.0,
+                max_adverse_excursion_pct REAL DEFAULT 0.0,
+                time_to_target_seconds INTEGER,
+                time_to_max_profit_seconds INTEGER,
+                volume_at_signal REAL DEFAULT 0.0,
+                price_action_score REAL DEFAULT 0.0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """
+
+      # Таблица для отслеживания цен
+      price_tracking_query = """
+            CREATE TABLE IF NOT EXISTS price_tracking (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                price REAL NOT NULL,
+                timestamp TIMESTAMP NOT NULL,
+                minutes_elapsed INTEGER NOT NULL,
+                FOREIGN KEY (signal_id) REFERENCES signal_analysis (signal_id)
+            )
+        """
+
+      # Создаем таблицы асинхронно
+      await self.db_manager._execute(signal_analysis_query)
+      await self.db_manager._execute(price_tracking_query)
+
+      # Создаем индексы
+      indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_signal_symbol ON signal_analysis(symbol)",
+        "CREATE INDEX IF NOT EXISTS idx_signal_entry_time ON signal_analysis(entry_time)",
+        "CREATE INDEX IF NOT EXISTS idx_signal_outcome ON signal_analysis(outcome)",
+        "CREATE INDEX IF NOT EXISTS idx_price_tracking_signal ON price_tracking(signal_id)"
+      ]
+
+      for index_query in indexes:
+        await self.db_manager._execute(index_query)
+
+      logger.info("✅ Таблицы Shadow Trading созданы асинхронно")
+
+    except Exception as e:
+      logger.error(f"Ошибка асинхронного создания таблиц: {e}")
+      raise
 
 
   def setup_database_sync(self):
@@ -535,6 +608,31 @@ class SignalTracker:
         signal_id для дальнейшего отслеживания
     """
     try:
+      if not signal or not signal.symbol:
+        logger.error("Некорректный сигнал для отслеживания")
+        return ""
+
+        # Проверяем лимиты
+      if len(self.tracked_signals) >= getattr(self, 'max_concurrent_tracking', 1000):
+        logger.warning(f"Достигнут лимит отслеживания ({len(self.tracked_signals)})")
+        return ""
+
+        # Генерируем уникальный ID с проверкой на дубликаты
+      base_signal_id = f"{signal.symbol}_{signal.timestamp.strftime('%Y%m%d_%H%M%S')}_{signal.signal_type.value}"
+      signal_id = base_signal_id
+      counter = 1
+
+      # Убеждаемся что ID уникален
+      while signal_id in self.tracked_signals:
+        signal_id = f"{base_signal_id}_{counter}"
+        counter += 1
+        if counter > 100:  # Защита от бесконечного цикла
+          logger.error(f"Не удалось создать уникальный ID для {signal.symbol}")
+          return ""
+
+      # Убеждаемся что таблицы существуют
+      await self.ensure_tables_exist()
+
       signal_id = f"{signal.symbol}_{signal.timestamp.strftime('%Y%m%d_%H%M%S')}_{signal.signal_type.value}"
 
       # Создаем анализ сигнала
@@ -602,42 +700,59 @@ class SignalTracker:
       logger.error(f"Ошибка отметки исполнения сигнала {signal_id}: {e}")
 
   async def update_price_tracking(self, signal_id: str, current_price: float, timestamp: datetime):
-    """Обновить отслеживание цены для сигнала"""
+    """Обновить отслеживание цены с проверками"""
     try:
+      # НОВАЯ ПРОВЕРКА: Существование сигнала
       if signal_id not in self.tracked_signals:
+        logger.warning(f"Попытка обновить несуществующий сигнал {signal_id}")
+        return
+
+      # НОВАЯ ПРОВЕРКА: Валидность цены
+      if current_price <= 0:
+        logger.warning(f"Некорректная цена {current_price} для сигнала {signal_id}")
         return
 
       analysis = self.tracked_signals[signal_id]
-      entry_time = analysis.entry_time
-      minutes_elapsed = int((timestamp - entry_time).total_seconds() / 60)
 
-      # Сохраняем данные о цене
-      await self.db_manager._execute(
-        """INSERT INTO price_tracking (signal_id, symbol, price, timestamp, minutes_elapsed)
-           VALUES (?, ?, ?, ?, ?)""",
-        (signal_id, analysis.symbol, current_price, timestamp, minutes_elapsed)
-      )
+      # Проверяем что сигнал еще активен
+      if analysis.outcome != SignalOutcome.PENDING:
+        logger.debug(f"Сигнал {signal_id} уже завершен, пропускаем обновление")
+        return
 
-      # Обновляем статистику движения цены
-      price_change_pct = ((current_price - analysis.entry_price) / analysis.entry_price) * 100
+      # Рассчитываем elapsed time
+      minutes_elapsed = (timestamp - analysis.entry_time).total_seconds() / 60
 
-      # Для BUY сигналов положительное изменение - это прибыль
+      # Обновляем максимальные экскурсии
       if analysis.signal_type == SignalType.BUY:
-        if price_change_pct > analysis.max_favorable_excursion_pct:
-          analysis.max_favorable_excursion_pct = price_change_pct
-        elif price_change_pct < 0 and abs(price_change_pct) > analysis.max_adverse_excursion_pct:
-          analysis.max_adverse_excursion_pct = abs(price_change_pct)
-      # Для SELL сигналов отрицательное изменение - это прибыль
-      elif analysis.signal_type == SignalType.SELL:
-        if price_change_pct < 0 and abs(price_change_pct) > analysis.max_favorable_excursion_pct:
-          analysis.max_favorable_excursion_pct = abs(price_change_pct)
-        elif price_change_pct > analysis.max_adverse_excursion_pct:
-          analysis.max_adverse_excursion_pct = price_change_pct
+        current_profit_pct = ((current_price - analysis.entry_price) / analysis.entry_price) * 100
+      else:
+        current_profit_pct = ((analysis.entry_price - current_price) / analysis.entry_price) * 100
+
+      # Обновляем экстремумы
+      if current_profit_pct > analysis.max_favorable_excursion_pct:
+        analysis.max_favorable_excursion_pct = current_profit_pct
+      elif current_profit_pct < 0 and abs(current_profit_pct) > analysis.max_adverse_excursion_pct:
+        analysis.max_adverse_excursion_pct = abs(current_profit_pct)
+
+      # Сохраняем в БД отслеживание цены
+      await self._save_price_tracking(signal_id, analysis.symbol, current_price, timestamp, minutes_elapsed)
 
       analysis.updated_at = timestamp
 
     except Exception as e:
       logger.error(f"Ошибка обновления отслеживания цены для {signal_id}: {e}")
+
+  async def _save_price_tracking(self, signal_id: str, symbol: str, price: float,
+                                 timestamp: datetime, minutes_elapsed: float):
+    """Сохранить данные отслеживания цены"""
+    try:
+      query = """
+            INSERT INTO price_tracking (signal_id, symbol, price, timestamp, minutes_elapsed)
+            VALUES (?, ?, ?, ?, ?)
+        """
+      await self.db_manager._execute(query, (signal_id, symbol, price, timestamp, int(minutes_elapsed)))
+    except Exception as e:
+      logger.error(f"Ошибка сохранения отслеживания цены: {e}")
 
   async def finalize_signal(self, signal_id: str, exit_price: float, exit_time: datetime,
                             outcome: SignalOutcome):
@@ -969,36 +1084,46 @@ class PriceMonitor:
         logger.error(f"Ошибка в цикле мониторинга цен: {e}")
         await asyncio.sleep(60)
 
-  async def finalize_signal(self, signal_id: str, final_price: float):
-    """Финализировать отслеживание сигнала"""
+  async def finalize_signal(self, signal_id: str, final_price: float,
+                            exit_time: datetime = None, outcome: SignalOutcome = None):
+    """
+    Финализировать отслеживание сигнала
+
+    Args:
+        signal_id: ID сигнала
+        final_price: Финальная цена
+        exit_time: Время выхода (опционально)
+        outcome: Результат сигнала (опционально)
+    """
     try:
       if signal_id not in self.tracked_signals:
+        logger.warning(f"Сигнал {signal_id} не найден для финализации")
         return
 
       analysis = self.tracked_signals[signal_id]
       analysis.exit_price = final_price
-      analysis.exit_time = datetime.now()
+      analysis.exit_time = exit_time or datetime.now()
 
-      # Рассчитываем результат
-      if analysis.signal_type == SignalType.BUY:
-        analysis.profit_loss_pct = ((final_price - analysis.entry_price) / analysis.entry_price) * 100
+      # Определяем исход если не передан
+      if outcome:
+        analysis.outcome = outcome
       else:
-        analysis.profit_loss_pct = ((analysis.entry_price - final_price) / analysis.entry_price) * 100
+        # Рассчитываем на основе цены
+        if analysis.signal_type == SignalType.BUY:
+          profit_pct = ((final_price - analysis.entry_price) / analysis.entry_price) * 100
+        else:
+          profit_pct = ((analysis.entry_price - final_price) / analysis.entry_price) * 100
 
-      # Определяем исход
-      if analysis.profit_loss_pct > 0.5:
-        analysis.outcome = SignalOutcome.PROFITABLE
-      elif analysis.profit_loss_pct < -0.5:
-        analysis.outcome = SignalOutcome.LOSS
-      else:
-        analysis.outcome = SignalOutcome.BREAKEVEN
+        analysis.profit_loss_pct = profit_pct
+        analysis.outcome = SignalOutcome.PROFITABLE if profit_pct > 0 else SignalOutcome.LOSS
 
-      analysis.updated_at = datetime.now()
+      # Обновляем в БД
       await self._update_signal_in_db(analysis)
 
-      # Удаляем из отслеживания
+      # Удаляем из активного отслеживания
       del self.tracked_signals[signal_id]
-      logger.info(f"📊 Сигнал {signal_id} финализирован с результатом: {analysis.profit_loss_pct:.2f}%")
+
+      logger.info(f"✅ Сигнал {signal_id} финализирован: {analysis.outcome.value}")
 
     except Exception as e:
       logger.error(f"Ошибка финализации сигнала {signal_id}: {e}")

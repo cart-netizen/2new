@@ -119,6 +119,8 @@ class IntegratedTradingSystem:
       db_manager=self.db_manager,
       min_trades_for_evaluation=10
     )
+    if hasattr(self, 'adaptive_selector'):
+      self.adaptive_selector.integrated_system_ref = self
     self._evaluation_task: Optional[asyncio.Task] = None
 
     ichimoku_strategy = IchimokuStrategy()
@@ -1311,38 +1313,7 @@ class IntegratedTradingSystem:
       logger.error(f"Не удалось получить или распарсить данные о балансе. Ответ: {balance_data}")
       # Если не удалось обновить, оставляем старое значение, чтобы не обнулять баланс
       self.account_balance = self.account_balance or RiskMetrics()
-    # >>> КОНЕЦ ПАТЧА <<<
-  # async def update_account_balance(self):
-  #   logger.info("Запрос баланса аккаунта...")
-  #   balance_data = await self.connector.get_account_balance(account_type="UNIFIED", coin="USDT")
-  #
-  #   # ИСПРАВЛЕННАЯ ЛОГИКА: Проверяем наличие ключа 'coin', и что это непустой список
-  #   if (balance_data
-  #       and 'coin' in balance_data
-  #       and isinstance(balance_data.get('coin'), list)
-  #       and len(balance_data['coin']) > 0):
-  #
-  #     # Данные по конкретной монете (USDT) находятся внутри первого элемента списка 'coin'
-  #     coin_data = balance_data['coin'][0]
-  #
-  #     self.account_balance = RiskMetrics(
-  #       # Общий баланс кошелька берем из данных по конкретной монете
-  #       total_balance_usdt=float(coin_data.get('walletBalance', 0)),
-  #
-  #       # Доступный баланс надежнее брать из общего поля 'totalAvailableBalance'
-  #       available_balance_usdt=float(balance_data.get('totalAvailableBalance', 0)),
-  #
-  #       # Нереализованный и реализованный PnL берем из данных по монете
-  #       unrealized_pnl_total=float(coin_data.get('unrealisedPnl', 0)),
-  #       realized_pnl_total=float(coin_data.get('cumRealisedPnl', 0))
-  #     )
-  #     logger.info(f"Баланс обновлен: Всего={self.account_balance.total_balance_usdt:.2f} USDT, "
-  #                 f"Доступно={self.account_balance.available_balance_usdt:.2f} USDT, "
-  #                 f"Нереализ. PNL={self.account_balance.unrealized_pnl_total:.2f} USDT, "
-  #                 f"Реализ. PNL={self.account_balance.realized_pnl_total:.2f} USDT")
-  #   else:
-  #     logger.error(f"Не удалось получить или распарсить данные о балансе. Ответ: {balance_data}")
-  #     self.account_balance = RiskMetrics()
+
 
   async def set_leverage_for_symbol(self, symbol: str, leverage: int) -> bool:
     """ИСПРАВЛЕНО: Обновлен для работы с новым методом connector.set_leverage"""
@@ -1363,82 +1334,6 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка при установке плеча для {symbol}: {e}", exc_info=True)
       return False
-
-  # async def _monitoring_loop(self):
-  #   """
-  #   Главный цикл, управляющий всей логикой.
-  #   """
-  #   await self.position_manager.load_open_positions()
-  #   while self.is_running:
-  #     logger.info("--- Начало нового цикла мониторинга ---")
-  #     await self.update_account_balance()
-  #     if self.account_balance:
-  #       self.state_manager.update_metrics(self.account_balance)
-  #
-  #     # Управляем открытыми позициями
-  #     await self.position_manager.manage_open_positions(self.account_balance)
-  #     # Сверяем закрытые сделки
-  #     await self.position_manager.reconcile_filled_orders()
-  #     # Обновляем состояние для дашборда
-  #     self.state_manager.update_open_positions(self.position_manager.open_positions)
-  #
-  #     # Проверяем сигналы в ожидании
-  #     pending_signals = self.state_manager.get_pending_signals()
-  #     if pending_signals:
-  #       tasks = [self._check_pending_signal_for_entry(s) for s in pending_signals.keys()]
-  #       await asyncio.gather(*tasks)
-  #
-  #     # Ищем новые сигналы
-  #     open_and_pending = set(self.position_manager.open_positions.keys()) | set(pending_signals.keys())
-  #     symbols_for_new_search = [s for s in self.active_symbols if s not in open_and_pending]
-  #
-  #     if symbols_for_new_search:
-  #       use_enhanced = self.config.get('ml_settings', {}).get('use_enhanced_processing', True)
-  #       if use_enhanced and self.enhanced_ml_model:
-  #         tasks = [self._monitor_symbol_for_entry_enhanced(symbol) for symbol in symbols_for_new_search]
-  #       else:
-  #         tasks = [self._monitor_symbol_for_entry(symbol) for symbol in symbols_for_new_search]
-  #       await asyncio.gather(*tasks)
-  #
-  #     # --- НОВЫЙ БЛОК: ПРОВЕРКА КОМАНД ИЗ ДАШБОРДА ---
-  #     command_data = self.state_manager.get_command()
-  #     if command_data:
-  #       command_name = command_data.get('name')
-  #       logger.info(f"Получена новая команда из дашборда: {command_name}")
-  #
-  #       # Очищаем команду, чтобы не выполнять ее повторно
-  #       self.state_manager.clear_command()
-  #     # --- КОНЕЦ НОВОГО БЛОКА ---
-  #
-  #       if command_name == 'generate_report':
-  #         if self.retraining_manager:
-  #           self.retraining_manager.export_performance_report()
-  #
-  #
-  #       elif command_name == 'update_ml_models':
-  #         # Обновляем состояние ML моделей
-  #         ml_state = self.state_manager.get_custom_data('ml_models_state')
-  #         if ml_state:
-  #           self.use_enhanced_ml = ml_state.get('use_enhanced_ml', True)
-  #           self.use_base_ml = ml_state.get('use_base_ml', True)
-  #           logger.info(f"ML модели обновлены: Enhanced={self.use_enhanced_ml}, Base={self.use_base_ml}")
-  #
-  #       elif command_name == 'update_strategies':
-  #         # Обновляем активные стратегии
-  #         active_strategies = self.state_manager.get_custom_data('active_strategies')
-  #         if active_strategies and hasattr(self, 'adaptive_selector'):
-  #           for strategy_name, is_active in active_strategies.items():
-  #             self.adaptive_selector.active_strategies[strategy_name] = is_active
-  #           logger.info(f"Стратегии обновлены: {active_strategies}")
-  #
-  #       elif command_name == 'retrain_model':
-  #         # Запускаем переобучение
-  #         if self.retraining_manager:
-  #           asyncio.create_task(self.retraining_manager.retrain_model(
-  #             self.active_symbols, timeframe=Timeframe.ONE_HOUR
-  #           ))
-  #           logger.info("Запущено переобучение модели")
-
 
   async def _prepare_signal_metadata(self, symbol: str, signal: TradingSignal, data: pd.DataFrame) -> Dict[str, Any]:
       """Подготовка метаданных сигнала для Shadow Trading"""
@@ -2022,75 +1917,6 @@ class IntegratedTradingSystem:
         logger.error(f"Ошибка периодического анализа режимов: {e}")
         await asyncio.sleep(600)  # При ошибке ждем 10 минут
 
-
-  # async def start(self):
-  #   if self.is_running:
-  #     logger.warning("Система уже запущена.")
-  #     return
-  #
-  #   # ++ СИНХРОНИЗИРУЕМ ВРЕМЯ ПЕРЕД НАЧАЛОМ РАБОТЫ ++
-  #   await self.connector.sync_time()
-  #
-  #     # Инициализация БД
-  #   await self.db_manager._create_tables_if_not_exist()
-  #   # await self.state_manager.initialize_state()
-  #
-  #   # Проверка и первичное обучение модели
-  #   if not await self._ensure_model_exists():
-  #     logger.critical("Не удалось создать первичную ML модель. Запуск отменен.")
-  #     return
-  #
-  #   if not await self.initialize():
-  #     logger.error("Сбой инициализации системы. Запуск отменен.")
-  #     return
-  #
-  #   self.is_running = True
-  #   # ++ СООБЩАЕМ, ЧТО БОТ ЗАПУЩЕН ++
-  #   self.state_manager.set_status('running')
-  #   logger.info("Торговая система запускается...")
-  #   self._monitoring_task = asyncio.create_task(self._monitoring_loop())
-  #   # Запускаем фоновое переобучение
-  #   self._retraining_task = self.retraining_manager.start_scheduled_retraining(
-  #     self.active_symbols, timeframe=Timeframe.ONE_HOUR)
-  #   self._time_sync_task = asyncio.create_task(self._time_sync_loop())
-  #   self.is_running = True
-  #
-  #   # Добавить задачу проверки ROI
-  #   self._roi_check_task = asyncio.create_task(self.periodic_roi_check())
-  #
-  #   try:
-  #     from analytics.roi_analytics import ROIAnalytics
-  #     roi_analytics = ROIAnalytics(self.db_manager)
-  #
-  #     logger.info("=== АНАЛИТИКА ROI НАСТРОЕК ===")
-  #
-  #     # Анализ за последние 7 дней
-  #     weekly_analysis = await roi_analytics.analyze_roi_performance(days=7)
-  #     if 'error' not in weekly_analysis:
-  #       logger.info(f"📊 Статистика за 7 дней:")
-  #       logger.info(f"  Сделок: {weekly_analysis['total_trades']}")
-  #       logger.info(f"  Винрейт: {weekly_analysis['win_rate']:.1f}%")
-  #       logger.info(f"  Общий PnL: {weekly_analysis['total_pnl']:.2f}")
-  #       logger.info(f"  SL срабатываний: {weekly_analysis['sl_hit_rate']:.1f}%")
-  #       logger.info(f"  TP достижений: {weekly_analysis['tp_hit_rate']:.1f}%")
-  #       logger.info(f"  💡 {weekly_analysis['recommendation']}")
-  #
-  #   except Exception as analytics_error:
-  #     logger.warning(f"Не удалось загрузить ROI аналитику: {analytics_error}")
-  #
-  #   # Запускаем синхронизацию времени
-  #   self._time_sync_task = asyncio.create_task(self._periodic_time_sync())
-  #
-  #   # Запускаем периодическую оценку стратегий
-  #   self._evaluation_task = asyncio.create_task(self.periodic_strategy_evaluation())
-  #
-  #   await self.periodic_regime_analysis()
-  #
-  #   logger.info("Торговая система и планировщик переобучения успешно запущены.")
-  #   logger.info("✅ Система успешно запущена")
-  #   return True
-
-
   async def stop(self):
     """Корректная остановка всех компонентов системы"""
     if not self.is_running:
@@ -2130,44 +1956,6 @@ class IntegratedTradingSystem:
 
     if hasattr(self, '_regime_analysis_task') and self._regime_analysis_task:
       tasks_to_cancel.append(self._regime_analysis_task)
-    # if not self.is_running:
-    #   logger.warning("Система не запущена.")
-    #   return
-    #
-    # self.is_running = False
-    # # ++ СООБЩАЕМ, ЧТО БОТ ОСТАНОВЛЕН ++
-    # self.state_manager.set_status('stopped')
-    # logger.info("Остановка торговой системы...")
-    #
-    # if self._correlation_task and not self._correlation_task.done():
-    #   self._correlation_task.cancel()
-    #   with suppress(asyncio.CancelledError):
-    #     await self._correlation_task
-    #
-    # # Отменяем все задачи мониторинга
-    # if self._monitoring_task:
-    #   self._monitoring_task.cancel()
-    #   try:
-    #     await self._monitoring_task
-    #   except asyncio.CancelledError:
-    #     logger.info("Цикл мониторинга успешно отменен.")
-    #
-    # if self._retraining_task:
-    #   # Вызываем новый метод stop_scheduled_retraining
-    #   self.retraining_manager.stop_scheduled_retraining()  # <--- УБЕДИТЕСЬ, ЧТО ВЫЗОВ ВЫГЛЯДИТ ТАК
-    #   self._retraining_task.cancel()
-    #   with suppress(asyncio.CancelledError):
-    #     await self._retraining_task
-    #
-    # if self._evaluation_task:
-    #   self._evaluation_task.cancel()
-    #   with suppress(asyncio.CancelledError):
-    #     await self._evaluation_task
-    #
-    # if self._time_sync_task:
-    #   self._time_sync_task.cancel()
-    #   with suppress(asyncio.CancelledError):
-    #     await self._time_sync_task
 
     if self.shadow_trading:
       try:
@@ -2662,44 +2450,7 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка в триггере LTF: {e}", exc_info=True)
       return False
-# Метод ниже был в прошлой версии, его логика интегрирована в обновленный метод _check_pending_signal_for_entry
-  # async def _check_and_execute_pending_signal(self, symbol: str, signal_data: dict):
-  #   """Проверяет триггер для сигнала в ожидании и исполняет его."""
-  #   try:
-  #     signal_time = datetime.fromisoformat(signal_data['metadata'].get('signal_time'))
-  #     if datetime.now() - signal_time > timedelta(hours=2):
-  #       logger.warning(f"Сигнал для {symbol} просрочен и будет удален из очереди.")
-  #       pending_signals = self.state_manager.get_pending_signals()
-  #       pending_signals.pop(symbol, None)
-  #       self.state_manager.update_pending_signals(pending_signals)
-  #       return
-  #
-  #     strategy_settings = self.config.get('strategy_settings', {})
-  #     ltf_str = strategy_settings.get('ltf_entry_timeframe', '5m')
-  #
-  #     timeframe_map = {"1m": Timeframe.ONE_MINUTE, "5m": Timeframe.FIVE_MINUTES, "15m": Timeframe.FIFTEEN_MINUTES}
-  #     ltf_timeframe = timeframe_map.get(ltf_str, Timeframe.FIFTEEN_MINUTES)
-  #
-  #     logger.debug(f"Проверка триггера для {symbol} на таймфрейме {ltf_str}...")
-  #     ltf_data = await self.data_fetcher.get_historical_candles(symbol, ltf_timeframe, limit=100)
-  #
-  #     signal_data['signal_type'] = SignalType(signal_data['signal_type'])
-  #     signal_data['timestamp'] = datetime.fromisoformat(signal_data['timestamp'])
-  #     signal = TradingSignal(**signal_data)
-  #
-  #     if self._check_ltf_entry_trigger(ltf_data, signal.signal_type):
-  #       logger.info(f"✅ ТРИГГЕР НА LTF ДЛЯ {symbol} СРАБОТАЛ! Исполнение ордера...")
-  #       quantity = signal.metadata.get('approved_size', 0)
-  #       success, trade_details = await self.trade_executor.execute_trade(signal, symbol, quantity)
-  #
-  #       if success and trade_details:
-  #         self.position_manager.add_position_to_cache(trade_details)
-  #
-  #       pending_signals = self.state_manager.get_pending_signals()
-  #       pending_signals.pop(symbol, None)
-  #       self.state_manager.update_pending_signals(pending_signals)
-  #   except Exception as e:
-  #     logger.error(f"Ошибка при обработке сигнала в ожидании для {symbol}: {e}", exc_info=True)
+
 
   async def initialize_with_optimization(self):
       """
@@ -3164,25 +2915,6 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка при проверке точки входа для {symbol}: {e}", exc_info=True)
 
-  # async def _check_ltf_entry_conditions(self, signal_data: Dict, ltf_data: pd.DataFrame) -> bool:
-  #   """Проверяет условия входа на младшем таймфрейме"""
-  #   try:
-  #     signal_type = SignalType[signal_data['signal_type']]
-  #
-  #     # Пример простых условий входа
-  #     last_close = ltf_data['close'].iloc[-1]
-  #     sma_10 = ltf_data['close'].rolling(10).mean().iloc[-1]
-  #
-  #     if signal_type == SignalType.BUY:
-  #       # Для покупки: цена выше SMA10
-  #       return last_close > sma_10
-  #     else:  # SELL
-  #       # Для продажи: цена ниже SMA10
-  #       return last_close < sma_10
-  #
-  #   except Exception as e:
-  #     logger.error(f"Ошибка при проверке LTF условий: {e}")
-  #     return False
 
 
   async def _log_performance_stats(self):
@@ -3303,26 +3035,7 @@ class IntegratedTradingSystem:
       else:
         logger.info("✅ БД проверена, состояние нормальное")
 
-      # Установка плеча для всех символов параллельно
-      # leverage = self.config.get('trade_settings', {}).get('leverage', 10)
-      # logger.info(f"Установка плеча {leverage} для {len(self.active_symbols)} символов...")
-      #
-      # successful_leverages = 0
-      # for i, symbol in enumerate(self.active_symbols):
-      #   try:
-      #     result = await self.connector.set_leverage(symbol, leverage, leverage)
-      #     if result:
-      #       successful_leverages += 1
-      #
-      #     # Задержка между запросами для избежания rate limit
-      #     if i < len(self.active_symbols) - 1:
-      #       await asyncio.sleep(0.2)  # 200мс между запросами
-      #
-      #   except Exception as e:
-      #     logger.warning(f"Не удалось установить плечо для {symbol}: {e}")
-      #
-      # logger.info(f"Плечо установлено для {successful_leverages}/{len(self.active_symbols)} символов")
-        # Групповая установка плеча для всех символов
+
       leverage = self.config.get('trade_settings', {}).get('leverage', 10)
       logger.info(f"Установка плеча {leverage} для {len(self.active_symbols)} символов...")
 

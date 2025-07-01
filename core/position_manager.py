@@ -243,12 +243,19 @@ class PositionManager:
       except Exception as e:
         logger.error(f"Ошибка при динамическом управлении позицией {symbol}: {e}", exc_info=True)
 
-  async def _execute_standard_exit_and_reentry(self, symbol: str, position_data: Dict,
-                                               reverse_signal: TradingSignal, account_balance: Optional[RiskMetrics]):
+  async def _execute_standard_exit_and_reentry(self, symbol: str,
+                                               reverse_signal: TradingSignal,
+                                               account_balance: Optional[RiskMetrics]):
     """
     Стандартная процедура: закрытие текущей позиции и открытие новой.
     """
     try:
+      # Получаем данные текущей позиции для логирования
+      position_data = self.open_positions.get(symbol, {})
+      if position_data:
+        current_side = position_data.get('side', 'Unknown')
+        logger.info(f"Выполняется разворот позиции {symbol}: {current_side} -> {reverse_signal.signal_type.value}")
+
       # Закрываем текущую позицию
       close_success = await self.trade_executor.close_position(symbol=symbol)
       if not close_success:
@@ -260,8 +267,28 @@ class PositionManager:
 
       # Открываем новую позицию в противоположном направлении
       if account_balance:
+        # ИСПРАВЛЕНИЕ: Получаем рыночные данные для validate_signal
+        try:
+          market_data = await self.data_fetcher.get_historical_candles(
+            symbol=symbol,
+            timeframe=Timeframe.ONE_HOUR,  # или другой подходящий таймфрейм
+            limit=100
+          )
+
+          if market_data.empty:
+            logger.error(f"Не удалось получить рыночные данные для {symbol}")
+            return
+
+        except Exception as e:
+          logger.error(f"Ошибка получения рыночных данных для {symbol}: {e}")
+          return
+
+        # Теперь вызываем validate_signal с правильными параметрами
         risk_decision = await self.risk_manager.validate_signal(
-          reverse_signal, symbol, account_balance.available_balance_usdt
+          signal=reverse_signal,
+          symbol=symbol,
+          account_balance=account_balance.available_balance_usdt,
+          market_data=market_data
         )
 
         if risk_decision.get('approved'):
@@ -269,213 +296,306 @@ class PositionManager:
           quantity = risk_decision.get('recommended_size')
           await self.trade_executor.execute_trade(reverse_signal, symbol, quantity)
         else:
-          logger.warning(f"Риск-менеджер отклонил новую позицию после разворота {symbol}")
+          logger.warning(
+            f"Риск-менеджер отклонил новую позицию после разворота {symbol}: {risk_decision.get('reasons')}")
+
+      # Уведомляем SAR стратегию об успешном развороте
+      if hasattr(self, 'trading_system') and self.trading_system:
+        sar_strategy = getattr(self.trading_system, 'sar_strategy', None)
+        if sar_strategy and hasattr(sar_strategy, 'handle_position_update'):
+          reversal_data = {
+            'symbol': symbol,
+            'old_side': current_side,
+            'new_side': reverse_signal.signal_type.value,
+            'reversal_price': reverse_signal.price,
+            'action': 'position_reversal'
+          }
+          await sar_strategy.handle_position_update(symbol, reversal_data)
 
     except Exception as e:
       logger.error(f"Ошибка при стандартном развороте {symbol}: {e}")
 
   async def reconcile_filled_orders(self):
-        """
-        ФИНАЛЬНАЯ ВЕРСИЯ: Сверяет исполненные ордера, корректно рассчитывая PnL
-        с учетом комиссий и обрабатывая закрытия по TP/SL.
-        """
-        # all_positions = await self.connector.fetch_positions_batch()
-        # active_symbols = {pos['symbol'] for pos in all_positions if float(pos.get('size', 0)) > 0}
+      """
+      ИСПРАВЛЕННАЯ ВЕРСИЯ: Сверяет исполненные ордера без дублирования логики
+      """
+      # Получаем из БД все сделки, которые у нас числятся как "OPEN"
+      open_trades_in_db = await self.db_manager.get_all_open_trades()
+      if not open_trades_in_db:
+        return
 
-        # Получаем из БД все сделки, которые у нас числятся как "OPEN"
-        open_trades_in_db = await self.db_manager.get_all_open_trades()
-        if not open_trades_in_db:
-          return
+      logger.debug(f"Сверка статуса для {len(open_trades_in_db)} открытых в БД сделок...")
 
-        logger.debug(f"Сверка статуса для {len(open_trades_in_db)} открытых в БД сделок...")
+      for trade in open_trades_in_db:
+        symbol = trade.get('symbol')
+        if not symbol:
+          continue
 
-        for trade in open_trades_in_db:
-          symbol = trade.get('symbol')
-          if not symbol:
-            continue
+        try:
+          # 1. Проверяем, есть ли еще реальная позиция на бирже
+          positions_on_exchange = await self.connector.fetch_positions(symbol)
+          is_still_open = any(float(pos.get('size', 0)) > 0 for pos in positions_on_exchange)
 
-          try:
-            # 1. Проверяем, есть ли еще реальная позиция на бирже
-            positions_on_exchange = await self.connector.fetch_positions(symbol)
-            is_still_open = any(float(pos.get('size', 0)) > 0 for pos in positions_on_exchange)
+          # 2. Если позиции на бирже уже нет, значит, она была закрыта
+          if not is_still_open:
+            logger.info(f"Позиция по {symbol} больше не активна на бирже. Поиск исполненной сделки...")
 
-            # 2. Если позиции на бирже уже нет, значит, она была закрыта
-            if not is_still_open:
-              logger.info(
-                f"Позиция по {symbol} больше не активна на бирже. Поиск исполненной сделки для расчета PnL...")
+            # Ищем исполнение закрытия
+            closing_exec = await self._find_closing_execution(symbol, trade)
 
-              # Ищем в истории исполнений сделку, которая закрыла нашу позицию
-              executions = await self.connector.get_execution_history(symbol=symbol, limit=20)
-              closing_exec = None
-              for exec_trade in executions:
-                # Ищем сделку, которая закрыла позицию (closedSize > 0)
-                # и соответствует нашему ID ордера на открытие, если он есть
-                if exec_trade.get('closedSize') and float(exec_trade.get('closedSize', 0)) > 0:
-                  closing_exec = exec_trade
-                  break
+            if closing_exec:
+              # --- РАСЧЕТ PNL ---
+              trade_data = await self._calculate_trade_pnl(trade, closing_exec)
 
-              if closing_exec:
-                # --- КОРРЕКТНЫЙ РАСЧЕТ PNL ---
-                open_price = float(trade['open_price'])
-                close_price = float(closing_exec['execPrice'])
-                quantity = float(trade['quantity'])
-                # Важно: берем комиссию из данных об исполнении!
-                commission = float(closing_exec.get('execFee', 0))
-                side = trade.get('side')
+              logger.info(f"ПОДТВЕРЖДЕНИЕ ЗАКРЫТИЯ {symbol}: PnL={trade_data['net_pnl']:.4f}")
 
-                # Считаем "грязный" PnL
-                gross_pnl = (close_price - open_price) * quantity if side == 'BUY' else (
-                                                                                              open_price - close_price) * quantity
+              # --- ОБНОВЛЕНИЕ БД ---
+              await self.db_manager.update_trade_as_closed(
+                trade_id=trade['id'],
+                close_price=trade_data['close_price'],
+                pnl=trade_data['net_pnl'],
+                commission=trade_data['commission'],
+                close_timestamp=trade_data['close_timestamp']
+              )
 
-                # Вычитаем комиссию за ЗАКРЫТИЕ
-                net_pnl = gross_pnl - commission
-                # Примечание: комиссию за открытие мы здесь не учитываем, т.к. ее нет в данных о закрытии.
-                # Для 100% точности ее нужно было бы хранить в БД. Но это уже 99% точности.
+              # --- ЕДИНОЕ МЕСТО ДЛЯ ВСЕХ УВЕДОМЛЕНИЙ ---
+              await self._notify_systems_about_closed_trade(symbol, trade, trade_data)
 
-                close_timestamp = datetime.fromtimestamp(int(closing_exec['execTime']) / 1000)
+              # Удаляем из кэша
+              if symbol in self.open_positions:
+                del self.open_positions[symbol]
 
-                logger.info(
-                  f"ПОДТВЕРЖДЕНИЕ ЗАКРЫТИЯ для {symbol}: Найдена исполненная сделка. Чистый PnL: {net_pnl:.4f}")
+            else:
+              # Принудительное закрытие если не найдено исполнение
+              logger.warning(f"Не найдено исполнение для {symbol}. Принудительное закрытие.")
+              await self.db_manager.force_close_trade(
+                trade_id=trade['id'],
+                close_price=trade['open_price']
+              )
 
-                await self.db_manager.update_trade_as_closed(
-                  trade_id=trade['id'], close_price=close_price, pnl=net_pnl,
-                  commission=commission, close_timestamp=close_timestamp
-                )
+        except Exception as e:
+          logger.error(f"Ошибка при сверке сделок для {symbol}: {e}", exc_info=True)
 
-                # Обновляем статистику стратегий
-                # Обновляем статистику стратегий через trading_system
-                if hasattr(self, 'trading_system') and self.trading_system:
-                  if hasattr(self.trading_system, 'adaptive_selector'):
-                    await self.trading_system.adaptive_selector.update_strategy_performance(
-                      trade.get('strategy_name', 'Unknown'),
-                      net_pnl > 0,
-                      abs(net_pnl)
-                    )
+  async def _find_closing_execution(self, symbol: str, trade: dict) -> dict:
+    """Находит исполнение закрытия позиции"""
+    try:
+      executions = await self.connector.get_execution_history(symbol=symbol, limit=20)
 
-                # --- ДОБАВИТЬ ЗДЕСЬ СИНХРОНИЗАЦИЮ С SHADOW TRADING ---
-                # Синхронизируем с Shadow Trading после успешного обновления БД
-                if hasattr(self, 'trading_system') and self.trading_system:
-                  try:
-                    shadow_manager = getattr(self.trading_system, 'shadow_trading', None)
-                    if shadow_manager and hasattr(shadow_manager, 'signal_tracker'):
-                      # Используем правильные переменные из контекста
-                      profit_pct = ((close_price - open_price) / open_price * 100) if side == 'BUY' \
-                        else ((open_price - close_price) / open_price * 100)
+      for exec_trade in executions:
+        if exec_trade.get('closedSize') and float(exec_trade.get('closedSize', 0)) > 0:
+          return exec_trade
 
-                      # Передаем данные о закрытой сделке
-                      trade_result = {
-                        'symbol': symbol,
-                        'close_price': close_price,
-                        'close_timestamp': close_timestamp,
-                        'profit_loss': net_pnl,
-                        'profit_pct': profit_pct,
-                        'order_id': trade.get('order_id')
-                      }
+      return None
+    except Exception as e:
+      logger.error(f"Ошибка поиска исполнения для {symbol}: {e}")
+      return None
 
-                      # Синхронизируем
-                      await shadow_manager.signal_tracker.sync_with_real_trades(symbol, trade_result)
-                      logger.info(f"✅ Shadow Trading синхронизирован для {symbol}")
+  async def _calculate_trade_pnl(self, trade: dict, closing_exec: dict) -> dict:
+    """Рассчитывает PnL и данные закрытия сделки"""
+    open_price = float(trade['open_price'])
+    close_price = float(closing_exec['execPrice'])
+    quantity = float(trade['quantity'])
+    commission = float(closing_exec.get('execFee', 0))
+    side = trade.get('side')
 
-                  except Exception as e:
-                    logger.error(f"Ошибка синхронизации Shadow Trading: {e}")
-                # --- КОНЕЦ БЛОКА SHADOW TRADING ---
+    # Расчет PnL
+    if side == 'BUY':
+      gross_pnl = (close_price - open_price) * quantity
+    else:
+      gross_pnl = (open_price - close_price) * quantity
 
-                # # Вызываем callback для ML обратной связи
-                # if hasattr(self, 'trading_system') and self.trading_system:
-                #   await self.trading_system.process_trade_feedback(trade['id'])
+    net_pnl = gross_pnl - commission
+    close_timestamp = datetime.fromtimestamp(int(closing_exec['execTime']) / 1000)
 
+    # Расчет процентной прибыли
+    profit_pct = ((close_price - open_price) / open_price * 100) if side == 'BUY' else \
+      ((open_price - close_price) / open_price * 100)
 
-                integrated_system = getattr(self.trade_executor, 'integrated_system', None)
-                if integrated_system and hasattr(integrated_system, 'process_trade_feedback'):
-                  try:
+    return {
+      'open_price': open_price,
+      'close_price': close_price,
+      'quantity': quantity,
+      'commission': commission,
+      'side': side,
+      'gross_pnl': gross_pnl,
+      'net_pnl': net_pnl,
+      'profit_pct': profit_pct,
+      'close_timestamp': close_timestamp
+    }
 
-                    trade_result = {
-                      'strategy_name': trade.get('strategy_name', 'Unknown'),
-                      'profit_loss': net_pnl,
-                      'entry_price': open_price,
-                      'exit_price': close_price,
-                      'regime': trade.get('metadata', {}).get('regime', 'unknown') if isinstance(trade.get('metadata'),
-                                                                                                 dict) else 'unknown',
-                      'confidence': trade.get('confidence', 0.5),
-                      'entry_features': trade.get('metadata', {}).get('features', {}) if isinstance(
-                        trade.get('metadata'), dict) else {}
-                    }
+  async def _notify_systems_about_closed_trade(self, symbol: str, trade: dict, trade_data: dict):
+    """
+    ЕДИНОЕ МЕСТО для всех уведомлений о закрытой сделке
+    Избегает дублирования и обеспечивает правильный порядок
+    """
+    strategy_name = trade.get('strategy_name', 'Unknown')
+    net_pnl = trade_data['net_pnl']
+    is_profitable = net_pnl > 0
 
-                    await integrated_system.process_trade_feedback(symbol, trade['id'], trade_result)
-                    logger.info(f"Обратная связь отправлена для {symbol}")
-                  except Exception as e:
-                    logger.error(f"Ошибка отправки обратной связи: {e}")
+    # Определяем ссылку на интегрированную систему
+    integrated_system = None
+    if hasattr(self, 'trading_system'):
+      integrated_system = self.trading_system
+    elif hasattr(self, 'integrated_system'):
+      integrated_system = self.integrated_system
+    elif hasattr(self.trade_executor, 'integrated_system'):
+      integrated_system = self.trade_executor.integrated_system
 
-                # Уведомляем SAR стратегию об обновлении позиции для адаптивного обучения
-                if (hasattr(self, 'integrated_system') and self.integrated_system and
-                    hasattr(self.integrated_system, 'sar_strategy') and
-                    self.integrated_system.sar_strategy):
+    if not integrated_system:
+      logger.warning("Не найдена ссылка на интегрированную систему")
+      return
 
-                  try:
-                    # Проверяем, что позиция действительно принадлежит SAR стратегии
-                    if symbol in getattr(self.integrated_system.sar_strategy, 'current_positions', {}):
-                      await self.integrated_system.sar_strategy.handle_position_update(symbol, {
-                        'profit_loss': net_pnl,
-                        'close_price': close_price,
-                        'close_timestamp': close_timestamp,
-                        'close_reason': locals().get('close_reason', 'position_manager'),
-                        'open_price': locals().get('open_price', trade.get('open_price', 0)),
-                        'net_pnl': net_pnl,
-                        # 'close_reason': locals().get('close_reason', 'position_manager_close'),
-                        # 'open_price': position_data.get('open_price', 0),
-                      })
-                      logger.debug(f"SAR стратегия уведомлена об обновлении позиции {symbol}")
+    try:
+      # 1. ADAPTIVE SELECTOR - обновляем производительность стратегии
+      if hasattr(integrated_system, 'adaptive_selector'):
+        await integrated_system.adaptive_selector.update_strategy_performance(
+          strategy_name=strategy_name,
+          is_profitable=is_profitable,
+          profit_amount=abs(net_pnl),
+          symbol=symbol
+        )
+        logger.debug(f"✅ Adaptive Selector обновлен для {strategy_name}")
 
-                    # Также обновляем общую производительность стратегии
-                    if hasattr(self.integrated_system, 'adaptive_selector'):
-                      await self.integrated_system.adaptive_selector.update_strategy_performance(
-                        'SAR_Strategy',
-                        {
-                          'profit_loss': net_pnl,
-                          'symbol': symbol,
-                          'close_timestamp': close_timestamp,
-                          'regime': getattr(self.integrated_system.sar_strategy, 'current_market_regime', 'unknown')
-                        }
-                      )
-                  except Exception as e:
-                    logger.error(f"Ошибка при уведомлении SAR стратегии об обновлении позиции {symbol}: {e}")
+      # 2. SAR STRATEGY - уведомляем о закрытии (ТОЛЬКО ОДИН РАЗ)
+      if (strategy_name == "Stop_and_Reverse" or "SAR" in strategy_name.upper()):
+        sar_strategy = getattr(integrated_system, 'sar_strategy', None)
+        if sar_strategy and hasattr(sar_strategy, 'handle_position_update'):
+          if symbol in getattr(sar_strategy, 'current_positions', {}):
+            closed_position_data = {
+              'symbol': symbol,
+              'side': trade_data['side'],
+              'close_price': trade_data['close_price'],
+              'profit_loss': net_pnl,
+              'profit_pct': trade_data['profit_pct'],
+              'close_reason': 'exchange_execution',
+              'metadata': trade.get('metadata', {})
+            }
+            await sar_strategy.handle_position_update(symbol, closed_position_data)
+            logger.debug(f"✅ SAR стратегия обновлена для {symbol}")
 
-                # Удаляем из кэша, если она там была
-                if symbol in self.open_positions:
-                  del self.open_positions[symbol]
+      # 3. SHADOW TRADING - синхронизация
+      shadow_manager = getattr(integrated_system, 'shadow_trading', None)
+      if shadow_manager and hasattr(shadow_manager, 'signal_tracker'):
+        trade_result = {
+          'symbol': symbol,
+          'close_price': trade_data['close_price'],
+          'close_timestamp': trade_data['close_timestamp'],
+          'profit_loss': net_pnl,
+          'profit_pct': trade_data['profit_pct'],
+          'order_id': trade.get('order_id')
+        }
+        await shadow_manager.signal_tracker.sync_with_real_trades(symbol, trade_result)
+        logger.debug(f"✅ Shadow Trading синхронизирован для {symbol}")
 
-                # Синхронизируем с Shadow Trading
-                if hasattr(self, 'trading_system') and self.trading_system and self.trading_system.shadow_trading:
-                  # Получаем shadow_tracking_id из метаданных сделки
-                  metadata = trade.get('metadata')
-                  if metadata:
-                    try:
-                      import json
-                      metadata_dict = json.loads(metadata) if isinstance(metadata, str) else metadata
-                      shadow_tracking_id = metadata_dict.get('shadow_tracking_id')
+        # Финализация Shadow Trading сигнала
+        await self._finalize_shadow_trading_signal(trade, trade_data, shadow_manager)
 
-                      if shadow_tracking_id:
-                        # Определяем исход на основе PnL
-                        from shadow_trading.signal_tracker import SignalOutcome
-                        outcome = SignalOutcome.PROFITABLE if net_pnl > 0 else SignalOutcome.LOSS
+      # 4. PROCESS TRADE FEEDBACK - ML обратная связь
+      if hasattr(integrated_system, 'process_trade_feedback'):
+        trade_result = {
+          'strategy_name': strategy_name,
+          'profit_loss': net_pnl,
+          'entry_price': trade_data['open_price'],
+          'exit_price': trade_data['close_price'],
+          'regime': self._extract_regime_from_metadata(trade),
+          'confidence': trade.get('confidence', 0.5),
+          'entry_features': self._extract_features_from_metadata(trade)
+        }
+        await integrated_system.process_trade_feedback(symbol, trade['id'], trade_result)
+        logger.debug(f"✅ Trade feedback отправлен для {symbol}")
 
-                        # Финализируем сигнал в Shadow Trading
-                        await self.trading_system.shadow_trading.signal_tracker.finalize_signal(
-                          shadow_tracking_id,
-                          close_price,
-                          datetime.now(),
-                          outcome
-                        )
-                        logger.info(f"✅ Shadow Trading сигнал {shadow_tracking_id} синхронизирован")
-                    except Exception as e:
-                      logger.warning(f"Не удалось синхронизировать с Shadow Trading: {e}")
-              else:
-                # Если не нашли исполненной сделки, используем старый метод "принудительного закрытия"
-                logger.warning(f"Не удалось найти исполненную сделку для {symbol}. Принудительное закрытие с PnL=0.")
-                await self.db_manager.force_close_trade(trade_id=trade['id'], close_price=trade['open_price'])
+    except Exception as e:
+      logger.error(f"Ошибка при уведомлении систем о закрытии {symbol}: {e}")
 
-          except Exception as e:
-            logger.error(f"Ошибка при сверке сделок для {symbol}: {e}", exc_info=True)
+  async def _finalize_shadow_trading_signal(self, trade: dict, trade_data: dict, shadow_manager):
+    """Финализирует сигнал в Shadow Trading"""
+    try:
+      metadata = trade.get('metadata')
+      if not metadata:
+        return
+
+      # ИСПРАВЛЕНИЕ: Универсальный парсер метаданных
+      metadata_dict = self._safe_parse_metadata(metadata)
+
+      shadow_tracking_id = metadata_dict.get('shadow_tracking_id')
+      if not shadow_tracking_id:
+        return
+
+      # Определяем исход
+      from shadow_trading.signal_tracker import SignalOutcome
+      outcome = SignalOutcome.PROFITABLE if trade_data['net_pnl'] > 0 else SignalOutcome.LOSS
+
+      # Финализируем сигнал с правильными параметрами
+      await shadow_manager.signal_tracker.finalize_signal(
+        signal_id=shadow_tracking_id,
+        final_price=trade_data['close_price'],
+        exit_time=trade_data['close_timestamp'],
+        outcome=outcome
+      )
+      logger.debug(f"✅ Shadow Trading сигнал {shadow_tracking_id} финализирован")
+
+    except Exception as e:
+      logger.warning(f"Не удалось финализировать Shadow Trading сигнал: {e}")
+
+  def _safe_parse_metadata(self, metadata) -> dict:
+    """Безопасно парсит метаданные независимо от типа"""
+    try:
+      if metadata is None:
+        return {}
+
+      if isinstance(metadata, dict):
+        return metadata
+
+      if isinstance(metadata, str):
+        if metadata.strip() == "":
+          return {}
+        import json
+        return json.loads(metadata)
+
+      # Если это что-то другое, пытаемся конвертировать в строку и парсить
+      import json
+      return json.loads(str(metadata))
+
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+      logger.warning(f"Не удалось парсить метаданные: {e}")
+      return {}
+
+  # def _extract_regime_from_metadata(self, trade: dict) -> str:
+  #   """Извлекает режим рынка из метаданных сделки"""
+  #   try:
+  #     metadata = trade.get('metadata', {})
+  #     if isinstance(metadata, str):
+  #       import json
+  #       metadata = json.loads(metadata)
+  #     return metadata.get('regime', 'unknown')
+  #   except:
+  #     return 'unknown'
+  #
+  # def _extract_features_from_metadata(self, trade: dict) -> dict:
+  #   """Извлекает признаки из метаданных сделки"""
+  #   try:
+  #     metadata = trade.get('metadata', {})
+  #     if isinstance(metadata, str):
+  #       import json
+  #       metadata = json.loads(metadata)
+  #     return metadata.get('features', {})
+  #   except:
+  #     return {}
+  def _extract_regime_from_metadata(self, trade: dict) -> str:
+      """Извлекает режим рынка из метаданных сделки"""
+      try:
+        metadata_dict = self._safe_parse_metadata(trade.get('metadata'))
+        return metadata_dict.get('regime', 'unknown')
+      except:
+        return 'unknown'
+
+  def _extract_features_from_metadata(self, trade: dict) -> dict:
+    """Извлекает признаки из метаданных сделки"""
+    try:
+      metadata_dict = self._safe_parse_metadata(trade.get('metadata'))
+      return metadata_dict.get('features', {})
+    except:
+      return {}
 
         # 2. Полный метод reconcile_filled_orders с использованием fetch_positions_batch:
 

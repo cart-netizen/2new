@@ -1,4 +1,5 @@
 # core/adaptive_strategy_selector.py
+import asyncio
 
 import pandas as pd
 import numpy as np
@@ -198,6 +199,8 @@ class AdaptiveStrategySelector:
       perf = self.strategy_performance[strategy_name]
       perf.total_trades += 1
 
+
+
       # Обновляем базовые метрики
       if is_profitable:
         perf.winning_trades += 1
@@ -243,6 +246,44 @@ class AdaptiveStrategySelector:
       # Пересчитываем метрики
       perf.update_metrics()
       perf.last_update = datetime.now()
+
+      if strategy_name == "Stop_and_Reverse":
+        # Сбор статистики винрейта SAR
+        if not hasattr(self, 'sar_detailed_stats'):
+          self.sar_detailed_stats = {'component_analysis': {}, 'parameter_performance': {}}
+
+        # Анализ эффективности компонентов сигнала
+        if symbol and hasattr(perf, 'recent_trades'):
+          for trade in perf.recent_trades:
+            if hasattr(trade, 'get') and trade.get('metadata', {}).get('sar_components'):
+              components = trade['metadata']['sar_components']
+              for comp_name, comp_value in components.items():
+                if comp_name not in self.sar_detailed_stats['component_analysis']:
+                  self.sar_detailed_stats['component_analysis'][comp_name] = []
+                self.sar_detailed_stats['component_analysis'][comp_name].append({
+                  'value': comp_value,
+                  'profitable': is_profitable,
+                  'profit_amount': profit_amount
+                })
+
+        # Уведомляем SAR стратегию о новом результате (если есть доступ)
+        try:
+          # Ищем SAR стратегию через integrated_system
+          if hasattr(self, 'integrated_system_ref'):
+            sar_strategy = getattr(self.integrated_system_ref, 'sar_strategy', None)
+            if sar_strategy and hasattr(sar_strategy, 'update_performance_feedback'):
+              trade_result = {
+                'symbol': symbol,
+                'profitable': is_profitable,
+                'profit_amount': profit_amount,
+                'strategy_name': strategy_name
+              }
+              # Используем существующий метод SAR стратегии
+              asyncio.create_task(sar_strategy.update_performance_feedback(trade_result))
+        except Exception as e:
+          logger.debug(f"Не удалось уведомить SAR стратегию: {e}")
+
+        logger.info(f"SAR статистика обновлена: WR={perf.win_rate:.2%}, trades={perf.total_trades}")
 
       # Проверяем необходимость адаптации весов
       if self._should_adapt_weights(strategy_name):

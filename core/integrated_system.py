@@ -434,7 +434,7 @@ class IntegratedTradingSystem:
 
   async def _monitor_symbol_for_entry_enhanced(self, symbol: str):
     """
-    ОБНОВЛЕННАЯ ВЕРСИЯ с полной интеграцией Shadow Trading
+    ИСПРАВЛЕННАЯ ВЕРСИЯ с полной интеграцией Shadow Trading и диагностикой мета-модели
     """
     logger.info(f"🔍 Поиск сигнала для {symbol}...")
     signal_logger.info(f"====== НАЧАЛО ЦИКЛА ДЛЯ {symbol} ======")
@@ -472,54 +472,12 @@ class IntegratedTradingSystem:
         signal_logger.info(f"РЕЖИМ: Торговля не рекомендуется.")
         return
 
-      # --- ПРИОРИТЕТНАЯ ПРОВЕРКА ДЛЯ СЕТОЧНОЙ СТРАТЕГИИ и SAR ---
       active_strategies_from_dashboard = self.state_manager.get_custom_data('active_strategies') or {}
+
+      # ИСПРАВЛЕНИЕ: Единое объявление candidate_signals
       candidate_signals: Dict[str, TradingSignal] = {}
-      # Проверяем SAR стратегию отдельно
-      if "Stop_and_Reverse" in regime_params.recommended_strategies and active_strategies_from_dashboard.get(
-          "Stop_and_Reverse", True):
-        if self.sar_strategy and symbol in self.sar_strategy.monitored_symbols:
-          try:
-            # Очищаем старый кэш перед генерацией сигнала
-            self.sar_strategy._clear_old_cache()
 
-            sar_signal = await self.sar_strategy.generate_signal(symbol, htf_data)
-            if sar_signal and sar_signal.signal_type != SignalType.HOLD:
-              # Обновляем статус позиции в SAR стратегии
-              current_position = self.position_manager.open_positions.get(symbol)
-              await self.sar_strategy.update_position_status(symbol, current_position)
-
-              # Применяем адаптивный вес
-              weight = self.adaptive_selector.get_strategy_weight(
-                "Stop_and_Reverse", regime_characteristics.primary_regime.value
-              )
-              sar_signal.confidence *= weight
-
-              # Интеграция с Shadow Trading
-              if self.shadow_trading:
-                signal_id = await self.shadow_trading.process_signal(
-                  signal=sar_signal,
-                  metadata={
-                    'source': 'sar_strategy',
-                    'strategy_name': 'Stop_and_Reverse',
-                    'signal_score': sar_signal.metadata.get('signal_score', 0),
-                    'sar_components': sar_signal.metadata.get('sar_components', {}),
-                    'filter_reason': sar_signal.metadata.get('filter_reason', ''),
-                    'market_regime': regime_characteristics.primary_regime.value,
-                    'volatility_level': 'normal',  # TODO: динамически определять
-                    'confidence_score': sar_signal.confidence
-                  },
-                  was_filtered=False
-                )
-                # Сохраняем ID для отслеживания
-                sar_signal.metadata['shadow_tracking_id'] = signal_id
-
-              candidate_signals["Stop_and_Reverse"] = sar_signal
-              logger.info(f"SAR сигнал для {symbol}: {sar_signal.signal_type.value}, "
-                          f"confidence={sar_signal.confidence:.3f}, вес={weight:.2f}")
-          except Exception as e:
-            logger.error(f"Ошибка получения SAR сигнала для {symbol}: {e}")
-
+      # Проверяем Grid Trading первым (приоритет)
       if "Grid_Trading" in regime_params.recommended_strategies and active_strategies_from_dashboard.get("Grid_Trading",
                                                                                                          True):
         logger.info(
@@ -533,10 +491,50 @@ class IntegratedTradingSystem:
         else:
           logger.info("GridStrategy не сгенерировала сигнал. Переход к стандартной логике.")
 
-      candidate_signals: Dict[str, TradingSignal] = {}
+      # Проверяем SAR стратегию отдельно
+      if "Stop_and_Reverse" in regime_params.recommended_strategies and active_strategies_from_dashboard.get(
+          "Stop_and_Reverse", True):
+        if self.sar_strategy and symbol in self.sar_strategy.monitored_symbols:
+          try:
+            self.sar_strategy._clear_old_cache()
+            sar_signal = await self.sar_strategy.generate_signal(symbol, htf_data)
+
+            if sar_signal and sar_signal.signal_type != SignalType.HOLD:
+              current_position = self.position_manager.open_positions.get(symbol)
+              await self.sar_strategy.update_position_status(symbol, current_position)
+
+              weight = self.adaptive_selector.get_strategy_weight("Stop_and_Reverse",
+                                                                  regime_characteristics.primary_regime.value)
+              sar_signal.confidence *= weight
+
+              # Интеграция с Shadow Trading
+              if self.shadow_trading:
+                signal_id = await self.shadow_trading.process_signal(
+                  signal=sar_signal,
+                  metadata={
+                    'source': 'sar_strategy',
+                    'strategy_name': 'Stop_and_Reverse',
+                    'signal_score': sar_signal.metadata.get('signal_score', 0),
+                    'sar_components': sar_signal.metadata.get('sar_components', {}),
+                    'filter_reason': sar_signal.metadata.get('filter_reason', ''),
+                    'market_regime': regime_characteristics.primary_regime.value,
+                    'volatility_level': 'normal',
+                    'confidence_score': sar_signal.confidence
+                  },
+                  was_filtered=False
+                )
+                sar_signal.metadata['shadow_tracking_id'] = signal_id
+
+              candidate_signals["Stop_and_Reverse"] = sar_signal
+              logger.info(
+                f"SAR сигнал для {symbol}: {sar_signal.signal_type.value}, confidence={sar_signal.confidence:.3f}, вес={weight:.2f}")
+          except Exception as e:
+            logger.error(f"Ошибка получения SAR сигнала для {symbol}: {e}")
+
+      # Проверяем остальные стратегии
       for strategy_name in regime_params.recommended_strategies:
-        if strategy_name == "Grid_Trading":
-          continue
+        if strategy_name in ["Grid_Trading", "Stop_and_Reverse"]:
+          continue  # Уже обработаны выше
 
         if not active_strategies_from_dashboard.get(strategy_name, True):
           logger.debug(f"Стратегия {strategy_name} отключена в дашборде, пропускаем.")
@@ -556,34 +554,105 @@ class IntegratedTradingSystem:
           signal_logger.info(
             f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, Уверенность: {signal.confidence:.2f}")
 
-      # --- УРОВЕНЬ 3: МЕТА-МОДЕЛЬ И ПРИНЯТИЕ РЕШЕНИЙ ---
+      # --- УРОВЕНЬ 3: МЕТА-МОДЕЛЬ С ДИАГНОСТИКОЙ ---
       final_signal: Optional[TradingSignal] = None
+
       if self.enhanced_ml_model and self.use_enhanced_ml:
-        logger.debug(f"Использование EnhancedEnsembleModel как финального арбитра для {symbol}...")
+        # === ДИАГНОСТИЧЕСКИЙ БЛОК ===
+        current_price = htf_data['close'].iloc[-1]
+        price_change_24h = ((current_price - htf_data['close'].iloc[-24]) / htf_data['close'].iloc[-24]) * 100 if len(
+          htf_data) >= 24 else 0
+
+        signal_logger.info(f"🔍 ДИАГНОСТИКА МЕТА-МОДЕЛИ для {symbol}:")
+        signal_logger.info(
+          f"  Режим: {regime_characteristics.primary_regime.value} (уверенность: {regime_characteristics.confidence:.2f})")
+        signal_logger.info(f"  Цена 24ч: {price_change_24h:+.2f}%")
+        signal_logger.info(f"  Кандидаты: {list(candidate_signals.keys())}")
+
+        for strategy_name, signal in candidate_signals.items():
+          signal_logger.info(f"  {strategy_name}: {signal.signal_type.value}, уверенность={signal.confidence:.3f}")
+
+        # Получаем предсказание мета-модели
         _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
 
         if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
-          signal_logger.info(
-            f"МЕТА-МОДЕЛЬ: Предсказание {ml_prediction.signal_type.value}, Уверенность: {ml_prediction.confidence:.2f}")
+          # === РАСШИРЕННАЯ ДИАГНОСТИКА ПРЕДСКАЗАНИЯ ===
+          signal_logger.info(f"МЕТА-МОДЕЛЬ ДЕТАЛЬНО:")
+          signal_logger.info(f"  Предсказание: {ml_prediction.signal_type.value}")
+          signal_logger.info(f"  Уверенность: {ml_prediction.confidence:.3f}")
+          signal_logger.info(f"  Метаданные: {ml_prediction.metadata}")
 
-          if any(s.signal_type == ml_prediction.signal_type for s in candidate_signals.values()):
-            logger.info(f"Мета-модель подтверждена сигналом от другой стратегии для {symbol}.")
+          # Анализ соответствия режиму
+          regime_expected_direction = None
+          if 'trend_up' in regime_characteristics.primary_regime.value.lower():
+            regime_expected_direction = 'BUY'
+          elif 'trend_down' in regime_characteristics.primary_regime.value.lower():
+            regime_expected_direction = 'SELL'
+
+          if regime_expected_direction:
+            direction_match = ml_prediction.signal_type.value == regime_expected_direction
+            signal_logger.info(
+              f"  Соответствие режиму: {'✅' if direction_match else '❌'} (ожидался {regime_expected_direction})")
+
+            # КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ при несоответствии
+            if not direction_match and regime_characteristics.confidence > 0.8:
+              signal_logger.warning(
+                f"⚠️ КОНФЛИКТ: Мета-модель предсказывает {ml_prediction.signal_type.value}, но режим {regime_characteristics.primary_regime.value}")
+              signal_logger.warning(
+                f"⚠️ Цена движется {'вверх' if price_change_24h > 0 else 'вниз'} ({price_change_24h:+.2f}%)")
+
+          # === НОВАЯ ЛОГИКА ВАЛИДАЦИИ ===
+          # Используем существующий метод валидации согласованности (если есть)
+          is_consistent = True
+          consistency_reason = "Базовая проверка пройдена"
+
+          if hasattr(self, '_validate_signal_consistency'):
+            is_consistent, consistency_reason = await self._validate_signal_consistency(
+              symbol, ml_prediction, regime_characteristics, htf_data
+            )
+            signal_logger.info(f"СОГЛАСОВАННОСТЬ: {consistency_reason}")
+
+          # Проверяем подтверждение от стратегий
+          has_confirmation = any(s.signal_type == ml_prediction.signal_type for s in candidate_signals.values())
+
+          if is_consistent and has_confirmation:
             final_signal = TradingSignal(
               signal_type=ml_prediction.signal_type,
               symbol=symbol,
               price=htf_data['close'].iloc[-1],
               confidence=ml_prediction.confidence,
-              strategy_name="Ensemble_Confirmed",
+              strategy_name="Ensemble_Validated",
               timestamp=datetime.now(),
-              metadata={'ml_prediction': ml_prediction.metadata}
+              metadata={'ml_prediction': ml_prediction.metadata, 'consistency_check': consistency_reason}
             )
-            signal_logger.info(f"РЕШЕНИЕ: Сигнал мета-модели принят.")
+            signal_logger.info(f"✅ РЕШЕНИЕ: Сигнал мета-модели принят после валидации.")
+          elif not is_consistent:
+            signal_logger.warning(f"❌ МЕТА-МОДЕЛЬ ОТКЛОНЕНА: {consistency_reason}")
           else:
             signal_logger.warning(f"РЕШЕНИЕ: Сигнал мета-модели отклонен - нет подтверждения.")
         else:
           signal_logger.info(f"РЕШЕНИЕ: Мета-модель предсказывает HOLD, сигнал не генерируется.")
 
-      # Если мета-модель не дала сигнал, выбираем лучший из кандидатов
+      # === FALLBACK: Приоритет режима при отклонении мета-модели ===
+      if not final_signal and candidate_signals and regime_characteristics.confidence > 0.8:
+        regime_expected = None
+        if 'trend_up' in regime_characteristics.primary_regime.value.lower():
+          regime_expected = SignalType.BUY
+        elif 'trend_down' in regime_characteristics.primary_regime.value.lower():
+          regime_expected = SignalType.SELL
+
+        if regime_expected:
+          regime_aligned_signals = [
+            signal for signal in candidate_signals.values()
+            if signal.signal_type == regime_expected and signal.confidence > 0.6
+          ]
+
+          if regime_aligned_signals:
+            best_regime_signal = max(regime_aligned_signals, key=lambda s: s.confidence)
+            final_signal = best_regime_signal
+            signal_logger.info(f"🎯 FALLBACK: Принят сигнал {best_regime_signal.strategy_name} по направлению режима")
+
+      # Если ничего не сработало, выбираем лучший кандидат
       if not final_signal and candidate_signals:
         best_signal = max(candidate_signals.values(), key=lambda s: s.confidence)
         if best_signal.confidence > regime_params.min_signal_quality:
@@ -592,97 +661,16 @@ class IntegratedTradingSystem:
         else:
           signal_logger.warning(f"РЕШЕНИЕ: Лучший сигнал ({best_signal.strategy_name}) отклонен - низкая уверенность.")
 
-      # ============ ИНТЕГРАЦИЯ SHADOW TRADING ============
+      # === ОБРАБОТКА ФИНАЛЬНОГО СИГНАЛА ===
       if final_signal and final_signal.signal_type != SignalType.HOLD:
         signal_logger.info(f"🎯 НОВЫЙ СИГНАЛ {symbol}: {final_signal.signal_type.value} @ {final_signal.price}")
 
-        # ЭТАП 1: Подготовка расширенных метаданных для Shadow Trading
-        signal_metadata = await self._prepare_signal_metadata(symbol, final_signal, htf_data)
-
-        # ЭТАП 2: Регистрация в Shadow Trading ДО фильтрации
-        shadow_signal_id = ""
-        if self.shadow_trading:
-          try:
-            shadow_signal_id = await self.shadow_trading.process_signal(
-              signal=final_signal,
-              metadata=signal_metadata,
-              was_filtered=False
-            )
-
-            if shadow_signal_id:
-              signal_logger.info(f"📊 Shadow ID: {shadow_signal_id}")
-              # Добавляем связь с Shadow Trading в метаданные сигнала
-              final_signal.metadata = final_signal.metadata or {}
-              final_signal.metadata['shadow_tracking_id'] = shadow_signal_id
-
-          except Exception as shadow_error:
-            logger.warning(f"Ошибка регистрации в Shadow Trading: {shadow_error}")
-
-        # ЭТАП 3: Проверка риск-менеджером
-        risk_decision = await self.risk_manager.validate_signal(
-          signal=final_signal,
-          symbol=symbol,
-          account_balance=self.account_balance.available_balance_usdt,
-          market_data=htf_data
-        )
-
-        # ЭТАП 4: Обработка результата риск-менеджера
-        if not risk_decision.get('approved'):
-          rejection_reasons = risk_decision.get('reasons', [])
-          signal_logger.warning(f"🚫 СИГНАЛ {symbol} ОТКЛОНЕН: {rejection_reasons}")
-
-          # ВАЖНО: Отмечаем в Shadow Trading как отфильтрованный
-          if self.shadow_trading and shadow_signal_id:
-            try:
-              filter_reasons = self._convert_rejection_reasons_to_filter_reasons(rejection_reasons)
-              await self.shadow_trading.signal_tracker.mark_signal_filtered(
-                shadow_signal_id, filter_reasons
-              )
-              logger.debug(f"🚫 Сигнал {shadow_signal_id} помечен как отфильтрованный")
-            except Exception as filter_error:
-              logger.warning(f"Ошибка отметки фильтрации в Shadow Trading: {filter_error}")
-          return
-
-        # ЭТАП 5: Сигнал одобрен - исполняем
-        recommended_size = risk_decision.get('recommended_size')
-        signal_logger.info(f"✅ СИГНАЛ {symbol} ОДОБРЕН, размер: {recommended_size}")
-
-        success, order_data = await self.trade_executor.execute_trade(
-          final_signal, symbol, recommended_size
-        )
-
-        # ЭТАП 6: Обновление Shadow Trading по результату исполнения
-        if self.shadow_trading and shadow_signal_id:
-          try:
-            execution_result = {
-              'executed': success,
-              'execution_price': order_data.get('price') if order_data and success else final_signal.price,
-              'quantity': recommended_size,
-              'order_id': order_data.get('order_id') if order_data and success else None,
-              'execution_time': datetime.now().isoformat(),
-              'execution_success': success,
-              'risk_manager_data': {
-                'recommended_size': recommended_size,
-                'risk_level': risk_decision.get('risk_level'),
-                'position_impact': risk_decision.get('position_impact')
-              }
-            }
-
-            # Обновляем метаданные в Shadow Trading
-            tracked_signal = self.shadow_trading.signal_tracker.tracked_signals.get(shadow_signal_id)
-            if tracked_signal:
-              if not hasattr(tracked_signal, 'execution_data'):
-                tracked_signal.execution_data = {}
-              tracked_signal.execution_data.update(execution_result)
-              tracked_signal.updated_at = datetime.now()
-
-            if success:
-              signal_logger.info(f"✅ Исполнение {symbol} успешно, отслеживается в Shadow Trading")
-            else:
-              signal_logger.error(f"❌ Ошибка исполнения {symbol}, продолжаем отслеживание в Shadow Trading")
-
-          except Exception as execution_update_error:
-            logger.warning(f"Ошибка обновления исполнения в Shadow Trading: {execution_update_error}")
+        # ИСПОЛЬЗУЕМ СУЩЕСТВУЮЩИЙ ПРОДВИНУТЫЙ МЕТОД ОБРАБОТКИ
+        if hasattr(self, '_process_trading_signal_with_correlation_and_quality'):
+          await self._process_trading_signal_with_correlation_and_quality(final_signal, symbol, htf_data)
+        else:
+          # Fallback к старому методу если новый не найден
+          await self._process_trading_signal(final_signal, symbol, htf_data)
       else:
         logger.info(f"Для {symbol} не найдено подходящего сигнала в текущем режиме.")
         signal_logger.info(f"ИТОГ: Сигнал не сформирован.")
@@ -760,6 +748,64 @@ class IntegratedTradingSystem:
 
     logger.info(f"✅ Enhanced сигнал для {symbol} одобрен и поставлен в очередь")
     signal_logger.info(f"====== ENHANCED СИГНАЛ ДЛЯ {symbol} ПОСТАВЛЕН В ОЧЕРЕДЬ ======")
+
+  async def _validate_signal_consistency(self, symbol: str, ml_prediction, regime_characteristics,
+                                         htf_data: pd.DataFrame) -> tuple[bool, str]:
+    """
+    Проверяет согласованность сигнала мета-модели с режимом рынка и движением цены
+
+    Returns:
+        (is_valid, reason)
+    """
+    try:
+      if not ml_prediction or ml_prediction.signal_type == SignalType.HOLD:
+        return True, "HOLD сигнал всегда валиден"
+
+      # Анализ движения цены
+      current_price = htf_data['close'].iloc[-1]
+      price_1h_ago = htf_data['close'].iloc[-2] if len(htf_data) >= 2 else current_price
+      price_4h_ago = htf_data['close'].iloc[-5] if len(htf_data) >= 5 else current_price
+
+      price_change_1h = ((current_price - price_1h_ago) / price_1h_ago) * 100
+      price_change_4h = ((current_price - price_4h_ago) / price_4h_ago) * 100
+
+      # Определяем направление тренда по режиму
+      regime_direction = None
+      if 'trend_up' in regime_characteristics.primary_regime.value.lower():
+        regime_direction = 'BUY'
+      elif 'trend_down' in regime_characteristics.primary_regime.value.lower():
+        regime_direction = 'SELL'
+
+      # Определяем направление по движению цены
+      price_direction = 'BUY' if price_change_4h > 1 else ('SELL' if price_change_4h < -1 else 'NEUTRAL')
+
+      # Проверяем согласованность
+      signal_direction = ml_prediction.signal_type.value
+
+      # Критерии валидности
+      regime_match = regime_direction is None or signal_direction == regime_direction
+      price_match = price_direction == 'NEUTRAL' or signal_direction == price_direction
+
+      # Строгая проверка для сильных режимов
+      if regime_characteristics.confidence > 0.8 and regime_direction:
+        if not regime_match:
+          return False, f"Конфликт с режимом: сигнал {signal_direction}, режим ожидает {regime_direction}"
+
+      # Проверка против сильного движения цены
+      if abs(price_change_4h) > 3:  # Сильное движение >3%
+        if not price_match:
+          return False, f"Конфликт с ценой: сигнал {signal_direction}, цена движется {price_direction} ({price_change_4h:+.1f}%)"
+
+      # Проверка уверенности в контексте
+      min_confidence = 0.6 if regime_match and price_match else 0.75
+      if ml_prediction.confidence < min_confidence:
+        return False, f"Низкая уверенность для текущих условий: {ml_prediction.confidence:.3f} < {min_confidence}"
+
+      return True, "Сигнал согласован с режимом и движением цены"
+
+    except Exception as e:
+      logger.error(f"Ошибка валидации согласованности: {e}")
+      return False, f"Ошибка валидации: {e}"
 
   async def update_sar_symbols_task(self):
     """Обновляет список символов для SAR стратегии каждый час"""

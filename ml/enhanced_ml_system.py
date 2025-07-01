@@ -46,414 +46,7 @@ class AdvancedFeatureEngineer:
   def __init__(self):
     self.feature_names = []
     self.feature_stats = {}
-  #
-  # def create_advanced_features(self, data: pd.DataFrame,
-  #                              external_data: Optional[Dict[str, pd.DataFrame]] = None) -> pd.DataFrame:
-  #   """
-  #   Создает продвинутые признаки включая межрыночные корреляции
-  #   """
-  #   logger.debug("Создание продвинутых признаков с сохранением базовых колонок...")
-  #
-  #   # Проверяем наличие базовых колонок
-  #   base_columns = ['open', 'high', 'low', 'close', 'volume']
-  #   available_base = [col for col in base_columns if col in data.columns]
-  #
-  #   logger.info(f"Доступные базовые колонки: {available_base}")
-  #
-  #   # Сохраняем оригинальный индекс и базовые данные
-  #   original_index = data.index.copy()
-  #   original_length = len(data)
-  #   # base_data = data[available_base].copy() if available_base else pd.DataFrame(index=original_index)
-  #
-  #   # Создаем DataFrame для всех признаков, начиная с базовых
-  #   # features = data.copy()
-  #   if available_base:
-  #     features = data[available_base].copy()
-  #   else:
-  #     features = pd.DataFrame(index=original_index)
-  #
-  #
-  #   # original_index = data.index.copy()
-  #   # original_length = len(data)
-  #
-  #   logger.debug(f"Создание признаков: входной размер={data.shape}, индекс={type(data.index)}")
-  #
-  #   if not isinstance(data.index, pd.DatetimeIndex):
-  #     logger.debug("Преобразуем индекс в datetime для межрыночного анализа...")
-  #     try:
-  #       # Пытаемся преобразовать существующий индекс
-  #       if hasattr(data.index, 'to_datetime'):
-  #         data = data.copy()
-  #         data.index = pd.to_datetime(data.index)
-  #         logger.debug("✅ Индекс успешно преобразован в datetime")
-  #       else:
-  #         # Создаем искусственный datetime индекс
-  #         logger.debug("Создаем искусственный datetime индекс...")
-  #         start_date = pd.Timestamp('2024-01-01')
-  #         freq = '1H'  # Частота данных
-  #         new_index = pd.date_range(start=start_date, periods=len(data), freq=freq)
-  #         data = data.copy()
-  #         data.index = new_index
-  #         logger.debug(f"✅ Создан datetime индекс: {len(data)} периодов с частотой {freq}")
-  #     except Exception as index_error:
-  #       logger.warning(f"Не удалось создать datetime индекс: {index_error}")
-  #       # Продолжаем без datetime индекса
-  #   else:
-  #     logger.debug("✅ Данные уже имеют datetime индекс")
-  #
-  #   features = pd.DataFrame(index=data.index)
-  #
-  #   try:
-  #     # 1. Микроструктурные признаки
-  #     microstructure_features = self._create_microstructure_features(data)
-  #     features = pd.concat([features, microstructure_features], axis=1)
-  #
-  #     # 2. Признаки рыночных режимов
-  #     regime_features = self._create_regime_features(data)
-  #     features = pd.concat([features, regime_features], axis=1)
-  #
-  #     # 3. Признаки на основе теории информации
-  #     information_features = self._create_information_features(data)
-  #     features = pd.concat([features, information_features], axis=1)
-  #
-  #     # 4. Нелинейные взаимодействия
-  #     interaction_features = self._create_interaction_features(data)
-  #     features = pd.concat([features, interaction_features], axis=1)
-  #
-  #     # 5. Межрыночные признаки (только если индексы совместимы)
-  #     if external_data and isinstance(data.index, pd.DatetimeIndex):
-  #       try:
-  #         cross_market_features = self._create_cross_market_features(data, external_data)
-  #         features = pd.concat([features, cross_market_features], axis=1)
-  #       except Exception as cross_error:
-  #         logger.warning(f"Ошибка межрыночных признаков: {cross_error}")
-  #
-  #     # 6. Временные признаки
-  #     time_features = self._create_time_features(data)
-  #     features = pd.concat([features, time_features], axis=1)
-  #
-  #     # 7. Признаки памяти рынка
-  #     memory_features = self._create_memory_features(data)
-  #     features = pd.concat([features, memory_features], axis=1)
-  #
-  #     # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Убеждаемся, что индекс не изменился
-  #     if len(features) != original_length:
-  #       logger.warning(f"Размер изменился при создании признаков: {original_length} -> {len(features)}")
-  #       # Подрезаем или дополняем до оригинального размера
-  #       if len(features) > original_length:
-  #         features = features.iloc[:original_length]
-  #       elif len(features) < original_length:
-  #         # Дополняем недостающие строки нулями
-  #         missing_rows = original_length - len(features)
-  #         missing_index = original_index[-missing_rows:]
-  #         missing_data = pd.DataFrame(0, index=missing_index, columns=features.columns)
-  #         features = pd.concat([features, missing_data])
-  #
-  #     # Принудительно восстанавливаем оригинальный индекс
-  #     features.index = original_index
-  #
-  #     logger.debug(
-  #       f"Результат создания признаков: размер={features.shape}, индекс сохранен={features.index.equals(original_index)}")
-  #
-  #     # Сохраняем имена признаков
-  #     self.feature_names = features.columns.tolist()
-  #
-  #     final_base_columns = [col for col in available_base if col in features.columns]
-  #     logger.info(f"Сохранено базовых колонок в итоговых признаках: {final_base_columns}")
-  #
-  #     return features
-  #
-  #   except Exception as e:
-  #     logger.error(f"Ошибка создания признаков: {e}")
-  #     # Возвращаем пустой DataFrame с правильным индексом
-  #     return pd.DataFrame(index=original_index)
 
-#   def create_advanced_features(self, data: pd.DataFrame,
-#                                external_data: Optional[Dict[str, pd.DataFrame]] = None) -> pd.DataFrame:
-#     """
-#     Создает продвинутые признаки включая межрыночные корреляции
-#     КРИТИЧЕСКИ ВАЖНО: Сохраняет базовые OHLCV колонки
-#     """
-#     logger.debug("Создание продвинутых признаков с сохранением базовых колонок...")
-#
-#     # Проверяем наличие базовых колонок
-#     base_columns = ['open', 'high', 'low', 'close', 'volume']
-#     available_base = [col for col in base_columns if col in data.columns]
-#
-#     logger.info(f"Доступные базовые колонки: {available_base}")
-#
-#     # Сохраняем оригинальный индекс и длину
-#     original_index = data.index.copy()
-#     original_length = len(data)
-#
-#     # КРИТИЧЕСКИ ВАЖНО: Сохраняем базовые колонки отдельно
-#     base_data = data[available_base].copy() if available_base else None
-#
-#     logger.debug(f"Создание признаков: входной размер={data.shape}, индекс={type(data.index)}")
-#
-#     if not isinstance(data.index, pd.DatetimeIndex):
-#       logger.debug("Преобразуем индекс в datetime для межрыночного анализа...")
-#       try:
-#         # Пытаемся преобразовать существующий индекс
-#         if hasattr(data.index, 'to_datetime'):
-#           data = data.copy()
-#           data.index = pd.to_datetime(data.index)
-#           logger.debug("✅ Индекс успешно преобразован в datetime")
-#         else:
-#           # Создаем искусственный datetime индекс
-#           logger.debug("Создаем искусственный datetime индекс...")
-#           start_date = pd.Timestamp('2024-01-01')
-#           freq = '1H'  # Частота данных
-#           new_index = pd.date_range(start=start_date, periods=len(data), freq=freq)
-#           data = data.copy()
-#           data.index = new_index
-#           logger.debug(f"✅ Создан datetime индекс: {len(data)} периодов с частотой {freq}")
-#       except Exception as index_error:
-#         logger.warning(f"Не удалось создать datetime индекс: {index_error}")
-#         # Продолжаем без datetime индекса
-#     else:
-#       logger.debug("✅ Данные уже имеют datetime индекс")
-#
-#     # Список для накопления всех признаков
-#     all_features_list = []
-#
-#     try:
-#       # 1. Микроструктурные признаки
-#       microstructure_features = self._create_microstructure_features(data)
-#       if not microstructure_features.empty:
-#         all_features_list.append(microstructure_features)
-#
-#       # 2. Признаки рыночных режимов
-#       regime_features = self._create_regime_features(data)
-#       if not regime_features.empty:
-#         all_features_list.append(regime_features)
-#
-#       # 3. Признаки на основе теории информации
-#       information_features = self._create_information_features(data)
-#       if not information_features.empty:
-#         all_features_list.append(information_features)
-#
-#       # 4. Нелинейные взаимодействия
-#       interaction_features = self._create_interaction_features(data)
-#       if not interaction_features.empty:
-#         all_features_list.append(interaction_features)
-#
-#       # 5. Межрыночные признаки (только если индексы совместимы)
-#       if external_data and isinstance(data.index, pd.DatetimeIndex):
-#         try:
-#           cross_market_features = self._create_cross_market_features(data, external_data)
-#           if not cross_market_features.empty:
-#             all_features_list.append(cross_market_features)
-#         except Exception as cross_error:
-#           logger.warning(f"Ошибка межрыночных признаков: {cross_error}")
-#
-#       # 6. Временные признаки
-#       time_features = self._create_time_features(data)
-#       if not time_features.empty:
-#         all_features_list.append(time_features)
-#
-#       # 7. Признаки памяти рынка
-#       memory_features = self._create_memory_features(data)
-#       if not memory_features.empty:
-#         all_features_list.append(memory_features)
-# #----------------------------------------------------------------------------------
-#       # # КРИТИЧЕСКОЕ ОБЪЕДИНЕНИЕ: Сначала базовые колонки, потом все остальное
-#       # if base_data is not None and not base_data.empty:
-#       #   # Начинаем с базовых данных
-#       #   features = base_data.copy()
-#       #
-#       #   # Добавляем все дополнительные признаки
-#       #   if all_features_list:
-#       #     # Объединяем все дополнительные признаки
-#       #     additional_features = pd.concat(all_features_list, axis=1)
-#       #     # Добавляем их к базовым данным
-#       #     features = pd.concat([features, additional_features], axis=1)
-#       # else:
-#       #   # Если нет базовых данных, объединяем только дополнительные признаки
-#       #   if all_features_list:
-#       #     features = pd.concat(all_features_list, axis=1)
-#       #   else:
-#       #     features = pd.DataFrame(index=original_index)
-# #----------------------------------------------------------------------------------
-#       # КРИТИЧЕСКОЕ ОБЪЕДИНЕНИЕ: Собираем все части в один список
-#       all_parts = []
-#       if base_data is not None and not base_data.empty:
-#         all_parts.append(base_data)
-#
-#       if all_features_list:
-#         all_parts.extend(all_features_list)
-#
-#       # Выполняем объединение один раз для всех частей
-#       if all_parts:
-#         features = pd.concat(all_parts, axis=1)
-#       else:
-#         features = pd.DataFrame(index=original_index)
-#
-#
-#       # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Убеждаемся, что индекс не изменился
-#       if len(features) != original_length:
-#         logger.warning(f"Размер изменился при создании признаков: {original_length} -> {len(features)}")
-#         # Подрезаем или дополняем до оригинального размера
-#         if len(features) > original_length:
-#           features = features.iloc[:original_length]
-#         elif len(features) < original_length:
-#           # Дополняем недостающие строки нулями
-#           missing_rows = original_length - len(features)
-#           missing_index = original_index[-missing_rows:]
-#           missing_data = pd.DataFrame(0, index=missing_index, columns=features.columns)
-#           features = pd.concat([features, missing_data])
-#
-#       # Принудительно восстанавливаем оригинальный индекс
-#       features.index = original_index
-#
-#       logger.debug(
-#         f"Результат создания признаков: размер={features.shape}, индекс сохранен={features.index.equals(original_index)}")
-#
-#       # Сохраняем имена признаков
-#       self.feature_names = features.columns.tolist()
-#
-#       # Проверяем наличие базовых колонок в финальных признаках
-#       final_base_columns = [col for col in available_base if col in features.columns]
-#       logger.info(f"Сохранено базовых колонок в итоговых признаках: {final_base_columns}")
-#
-#       if not final_base_columns and available_base:
-#         logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Базовые колонки были потеряны в процессе создания признаков!")
-#         logger.error(f"Доступные колонки в результате: {list(features.columns[:10])}")
-#
-#       return features
-#
-#     except Exception as e:
-#       logger.error(f"Ошибка создания признаков: {e}")
-#       # Возвращаем хотя бы базовые данные если они есть
-#       if base_data is not None and not base_data.empty:
-#         return base_data
-#       else:
-#         return pd.DataFrame(index=original_index)
-
-  # def create_advanced_features(self, data: pd.DataFrame,
-  #                              external_data: Optional[Dict[str, pd.DataFrame]] = None) -> pd.DataFrame:
-  #   """
-  #   ОПТИМАЛЬНАЯ ВЕРСИЯ: Создает продвинутые признаки, сохраняя базовые колонки
-  #   и избегая удвоения строк.
-  #   """
-  #   logger.debug("Запуск оптимальной версии create_advanced_features...")
-  #
-  #   # --- ШАГ 0: УСТРАНЕНИЕ КОРЕННОЙ ПРОБЛЕМЫ - НЕУНИКАЛЬНЫЙ ИНДЕКС ---
-  #   if not data.index.is_unique:
-  #     logger.warning(
-  #       f"Обнаружен неуникальный индекс. Размер до дедупликации: {len(data)}. Выполняется удаление дубликатов...")
-  #     data = data.loc[~data.index.duplicated(keep='first')]
-  #     logger.info(f"Размер после дедупликации индекса: {len(data)}")
-  #
-  #   # --- Шаг 1: Надежное сохранение базовых данных и исходного индекса ---
-  #   original_index = data.index.copy()
-  #   original_length = len(data)
-  #   base_columns = ['open', 'high', 'low', 'close', 'volume']
-  #   available_base = [col for col in base_columns if col in data.columns]
-  #   logger.info(f"Найдены базовые колонки для сохранения: {available_base}")
-  #   base_data = data[available_base].copy() if available_base else None
-  #
-  #   # --- Шаг 2: Обработка индекса для анализа (без изменений) ---
-  #   if not isinstance(data.index, pd.DatetimeIndex):
-  #     logger.debug("Преобразуем индекс в datetime для межрыночного анализа...")
-  #     try:
-  #       if hasattr(data.index, 'to_datetime'):
-  #         data = data.copy()
-  #         data.index = pd.to_datetime(data.index)
-  #       else:
-  #         start_date = pd.Timestamp('2024-01-01')
-  #         freq = '1H'
-  #         new_index = pd.date_range(start=start_date, periods=len(data), freq=freq)
-  #         data = data.copy()
-  #         data.index = new_index
-  #       logger.debug("✅ Индекс успешно подготовлен для анализа.")
-  #     except Exception as index_error:
-  #       logger.warning(f"Не удалось создать datetime индекс: {index_error}")
-  #   else:
-  #     logger.debug("✅ Данные уже имеют datetime индекс.")
-  #
-  #   # --- Шаг 3: Генерация всех дополнительных признаков ---
-  #   all_features_list = []
-  #   try:
-  #     # Микроструктурные признаки
-  #     microstructure_features = self._create_microstructure_features(data)
-  #     if not microstructure_features.empty:
-  #       all_features_list.append(microstructure_features)
-  #
-  #     # Признаки рыночных режимов
-  #     regime_features = self._create_regime_features(data)
-  #     if not regime_features.empty:
-  #       all_features_list.append(regime_features)
-  #
-  #     # Признаки на основе теории информации
-  #     information_features = self._create_information_features(data)
-  #     if not information_features.empty:
-  #       all_features_list.append(information_features)
-  #
-  #     # Нелинейные взаимодействия
-  #     interaction_features = self._create_interaction_features(data)
-  #     if not interaction_features.empty:
-  #       all_features_list.append(interaction_features)
-  #
-  #     # Межрыночные признаки
-  #     if external_data and isinstance(data.index, pd.DatetimeIndex):
-  #       try:
-  #         cross_market_features = self._create_cross_market_features(data, external_data)
-  #         if not cross_market_features.empty:
-  #           all_features_list.append(cross_market_features)
-  #       except Exception as cross_error:
-  #         logger.warning(f"Ошибка межрыночных признаков: {cross_error}")
-  #
-  #     # Временные признаки
-  #     time_features = self._create_time_features(data)
-  #     if not time_features.empty:
-  #       all_features_list.append(time_features)
-  #
-  #     # Признаки памяти рынка
-  #     memory_features = self._create_memory_features(data)
-  #     if not memory_features.empty:
-  #       all_features_list.append(memory_features)
-  #
-  #     # --- Шаг 4: ОПТИМАЛЬНОЕ И БЕЗОПАСНОЕ ОБЪЕДИНЕНИЕ ---
-  #     all_parts_to_concat = []
-  #     if base_data is not None:
-  #       all_parts_to_concat.append(base_data)
-  #
-  #     if all_features_list:
-  #       all_parts_to_concat.extend(all_features_list)
-  #
-  #     if all_parts_to_concat:
-  #       features = pd.concat(all_parts_to_concat, axis=1)
-  #     else:
-  #       # Fallback на случай, если ничего не было сгенерировано
-  #       features = pd.DataFrame(index=original_index)
-  #
-  #     # --- Шаг 5: Финальная проверка (теперь не должна находить расхождений) ---
-  #     if len(features) != original_length:
-  #       logger.error(f"РАЗМЕР ВСЕ РАВНО ИЗМЕНИЛСЯ: {original_length} -> {len(features)}. ПРОВЕРЬТЕ ЛОГИКУ!")
-  #       if len(features) > original_length:
-  #         features = features.iloc[:original_length]
-  #
-  #     features.index = original_index
-  #
-  #     logger.debug(
-  #       f"Результат создания признаков: размер={features.shape}, индекс сохранен={features.index.equals(original_index)}")
-  #
-  #     # --- Шаг 6: Финальные логи и возврат результата ---
-  #     self.feature_names = features.columns.tolist()
-  #     final_base_cols_check = [col for col in available_base if col in features.columns]
-  #     logger.info(
-  #       f"✅ Успешно создано {len(self.feature_names)} признаков. Сохраненные базовые колонки: {final_base_cols_check}")
-  #
-  #     if len(available_base) > 0 and not final_base_cols_check:
-  #       logger.error("КРИТИЧЕСКАЯ ОШИБКА: Базовые колонки были потеряны!")
-  #
-  #     return features
-  #
-  #   except Exception as e:
-  #     logger.error(f"Критическая ошибка при создании признаков: {e}")
-  #     # В случае ошибки возвращаем хотя бы базовые данные, если они есть
-  #     return base_data if base_data is not None else pd.DataFrame(index=original_index)
 
   def create_advanced_features(self, data: pd.DataFrame,
                                external_data: Optional[Dict[str, pd.DataFrame]] = None) -> pd.DataFrame:
@@ -1349,7 +942,12 @@ class EnhancedEnsembleModel:
   def __init__(self, anomaly_detector: Optional[MarketAnomalyDetector] = None):
     self.anomaly_detector = anomaly_detector
     self.feature_engineer = AdvancedFeatureEngineer()
+    self.market_filter = MarketLogicFilter()
+    self.temporal_manager = TemporalDataManager()
+    self.use_temporal_management = True
+    self.use_market_filters = True  # Флаг для включения/отключения фильтров
 
+    self.balancing_method = 'smote'  # 'smote', 'class_weight', 'none', 'adaptive'
     # Базовые модели
     self.models = {
       'rf': RandomForestClassifier(
@@ -1357,7 +955,7 @@ class EnhancedEnsembleModel:
         max_depth=10,
         min_samples_split=50,
         min_samples_leaf=20,
-        class_weight='balanced',  # ДОБАВЛЕНО: автоматическая балансировка
+        # class_weight='balanced',  # ДОБАВЛЕНО: автоматическая балансировка
 
         random_state=42,
         n_jobs=-1
@@ -1367,7 +965,7 @@ class EnhancedEnsembleModel:
         learning_rate=0.05,
         max_depth=5,
         min_samples_leaf=20,
-        class_weight='balanced',
+        # class_weight='balanced',
         random_state=42
       ),
       'xgb': xgb.XGBClassifier(
@@ -1389,27 +987,67 @@ class EnhancedEnsembleModel:
         min_child_samples=20,
         subsample=0.8,
         colsample_bytree=0.8,
-        class_weight='balanced',
+        # class_weight='balanced',
         random_state=42,
         verbose=-1
       )
     }
 
     # Мета-модель для стекинга
-    self.meta_model = xgb.XGBClassifier(
-      n_estimators=50,
-      learning_rate=0.1,
-      max_depth=3,
+    # self.meta_model = xgb.XGBClassifier(
+    #   n_estimators=50,
+    #   learning_rate=0.1,
+    #   max_depth=3,
+    #   random_state=42,
+    #   use_label_encoder=False,
+    #   eval_metric='logloss'
+    # )
+    # self.meta_model = LogisticRegression(
+    #   C=1.0,
+    #   class_weight='balanced',
+    #   random_state=42,
+    #   max_iter=1000,
+    #   solver='liblinear'  # Лучше работает с малыми данными
+    # )
+    self.backup_meta_model = xgb.XGBClassifier(
+      n_estimators=30,  # Уменьшено для предотвращения переобучения
+      learning_rate=0.05,  # Более консервативный learning rate
+      max_depth=2,  # Ограничиваем глубину
+      min_child_weight=5,  # Увеличиваем для регуляризации
+      subsample=0.8,
+      colsample_bytree=0.8,
+      reg_alpha=0.1,  # L1 регуляризация
+      reg_lambda=0.1,  # L2 регуляризация
       random_state=42,
-      use_label_encoder=False,
-      eval_metric='logloss'
+      eval_metric='mlogloss'
     )
+    # Параметры мета-обучения
+    self.meta_model_config = {
+      'use_cross_validation': True,
+      'cv_folds': 3,
+      'validation_split': 0.2,
+      'min_samples_for_meta': 100,
+      'feature_selection': True,
+      'ensemble_weights': True
+    }
+
+    # Статистики мета-модели
+    self.meta_model_stats = {
+      'training_accuracy': None,
+      'validation_accuracy': None,
+      'feature_importance': None,
+      'is_reliable': False,
+      'fallback_reason': None
+    }
 
     # Скейлеры для разных групп признаков
-    self.scalers = {
-      'standard': StandardScaler(),
-      'robust': RobustScaler()
-    }
+    self.scaler = RobustScaler()  # RobustScaler более устойчив к выбросам в финансовых данных
+    self.backup_scaler = StandardScaler()  # Резервный скейлер
+    self.scaler_type_used = None  # Отслеживаем какой скейлер используется
+
+    # Информация о признаках для валидации
+    self.training_features = None  # Список признаков, использованных при обучении
+    self.feature_statistics = None  # Статистики признаков для валидации
 
     # Селектор признаков
     self.feature_selector = None
@@ -1420,319 +1058,485 @@ class EnhancedEnsembleModel:
     self.feature_importance_history = []
     self.is_fitted = False
 
-  # def fit(self, X: pd.DataFrame, y: pd.Series,
-  #         external_data: Optional[Dict[str, pd.DataFrame]] = None,
-  #         optimize_features: bool = True):
-  #   """
-  #   Обучение ансамбля с оптимизацией признаков и безопасной обработкой индексов
-  #   """
-  #   logger.info("Начало обучения Enhanced Ensemble Model...")
-  #
-  #   try:
-  #     # 1. Создание продвинутых признаков
-  #     logger.info("Создание продвинутых признаков...")
-  #     X_enhanced = self.feature_engineer.create_advanced_features(X, external_data)
-  #
-  #     # 2. Проверка и выравнивание индексов
-  #     logger.debug("Проверка соответствия индексов...")
-  #
-  #     # Находим общие индексы между признаками и метками
-  #     logger.info("=== ОТЛАДКА ИНДЕКСОВ ===")
-  #     logger.info(f"X_enhanced индекс: {X_enhanced.index[:5]}")
-  #     logger.info(f"y индекс: {y.index[:5]}")
-  #     logger.info(f"Размеры: X_enhanced={len(X_enhanced)}, y={len(y)}")
-  #
-  #     # ПРИНУДИТЕЛЬНОЕ ВЫРАВНИВАНИЕ ИНДЕКСОВ
-  #     if len(X_enhanced) == len(y):
-  #       logger.info("Размеры совпадают, принудительно синхронизируем индексы...")
-  #       # Создаем новый числовой индекс
-  #       new_index = range(len(X_enhanced))
-  #       X_enhanced.index = new_index
-  #       y.index = new_index
-  #       logger.info("✅ Индексы принудительно синхронизированы")
-  #
-  #       # Используем синхронизированные данные
-  #       X_aligned = X_enhanced
-  #       y_aligned = y
-  #
-  #     else:
-  #       logger.warning(f"Размеры не совпадают: X_enhanced={len(X_enhanced)}, y={len(y)}")
-  #       # Берем минимальный размер
-  #       min_size = min(len(X_enhanced), len(y))
-  #       logger.info(f"Обрезаем до минимального размера: {min_size}")
-  #
-  #       X_aligned = X_enhanced.iloc[:min_size].copy()
-  #       y_aligned = y.iloc[:min_size].copy()
-  #
-  #       # Устанавливаем одинаковые индексы
-  #       new_index = range(min_size)
-  #       X_aligned.index = new_index
-  #       y_aligned.index = new_index
-  #
-  #     logger.info(f"✅ Финальные размеры: X_aligned={X_aligned.shape}, y_aligned={y_aligned.shape}")
-  #     logger.info("=== КОНЕЦ ОТЛАДКИ ИНДЕКСОВ ===")
-  #
-  #     # ПРОДОЛЖАЕМ с X_aligned и y_aligned вместо common_index
-  #     if len(X_aligned) == 0:
-  #       raise ValueError("Нет данных после выравнивания")
-  #
-  #     if len(X_aligned) < 100:
-  #       logger.warning(f"Мало общих данных для обучения: {len(X_aligned)} образцов")
-  #
-  #     # Используем только общие индексы
-  #     X_aligned = X_aligned
-  #     y_aligned = y_aligned
-  #
-  #     logger.info(f"Размер выровненных данных: X={X_aligned.shape}, y={y_aligned.shape}")
-  #
-  #     # 3. Очистка данных от NaN и бесконечных значений
-  #     logger.debug("Очистка данных...")
-  #
-  #     # Заменяем бесконечные значения на NaN
-  #     X_aligned = X_aligned.replace([np.inf, -np.inf], np.nan)
-  #
-  #     # Удаляем строки с NaN в целевой переменной
-  #     valid_y_mask = ~pd.isna(y_aligned)
-  #     X_clean = X_aligned[valid_y_mask]
-  #     y_clean = y_aligned[valid_y_mask]
-  #
-  #     # Заполняем NaN в признаках медианными значениями
-  #     if X_clean.isnull().any().any():
-  #       logger.debug("Заполнение пропущенных значений в признаках...")
-  #       X_clean = X_clean.fillna(X_clean.median()).fillna(0)
-  #
-  #     # Финальная проверка на NaN
-  #     if X_clean.isnull().any().any() or pd.isna(y_clean).any():
-  #       logger.warning("Обнаружены оставшиеся NaN значения, выполняем финальную очистку...")
-  #       # Удаляем строки с любыми NaN
-  #       final_mask = ~(X_clean.isnull().any(axis=1) | pd.isna(y_clean))
-  #       X_clean = X_clean[final_mask]
-  #       y_clean = y_clean[final_mask]
-  #
-  #     logger.info(f"Размер очищенных данных: X={X_clean.shape}, y={y_clean.shape}")
-  #
-  #     if len(X_clean) < 50:
-  #       raise ValueError(f"Недостаточно данных для обучения после очистки: {len(X_clean)} образцов")
-  #
-  #     # 4. Проверка на аномалии в обучающих данных
-  #     if self.anomaly_detector:
-  #       logger.info("Проверка на аномалии в обучающих данных...")
-  #       try:
-  #         # Создаем временный DataFrame для проверки аномалий
-  #         temp_data = X.copy()
-  #         if 'close' not in temp_data.columns and len(temp_data.columns) > 0:
-  #           # Если нет колонки close, используем первую доступную колонку как цену
-  #           temp_data['close'] = temp_data.iloc[:, 0]
-  #
-  #         # Вызываем detect_anomalies с символом
-  #         anomalies = self.anomaly_detector.detect_anomalies(temp_data, symbol="TRAINING_DATA")
-  #
-  #         if anomalies:
-  #           logger.warning(f"Обнаружено {len(anomalies)} аномалий в обучающих данных")
-  #           # Можем использовать эту информацию для корректировки весов образцов
-  #       except Exception as anomaly_error:
-  #         logger.warning(f"Ошибка при проверке аномалий: {anomaly_error}")
-  #
-  #     # 5. Оптимизация признаков с защитой базовых колонок
-  #     if optimize_features and len(X_clean.columns) > 10:
-  #       logger.info("Оптимизация признаков...")
-  #       try:
-  #         # ДОБАВИТЬ В НАЧАЛО БЛОКА ОПТИМИЗАЦИИ:
-  #
-  #         # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Защищаем базовые OHLCV колонки
-  #         base_columns = ['open', 'high', 'low', 'close', 'volume']
-  #         protected_columns = [col for col in base_columns if col in X_clean.columns]
-  #
-  #         if len(protected_columns) == 0:
-  #           logger.warning("❌ КРИТИЧЕСКАЯ ПРОБЛЕМА: Базовые OHLCV колонки отсутствуют в данных!")
-  #           logger.warning(f"Доступные колонки: {list(X_clean.columns[:10])}")
-  #           logger.warning("Модель будет работать только с производными признаками")
-  #         else:
-  #           logger.info(f"✅ Защищенные базовые колонки: {protected_columns}")
-  #
-  #         # Оптимизируем только дополнительные признаки
-  #         feature_columns = [col for col in X_clean.columns if col not in protected_columns]
-  #
-  #         logger.info(f"Колонки для оптимизации: {len(feature_columns)} из {len(X_clean.columns)}")
-  #
-  #         if len(feature_columns) > 5:
-  #           logger.debug(f"Оптимизация {len(feature_columns)} дополнительных признаков...")
-  #
-  #           # Удаляем признаки с нулевой дисперсией (только среди дополнительных)
-  #           if len(feature_columns) > 0:
-  #             feature_data = X_clean[feature_columns]
-  #             low_variance_cols = feature_data.columns[feature_data.var() < 1e-8]
-  #             if len(low_variance_cols) > 0:
-  #               logger.debug(f"Удаление {len(low_variance_cols)} признаков с низкой дисперсией")
-  #               feature_columns = [col for col in feature_columns if col not in low_variance_cols]
-  #
-  #           # Удаляем сильно коррелированные признаки (только среди дополнительных)
-  #           if len(feature_columns) > 1:
-  #             feature_data = X_clean[feature_columns]
-  #             correlation_matrix = feature_data.corr().abs()
-  #             upper_tri = correlation_matrix.where(
-  #               np.triu(np.ones(correlation_matrix.shape), k=1).astype(bool)
-  #             )
-  #
-  #             high_corr_cols = [column for column in upper_tri.columns
-  #                               if any(upper_tri[column] > 0.95)]
-  #             if len(high_corr_cols) > 0:
-  #               logger.debug(f"Удаление {len(high_corr_cols)} сильно коррелированных признаков")
-  #               feature_columns = [col for col in feature_columns if col not in high_corr_cols]
-  #
-  #           # Отбор лучших признаков через важность (только дополнительные)
-  #           if len(feature_columns) > 20:
-  #             try:
-  #               feature_data = X_clean[feature_columns]
-  #               temp_rf = RandomForestClassifier(n_estimators=50, random_state=42, n_jobs=-1)
-  #               temp_rf.fit(feature_data, y_clean)
-  #
-  #               importances = pd.Series(temp_rf.feature_importances_, index=feature_columns)
-  #               # Берем топ-15 лучших дополнительных признаков
-  #               best_features = importances.nlargest(15).index.tolist()
-  #               feature_columns = best_features
-  #               logger.debug(f"Отобрано {len(feature_columns)} лучших дополнительных признаков")
-  #
-  #             except Exception as feat_sel_error:
-  #               logger.warning(f"Ошибка отбора признаков по важности: {feat_sel_error}")
-  #
-  #         # КРИТИЧЕСКИ ВАЖНО: Объединяем защищенные и оптимизированные колонки
-  #         final_columns = protected_columns + feature_columns
-  #         X_clean = X_clean[final_columns]
-  #
-  #         logger.info(
-  #           f"✅ После оптимизации: {len(protected_columns)} базовых + {len(feature_columns)} дополнительных = {len(final_columns)} признаков")
-  #
-  #       except Exception as opt_error:
-  #         logger.warning(f"Ошибка при оптимизации признаков: {opt_error}")
-  #         # При ошибке сохраняем хотя бы базовые колонки если они есть
-  #         base_columns = ['open', 'high', 'low', 'close', 'volume']
-  #         available_base = [col for col in base_columns if col in X_clean.columns]
-  #         if available_base:
-  #           logger.warning(f"Fallback: используем только базовые колонки: {available_base}")
-  #           X_clean = X_clean[available_base]
-  #         else:
-  #           logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Нет базовых OHLCV колонок!")
-  #
-  #     # 6. Скалирование признаков
-  #     logger.debug("Скалирование признаков...")
-  #     try:
-  #       # Используем стандартное скалирование
-  #       X_scaled = self.scalers['standard'].fit_transform(X_clean)
-  #       X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns, index=X_clean.index)
-  #
-  #       # Проверяем результат скалирования
-  #       if np.any(~np.isfinite(X_scaled.values)):
-  #         logger.warning("Обнаружены нефинитные значения после скалирования, применяем робастное скалирование")
-  #         X_scaled = self.scalers['robust'].fit_transform(X_clean)
-  #         X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns, index=X_clean.index)
-  #         X_scaled = X_scaled.fillna(0)  # На всякий случай
-  #
-  #     except Exception as scale_error:
-  #       logger.error(f"Ошибка скалирования: {scale_error}")
-  #       # Используем данные без скалирования
-  #       X_scaled = X_clean
-  #
-  #     # 7. Разделение на обучение и валидацию
-  #     logger.debug("Разделение данных...")
-  #     from sklearn.model_selection import train_test_split
-  #
-  #     try:
-  #       X_train, X_val, y_train, y_val = train_test_split(
-  #         X_scaled, y_clean,
-  #         test_size=0.2,
-  #         random_state=42,
-  #         stratify=y_clean if len(np.unique(y_clean)) > 1 else None
-  #       )
-  #     except Exception as split_error:
-  #       logger.warning(f"Ошибка стратифицированного разделения: {split_error}")
-  #       # Используем простое разделение
-  #       X_train, X_val, y_train, y_val = train_test_split(
-  #         X_scaled, y_clean, test_size=0.2, random_state=42
-  #       )
-  #
-  #     # 8. Обучение базовых моделей
-  #     logger.info("Обучение базовых моделей...")
-  #
-  #     for name, model in self.models.items():
-  #       try:
-  #         logger.debug(f"Обучение модели {name}...")
-  #         model.fit(X_train, y_train)
-  #
-  #         # Проверяем качество на валидации
-  #         val_score = model.score(X_val, y_val)
-  #         logger.debug(f"Валидационная точность {name}: {val_score:.4f}")
-  #
-  #       except Exception as model_error:
-  #         logger.error(f"Ошибка при обучении модели {name}: {model_error}")
-  #         continue
-  #
-  #     # 9. Обучение мета-модели (стекинг)
-  #     logger.info("Обучение мета-модели...")
-  #     try:
-  #       # Получаем предсказания базовых моделей для мета-обучения
-  #       meta_features = []
-  #
-  #       for name, model in self.models.items():
-  #         try:
-  #           if hasattr(model, 'predict_proba'):
-  #             preds = model.predict_proba(X_train)
-  #             if preds.shape[1] > 1:
-  #               meta_features.append(preds[:, 1])  # Вероятность положительного класса
-  #             else:
-  #               meta_features.append(preds[:, 0])
-  #           else:
-  #             preds = model.predict(X_train)
-  #             meta_features.append(preds)
-  #         except Exception as pred_error:
-  #           logger.warning(f"Ошибка получения предсказаний от {name}: {pred_error}")
-  #           continue
-  #
-  #       if len(meta_features) > 0:
-  #         meta_X = np.column_stack(meta_features)
-  #         self.meta_model.fit(meta_X, y_train)
-  #         logger.info("Мета-модель успешно обучена")
-  #       else:
-  #         logger.warning("Не удалось получить предсказания для мета-модели")
-  #
-  #     except Exception as meta_error:
-  #       logger.error(f"Ошибка при обучении мета-модели: {meta_error}")
-  #
-  #
-  #
-  #     # 10. Сохранение информации о признаках
-  #     self.selected_features = list(X_scaled.columns)
-  #     self.is_fitted = True
-  #
-  #     logger.info(f"Обучение завершено успешно. Использовано {len(self.selected_features)} признаков")
-  #
-  #     try:
-  #       from sklearn.metrics import classification_report
-  #
-  #       # Проверяем, что у нас есть валидационные данные
-  #       if len(X_val) > 0 and len(y_val) > 0:
-  #         # Получаем финальные предсказания
-  #         final_predictions = self.predict(X_val.copy())  # Создаем копию для безопасности
-  #
-  #         if len(final_predictions) == len(y_val):
-  #           report = classification_report(y_val, final_predictions, output_dict=True, zero_division=0)
-  #
-  #           logger.info(f"Итоговая точность: {report['accuracy']:.4f}")
-  #           logger.info(f"F1-score: {report['macro avg']['f1-score']:.4f}")
-  #         else:
-  #           logger.warning("Размеры предсказаний и меток не совпадают")
-  #       else:
-  #         logger.warning("Нет валидационных данных для итоговой оценки")
-  #
-  #     except Exception as eval_error:
-  #       logger.warning(f"Ошибка при итоговой оценке: {eval_error}")
-  #
-  #   except Exception as e:
-  #     logger.error(f"Ошибка при обучении модели: {e}")
-  #     self.is_fitted = False
-  #     raise
+  def _train_meta_model_safely(self, X_train_resampled: pd.DataFrame, y_train_resampled: pd.Series,
+                                 X_val: pd.DataFrame, y_val: pd.Series) -> bool:
+      """
+      Безопасное обучение мета-модели с валидацией и фолбэк механизмом
+      """
+      logger.info("Обучение мета-модели с валидацией...")
 
-  # В методе predict в файле ml/enhanced_ml_system.py, в блоке try замените начало на:
+      try:
+        # 1. Получение предсказаний базовых моделей для обучения мета-модели
+        meta_features_train, feature_names = self._extract_meta_features(X_train_resampled, 'train')
+        meta_features_val, _ = self._extract_meta_features(X_val, 'validation')
+
+        if meta_features_train is None or len(meta_features_train) == 0:
+          logger.warning("Не удалось извлечь мета-признаки, мета-модель не будет обучена")
+          self.meta_model_stats['fallback_reason'] = 'no_meta_features'
+          return False
+
+        # 2. Проверка достаточности данных
+        min_samples = self.meta_model_config['min_samples_for_meta']
+        if len(meta_features_train) < min_samples:
+          logger.warning(f"Недостаточно данных для мета-модели: {len(meta_features_train)} < {min_samples}")
+          self.meta_model_stats['fallback_reason'] = 'insufficient_data'
+          return False
+
+        # 3. Селекция признаков для мета-модели (если включена)
+        if self.meta_model_config['feature_selection']:
+          meta_features_train, meta_features_val = self._select_meta_features(
+            meta_features_train, meta_features_val, y_train_resampled
+          )
+
+        # 4. Обучение мета-модели с кросс-валидацией
+        if self.meta_model_config['use_cross_validation']:
+          cv_scores = self._train_with_cross_validation(meta_features_train, y_train_resampled)
+          logger.info(f"CV scores мета-модели: {cv_scores.mean():.4f} (+/- {cv_scores.std() * 2:.4f})")
+
+          if cv_scores.mean() < 0.4:  # Если мета-модель работает хуже случайного
+            logger.warning("Мета-модель показывает плохие результаты на кросс-валидации")
+            self.meta_model_stats['fallback_reason'] = 'poor_cv_performance'
+            return False
+
+        # 5. Финальное обучение мета-модели
+        logger.info("Финальное обучение мета-модели...")
+        self.meta_model.fit(meta_features_train, y_train_resampled)
+
+        # 6. Валидация на отложенной выборке
+        if len(meta_features_val) > 0:
+          val_predictions = self.meta_model.predict(meta_features_val)
+          val_accuracy = accuracy_score(y_val, val_predictions)
+
+          self.meta_model_stats['validation_accuracy'] = val_accuracy
+          logger.info(f"Точность мета-модели на валидации: {val_accuracy:.4f}")
+
+          # Проверяем, что мета-модель лучше случайного выбора
+          random_baseline = 1.0 / len(np.unique(y_val))
+          if val_accuracy < random_baseline * 1.1:  # Должна быть хотя бы на 10% лучше случайного
+            logger.warning(f"Мета-модель {val_accuracy:.4f} не лучше базовой линии {random_baseline:.4f}")
+            self.meta_model_stats['fallback_reason'] = 'poor_validation_performance'
+            return False
+
+        # 7. Анализ важности признаков мета-модели
+        if hasattr(self.meta_model, 'coef_'):
+          feature_importance = dict(zip(feature_names, abs(self.meta_model.coef_[0])))
+          self.meta_model_stats['feature_importance'] = feature_importance
+          logger.debug(f"Важность мета-признаков: {feature_importance}")
+
+        # 8. Обучение резервной мета-модели для сравнения
+        try:
+          self.backup_meta_model.fit(meta_features_train, y_train_resampled)
+          if len(meta_features_val) > 0:
+            backup_predictions = self.backup_meta_model.predict(meta_features_val)
+            backup_accuracy = accuracy_score(y_val, backup_predictions)
+
+            # Если резервная модель лучше, используем ее
+            if backup_accuracy > val_accuracy * 1.05:  # На 5% лучше
+              logger.info(f"Резервная мета-модель лучше: {backup_accuracy:.4f} vs {val_accuracy:.4f}")
+              self.meta_model = self.backup_meta_model
+              self.meta_model_stats['validation_accuracy'] = backup_accuracy
+
+        except Exception as backup_error:
+          logger.warning(f"Ошибка обучения резервной мета-модели: {backup_error}")
+
+        self.meta_model_stats['is_reliable'] = True
+        logger.info("Мета-модель успешно обучена и валидирована")
+        return True
+
+      except Exception as e:
+        logger.error(f"Критическая ошибка обучения мета-модели: {e}")
+        self.meta_model_stats['fallback_reason'] = f'training_error: {str(e)}'
+        return False
+
+  def _extract_meta_features(self, X: pd.DataFrame, stage: str) -> Tuple[Optional[np.ndarray], List[str]]:
+    """
+    Извлекает мета-признаки из предсказаний базовых моделей
+    """
+    try:
+      meta_features = []
+      feature_names = []
+
+      for name, model in self.models.items():
+        try:
+          if hasattr(model, 'predict_proba'):
+            # Используем вероятности как признаки
+            proba = model.predict_proba(X)
+
+            # Добавляем все вероятности классов
+            for class_idx in range(proba.shape[1]):
+              meta_features.append(proba[:, class_idx])
+              feature_names.append(f'{name}_proba_class_{class_idx}')
+
+            # Добавляем максимальную вероятность и энтропию
+            max_proba = np.max(proba, axis=1)
+            entropy = -np.sum(proba * np.log(proba + 1e-10), axis=1)
+
+            meta_features.extend([max_proba, entropy])
+            feature_names.extend([f'{name}_max_proba', f'{name}_entropy'])
+
+          else:
+            # Для моделей без predict_proba используем предсказания классов
+            pred = model.predict(X)
+            # Преобразуем в one-hot encoding
+            for class_val in [0, 1, 2]:
+              class_indicator = (pred == class_val).astype(float)
+              meta_features.append(class_indicator)
+              feature_names.append(f'{name}_pred_class_{class_val}')
+
+          logger.debug(f"Извлечены мета-признаки от модели {name} для {stage}")
+
+        except Exception as model_error:
+          logger.warning(f"Ошибка извлечения мета-признаков от {name}: {model_error}")
+          continue
+
+      if not meta_features:
+        return None, []
+
+      # Объединяем все признаки
+      meta_features_array = np.column_stack(meta_features)
+
+      # Проверяем на NaN и inf
+      if not np.isfinite(meta_features_array).all():
+        logger.warning("Обнаружены нефинитные значения в мета-признаках")
+        meta_features_array = np.nan_to_num(meta_features_array, nan=0.0, posinf=1.0, neginf=0.0)
+
+      logger.debug(f"Извлечено {meta_features_array.shape[1]} мета-признаков для {stage}")
+      return meta_features_array, feature_names
+
+    except Exception as e:
+      logger.error(f"Ошибка извлечения мета-признаков: {e}")
+      return None, []
+
+  def _select_meta_features(self, meta_features_train: np.ndarray, meta_features_val: np.ndarray,
+                            y_train: pd.Series) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Селекция наиболее важных мета-признаков
+    """
+    try:
+      from sklearn.feature_selection import SelectKBest, f_classif
+
+      # Выбираем лучшие признаки на основе F-статистики
+      k_best = min(10, meta_features_train.shape[1])  # Максимум 10 признаков
+      selector = SelectKBest(score_func=f_classif, k=k_best)
+
+      meta_train_selected = selector.fit_transform(meta_features_train, y_train)
+      meta_val_selected = selector.transform(meta_features_val)
+
+      selected_features = selector.get_support(indices=True)
+      logger.info(f"Выбрано {len(selected_features)} мета-признаков из {meta_features_train.shape[1]}")
+
+      return meta_train_selected, meta_val_selected
+
+    except Exception as e:
+      logger.warning(f"Ошибка селекции мета-признаков: {e}, используем все признаки")
+      return meta_features_train, meta_features_val
+
+  def _train_with_cross_validation(self, X: np.ndarray, y: pd.Series) -> np.ndarray:
+    """
+    Обучение мета-модели с кросс-валидацией
+    """
+    from sklearn.model_selection import cross_val_score, StratifiedKFold
+
+    cv_folds = self.meta_model_config['cv_folds']
+    cv = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+
+    cv_scores = cross_val_score(self.meta_model, X, y, cv=cv, scoring='accuracy')
+    return cv_scores
+
+  def _safe_scaling(self, X: pd.DataFrame, is_training: bool = False) -> pd.DataFrame:
+      """
+      Безопасное скалирование с обработкой ошибок и выбором оптимального скейлера
+      """
+      try:
+        if is_training:
+          # При обучении выбираем оптимальный скейлер
+          scaler_to_use = self._choose_optimal_scaler(X)
+          self.scaler = scaler_to_use
+          self.scaler_type_used = type(scaler_to_use).__name__
+
+          logger.info(f"Выбран скейлер: {self.scaler_type_used}")
+
+          # Обучаем скейлер
+          X_scaled = self.scaler.fit_transform(X)
+          X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+
+          # Сохраняем статистики для проверки
+          self.feature_statistics = {
+            'mean': X.mean().to_dict(),
+            'std': X.std().to_dict(),
+            'min': X.min().to_dict(),
+            'max': X.max().to_dict(),
+            'outlier_percentage': self._calculate_outlier_percentage(X)
+          }
+
+        else:
+          # При предсказании используем уже обученный скейлер
+          if self.scaler is None:
+            raise ValueError("Скейлер не обучен. Сначала вызовите fit()")
+
+          X_scaled = self.scaler.transform(X)
+          X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+
+        # Проверяем результат скалирования
+        if not np.isfinite(X_scaled.values).all():
+          logger.warning(f"Скалирование дало нефинитные значения с {self.scaler_type_used}")
+
+          if is_training:
+            # При обучении пробуем резервный скейлер
+            logger.info("Переключаемся на резервный скейлер...")
+            self.scaler = self.backup_scaler
+            self.scaler_type_used = type(self.scaler).__name__
+            X_scaled = self.scaler.fit_transform(X)
+            X_scaled = pd.DataFrame(X_scaled, columns=X.columns, index=X.index)
+          else:
+            # При предсказании заполняем проблемные значения
+            X_scaled = X_scaled.fillna(0)
+            X_scaled = X_scaled.replace([np.inf, -np.inf], 0)
+
+        logger.debug(f"Скалирование завершено. Форма: {X_scaled.shape}, Скейлер: {self.scaler_type_used}")
+        return X_scaled
+
+      except Exception as e:
+        logger.error(f"Критическая ошибка скалирования: {e}")
+
+        if is_training:
+          # При обучении возвращаем исходные данные с предупреждением
+          logger.warning("Возвращаем данные без скалирования")
+          self.scaler = None
+          self.scaler_type_used = 'none'
+          return X.fillna(0)
+        else:
+          # При предсказании используем простую нормализацию
+          logger.warning("Применяем простую нормализацию")
+          return self._simple_normalization(X)
+
+  def _choose_optimal_scaler(self, X: pd.DataFrame) -> object:
+    """
+    Выбирает оптимальный скейлер на основе анализа данных
+    """
+    # Анализируем данные
+    outlier_percentage = self._calculate_outlier_percentage(X)
+    skewness = X.skew().abs().mean()
+
+    logger.debug(f"Анализ данных для выбора скейлера:")
+    logger.debug(f"  Процент выбросов: {outlier_percentage:.2f}%")
+    logger.debug(f"  Средняя асимметрия: {skewness:.3f}")
+
+    # Правила выбора скейлера
+    if outlier_percentage > 10 or skewness > 2:
+      logger.debug("  Выбран RobustScaler (много выбросов или высокая асимметрия)")
+      return RobustScaler()
+    else:
+      logger.debug("  Выбран StandardScaler (данные относительно нормальные)")
+      return StandardScaler()
+
+  def _calculate_outlier_percentage(self, X: pd.DataFrame) -> float:
+    """
+    Рассчитывает процент выбросов в данных
+    """
+    try:
+      numeric_cols = X.select_dtypes(include=[np.number]).columns
+      if len(numeric_cols) == 0:
+        return 0.0
+
+      total_values = 0
+      outlier_count = 0
+
+      for col in numeric_cols:
+        if X[col].nunique() <= 1:  # Пропускаем константные колонки
+          continue
+
+        Q1 = X[col].quantile(0.25)
+        Q3 = X[col].quantile(0.75)
+        IQR = Q3 - Q1
+
+        if IQR > 0:  # Проверяем, что IQR не равен нулю
+          lower_bound = Q1 - 1.5 * IQR
+          upper_bound = Q3 + 1.5 * IQR
+
+          col_outliers = ((X[col] < lower_bound) | (X[col] > upper_bound)).sum()
+          outlier_count += col_outliers
+          total_values += len(X[col].dropna())
+
+      return (outlier_count / total_values * 100) if total_values > 0 else 0.0
+
+    except Exception as e:
+      logger.warning(f"Ошибка расчета выбросов: {e}")
+      return 0.0
+
+  def _simple_normalization(self, X: pd.DataFrame) -> pd.DataFrame:
+    """
+    Простая нормализация для случаев, когда стандартное скалирование не работает
+    """
+    try:
+      X_norm = X.copy()
+
+      for col in X_norm.select_dtypes(include=[np.number]).columns:
+        col_std = X_norm[col].std()
+        if col_std > 0:
+          X_norm[col] = (X_norm[col] - X_norm[col].mean()) / col_std
+        else:
+          X_norm[col] = 0
+
+      return X_norm.fillna(0)
+
+    except Exception as e:
+      logger.error(f"Ошибка простой нормализации: {e}")
+      return X.fillna(0)
+
+  # =================== НОВЫЙ МЕТОД ДЛЯ ПРОВЕРКИ СООТВЕТСТВИЯ ПРИЗНАКОВ ===================
+
+  def _validate_feature_consistency(self, X: pd.DataFrame, is_training: bool = False) -> pd.DataFrame:
+    """
+    Проверяет и обеспечивает соответствие признаков между обучением и предсказанием
+    """
+    if is_training:
+      # При обучении сохраняем список признаков
+      self.training_features = list(X.columns)
+      logger.info(f"Сохранено {len(self.training_features)} признаков для обучения")
+      return X
+
+    # При предсказании проверяем соответствие
+    if self.training_features is None:
+      logger.warning("Информация о признаках обучения отсутствует")
+      return X
+
+    current_features = list(X.columns)
+
+    # Находим отсутствующие и дополнительные признаки
+    missing_features = set(self.training_features) - set(current_features)
+    extra_features = set(current_features) - set(self.training_features)
+
+    if missing_features:
+      logger.warning(f"Отсутствуют признаки: {list(missing_features)[:10]}...")  # Показываем первые 10
+
+      # Добавляем отсутствующие признаки с нулевыми значениями
+      for feature in missing_features:
+        X[feature] = 0.0
+
+    if extra_features:
+      logger.warning(f"Дополнительные признаки будут удалены: {list(extra_features)[:10]}...")
+
+      # Удаляем дополнительные признаки
+      X = X.drop(columns=extra_features)
+
+    # Приводим к нужному порядку колонок
+    X = X.reindex(columns=self.training_features, fill_value=0.0)
+
+    logger.debug(f"Признаки приведены к соответствию: {X.shape}")
+    return X
+
+  def _get_optimal_balancing_strategy(self, y: pd.Series) -> str:
+      """
+      Определяет оптимальную стратегию балансировки на основе анализа данных
+      """
+      class_counts = y.value_counts()
+      total_samples = len(y)
+
+      # Рассчитываем коэффициент дисбаланса
+      min_class_count = class_counts.min()
+      max_class_count = class_counts.max()
+      imbalance_ratio = max_class_count / min_class_count if min_class_count > 0 else float('inf')
+
+      logger.info(f"Анализ дисбаланса классов:")
+      logger.info(f"  Распределение: {class_counts.to_dict()}")
+      logger.info(f"  Коэффициент дисбаланса: {imbalance_ratio:.2f}")
+
+      # Определяем стратегию
+      if imbalance_ratio <= 2:
+        strategy = 'none'
+        logger.info("  Рекомендация: дисбаланс незначительный, балансировка не нужна")
+      elif imbalance_ratio <= 5:
+        strategy = 'class_weight'
+        logger.info("  Рекомендация: умеренный дисбаланс, используем class_weight")
+      elif imbalance_ratio <= 20:
+        strategy = 'smote'
+        logger.info("  Рекомендация: сильный дисбаланс, используем SMOTE")
+      else:
+        strategy = 'adaptive'
+        logger.info("  Рекомендация: критический дисбаланс, используем адаптивный подход")
+
+      return strategy
+
+  def _apply_balancing_strategy(self, X_train: pd.DataFrame, y_train: pd.Series,
+                                strategy: str) -> Tuple[pd.DataFrame, pd.Series, Dict]:
+    """
+    Применяет выбранную стратегию балансировки
+    """
+    balancing_info = {'strategy': strategy, 'original_shape': X_train.shape}
+
+    if strategy == 'none':
+      logger.info("Балансировка не применяется")
+      return X_train, y_train, balancing_info
+
+    elif strategy == 'smote':
+      logger.info("Применение SMOTE...")
+      try:
+        # Используем консервативные параметры SMOTE
+        smote = SMOTE(
+          random_state=42,
+          k_neighbors=min(5, len(y_train.value_counts().min()) - 1),  # Адаптивное количество соседей
+          sampling_strategy='auto'  # Балансирует только до размера мажоритарного класса
+        )
+        X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
+
+        balancing_info['resampled_shape'] = X_resampled.shape
+        balancing_info['class_distribution_after'] = pd.Series(y_resampled).value_counts().to_dict()
+
+        logger.info(f"SMOTE завершен: {X_train.shape} -> {X_resampled.shape}")
+        return pd.DataFrame(X_resampled, columns=X_train.columns), pd.Series(y_resampled), balancing_info
+
+      except Exception as e:
+        logger.warning(f"Ошибка SMOTE: {e}, переключаемся на class_weight")
+        strategy = 'class_weight'
+
+    if strategy == 'class_weight':
+      logger.info("Применение взвешивания классов...")
+      # Обновляем модели с class_weight='balanced'
+      for name, model in self.models.items():
+        if hasattr(model, 'class_weight'):
+          model.set_params(class_weight='balanced')
+        elif name == 'xgb':
+          # Для XGBoost вычисляем scale_pos_weight
+          class_counts = y_train.value_counts()
+          if len(class_counts) == 2:  # Бинарная классификация
+            scale_pos_weight = class_counts[0] / class_counts[1]
+            model.set_params(scale_pos_weight=scale_pos_weight)
+
+      balancing_info['method'] = 'class_weight_balanced'
+      return X_train, y_train, balancing_info
+
+    elif strategy == 'adaptive':
+      logger.info("Применение адаптивного подхода...")
+      # Комбинируем умеренный SMOTE с взвешиванием
+      try:
+        # Сначала умеренный SMOTE (не до полного баланса)
+        smote = SMOTE(
+          random_state=42,
+          sampling_strategy={
+            cls: min(count * 2, y_train.value_counts().max())
+            for cls, count in y_train.value_counts().items()
+            if count < y_train.value_counts().max() * 0.5
+          }
+        )
+        X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
+
+        # Затем добавляем взвешивание для оставшегося дисбаланса
+        for name, model in self.models.items():
+          if hasattr(model, 'class_weight'):
+            model.set_params(class_weight='balanced')
+
+        balancing_info['method'] = 'smote_plus_class_weight'
+        balancing_info['resampled_shape'] = X_resampled.shape
+
+        return pd.DataFrame(X_resampled, columns=X_train.columns), pd.Series(y_resampled), balancing_info
+
+      except Exception as e:
+        logger.error(f"Ошибка адаптивного подхода: {e}, используем только class_weight")
+        return self._apply_balancing_strategy(X_train, y_train, 'class_weight')
+
+    # Fallback
+    return X_train, y_train, balancing_info
 
   def fit(self, X: pd.DataFrame, y: pd.Series,
           external_data: Optional[Dict[str, pd.DataFrame]] = None,
@@ -1783,9 +1587,13 @@ class EnhancedEnsembleModel:
       self.selected_features = list(X_clean.columns)
 
       # Шаг 3: Скалирование
-      logger.debug("Скалирование признаков...")
-      X_scaled = self.scalers['standard'].fit_transform(X_clean)
-      X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns, index=X_clean.index)
+      # logger.debug("Скалирование признаков...")
+      # X_scaled = self.scalers['standard'].fit_transform(X_clean)
+      # X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns, index=X_clean.index)
+
+      logger.debug("Валидация и скалирование признаков...")
+      X_validated = self._validate_feature_consistency(X_clean, is_training=True)
+      X_scaled = self._safe_scaling(X_validated, is_training=True)
 
       # Шаг 4: Разделение на обучение и валидацию
       from sklearn.model_selection import train_test_split
@@ -1794,35 +1602,64 @@ class EnhancedEnsembleModel:
       )
 
       # Шаг 5: Применение SMOTE
-      logger.info("Применение SMOTE для балансировки классов...")
-      smote = SMOTE(random_state=42)
-      X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+      # logger.info("Применение SMOTE для балансировки классов...")
+      # smote = SMOTE(random_state=42)
+      # X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+      logger.info("Определение оптимальной стратегии балансировки...")
+      balancing_strategy = self._get_optimal_balancing_strategy(y_train)
+      X_train_resampled, y_train_resampled, balancing_info = self._apply_balancing_strategy(
+        X_train, y_train, balancing_strategy
+      )
 
-      # ======================= ИЗМЕНЕНИЕ 1: ЛОГИКА ДЛЯ XGBOOST =======================
-      # Шаг 6: Обучение базовых моделей с особой обработкой для XGBoost
+      logger.info(f"Балансировка завершена: {balancing_info}")
+
+      # Шаг 6: Обучение базовых моделей (БЕЗ ДОПОЛНИТЕЛЬНОГО ВЗВЕШИВАНИЯ)
+      # logger.info("Обучение базовых моделей...")
+      # for name, model in self.models.items():
+      #   logger.debug(f"Обучение модели {name}...")
+      #
+      #   if name == 'xgb':
+      #     logger.info("Расчет sample_weight для XGBoost...")
+      #     sample_weights = compute_sample_weight(class_weight='balanced', y=y_train_resampled)
+      #     model.fit(X_train_resampled, y_train_resampled, sample_weight=sample_weights, verbose=False)
+      #   else:
+      #     model.fit(X_train_resampled, y_train_resampled)
       logger.info("Обучение базовых моделей...")
       for name, model in self.models.items():
         logger.debug(f"Обучение модели {name}...")
 
-        if name == 'xgb':
-          logger.info("Расчет sample_weight для XGBoost...")
-          sample_weights = compute_sample_weight(class_weight='balanced', y=y_train_resampled)
-          model.fit(X_train_resampled, y_train_resampled, sample_weight=sample_weights, verbose=False)
+        # Убираем дополнительное взвешивание для XGBoost
+        # если уже применена балансировка на уровне данных или модели
+        model.fit(X_train_resampled, y_train_resampled)
+
+        # Логируем информацию о модели
+        if hasattr(model, 'class_weight') and model.class_weight is not None:
+          logger.debug(f"  Модель {name} использует class_weight: {model.class_weight}")
         else:
-          model.fit(X_train_resampled, y_train_resampled)
+          logger.debug(f"  Модель {name} обучена на сбалансированных данных")
 
       # ==============================================================================
 
       # Шаг 7: Обучение мета-модели
-      logger.info("Обучение мета-модели...")
-      meta_features = []
-      for name, model in self.models.items():
-        preds = model.predict_proba(X_train_resampled)[:, 1] if hasattr(model, 'predict_proba') else model.predict(
-          X_train_resampled)
-        meta_features.append(preds)
+      # logger.info("Обучение мета-модели...")
+      # meta_features = []
+      # for name, model in self.models.items():
+      #   preds = model.predict_proba(X_train_resampled)[:, 1] if hasattr(model, 'predict_proba') else model.predict(
+      #     X_train_resampled)
+      #   meta_features.append(preds)
+      #
+      # meta_X = np.column_stack(meta_features)
+      # self.meta_model.fit(meta_X, y_train_resampled)
+      logger.info("Обучение мета-модели с валидацией...")
+      meta_model_success = self._train_meta_model_safely(
+        X_train_resampled, y_train_resampled, X_val, y_val
+      )
 
-      meta_X = np.column_stack(meta_features)
-      self.meta_model.fit(meta_X, y_train_resampled)
+      if not meta_model_success:
+        logger.warning(f"Мета-модель не обучена: {self.meta_model_stats.get('fallback_reason', 'unknown')}")
+        logger.info("Система будет работать только с базовыми моделями")
+        self.meta_model = None  # Отключаем мета-модель
+
       self.is_fitted = True
       logger.info(f"Обучение завершено успешно. Использовано {len(self.selected_features)} признаков.")
 
@@ -2088,14 +1925,40 @@ class EnhancedEnsembleModel:
       logger.debug(f"Успешные модели: {successful_models}")
 
       # 6. Мета-предсказание
-      if len(predictions) > 1 and hasattr(self.meta_model, 'predict'):
+      # if len(predictions) > 1 and hasattr(self.meta_model, 'predict'):
+      #   try:
+      #     meta_features = np.column_stack(predictions)
+      #     final_prediction = self.meta_model.predict(meta_features)
+      #     logger.debug("Использованы предсказания мета-модели")
+      #     return final_prediction.astype(int)
+      #   except Exception as e:
+      #     logger.warning(f"Ошибка мета-модели: {e}")
+
+      use_meta_model = (
+          len(predictions) > 1 and
+          hasattr(self.meta_model, 'predict') and
+          self.meta_model_stats.get('is_reliable', False)
+      )
+
+      if use_meta_model:
         try:
-          meta_features = np.column_stack(predictions)
-          final_prediction = self.meta_model.predict(meta_features)
-          logger.debug("Использованы предсказания мета-модели")
-          return final_prediction.astype(int)
+          # Извлекаем мета-признаки для предсказания
+          meta_features, _ = self._extract_meta_features(X, 'prediction')
+
+          if meta_features is not None and len(meta_features) > 0:
+            meta_prediction = self.meta_model.predict(meta_features)
+
+            # Дополнительная валидация мета-предсказания
+            if self._validate_meta_prediction(meta_prediction, predictions):
+              logger.debug("Использованы предсказания надежной мета-модели")
+              return meta_prediction.astype(int)
+            else:
+              logger.warning("Мета-предсказание не прошло валидацию, используем ансамбль")
+          else:
+            logger.warning("Не удалось извлечь мета-признаки для предсказания")
+
         except Exception as e:
-          logger.warning(f"Ошибка мета-модели: {e}")
+          logger.warning(f"Ошибка мета-модели при предсказании: {e}")
 
       # 7. Простое усреднение как fallback
       ensemble_prediction = np.mean(predictions, axis=0)
@@ -2114,6 +1977,30 @@ class EnhancedEnsembleModel:
       # Возвращаем нейтральные предсказания (HOLD)
       return np.ones(len(X), dtype=int)
 
+  def _validate_meta_prediction(self, meta_prediction: np.ndarray, base_predictions: List[np.ndarray]) -> bool:
+    """
+    Валидирует предсказания мета-модели на согласованность с базовыми моделями
+    """
+    try:
+      # Получаем мажоритарное предсказание базовых моделей
+      ensemble_prediction = np.round(np.mean(base_predictions, axis=0)).astype(int)
+
+      # Проверяем, что мета-предсказание не слишком сильно отличается
+      agreement_ratio = np.mean(meta_prediction == ensemble_prediction)
+
+      # Если согласованность меньше 70%, считаем мета-предсказание ненадежным
+      min_agreement = 0.7
+      is_valid = agreement_ratio >= min_agreement
+
+      if not is_valid:
+        logger.debug(f"Низкая согласованность мета-модели с ансамблем: {agreement_ratio:.3f}")
+
+      return is_valid
+
+    except Exception as e:
+      logger.warning(f"Ошибка валидации мета-предсказания: {e}")
+      return False
+
   def predict_proba(self, X: pd.DataFrame, external_data: Optional[Dict[str, pd.DataFrame]] = None) -> Tuple[
     np.ndarray, MLPrediction]:
     """
@@ -2122,7 +2009,26 @@ class EnhancedEnsembleModel:
     if not self.is_fitted:
       raise ValueError("Модель не обучена. Вызовите fit() перед предсказанием.")
 
+
     try:
+      # 0. Валидация свежести данных (НОВЫЙ БЛОК)
+      if self.use_temporal_management and hasattr(self, 'temporal_manager'):
+        data_validation = self.temporal_manager.validate_data_freshness(X, 'current_symbol')
+
+        if not data_validation['is_fresh']:
+          logger.warning("Данные не являются свежими:")
+          for warning in data_validation['warnings']:
+            logger.warning(f"  - {warning}")
+
+          # Можно добавить предупреждение в метаданные
+          stale_data_warning = {
+            'data_age_minutes': data_validation.get('data_age_minutes'),
+            'warnings': data_validation['warnings'],
+            'recommendations': data_validation['recommendations']
+          }
+        else:
+          stale_data_warning = None
+
       # Проверяем входные данные
       if X.empty:
         logger.warning("Пустые входные данные для предсказания")
@@ -2219,21 +2125,18 @@ class EnhancedEnsembleModel:
         logger.warning("Обнаружены бесконечные значения после очистки")
         X_enhanced_clean = X_enhanced_clean.replace([np.inf, -np.inf], 0)
 
-      # 4. Скалирование
+      # 4. Проверка соответствия признаков и безопасное скалирование
       try:
-        X_scaled = self.scalers['standard'].transform(X_enhanced_clean)
-        X_scaled = pd.DataFrame(X_scaled, columns=X_enhanced_clean.columns, index=X_enhanced_clean.index)
+        X_validated = self._validate_feature_consistency(X_enhanced_clean, is_training=False)
+        X_scaled = self._safe_scaling(X_validated, is_training=False)
 
-        # Проверяем результат скалирования
-        if not np.isfinite(X_scaled.values).all():
-          logger.warning("Скалирование дало нефинитные значения, используем робастное скалирование")
-          X_scaled = self.scalers['robust'].transform(X_enhanced_clean)
-          X_scaled = pd.DataFrame(X_scaled, columns=X_enhanced_clean.columns, index=X_enhanced_clean.index)
-          X_scaled = X_scaled.fillna(0)
+        logger.debug(f"Данные подготовлены для предсказания: {X_scaled.shape}")
 
-      except Exception as scale_error:
-        logger.warning(f"Ошибка скалирования: {scale_error}, используем исходные данные")
-        X_scaled = X_enhanced_clean
+      except Exception as prep_error:
+        logger.error(f"Ошибка подготовки данных для предсказания: {prep_error}")
+        # Fallback: используем исходные данные с базовой обработкой
+        X_scaled = X_enhanced_clean.fillna(0).replace([np.inf, -np.inf], 0)
+        logger.warning("Используются данные с минимальной обработкой")
 
       # 5. Получение вероятностей от базовых моделей
       all_probabilities = []
@@ -2287,21 +2190,100 @@ class EnhancedEnsembleModel:
         )
         return neutral_proba, ml_prediction
 
-      # 6. Усреднение вероятностей
-      ensemble_proba = np.mean(all_probabilities, axis=0)
+      # # 6. Усреднение вероятностей
+      # ensemble_proba = np.mean(all_probabilities, axis=0)
+      #
+      # # 7. Анализ согласованности моделей
+      # model_agreement = self._calculate_model_agreement(all_probabilities)
+      #
+      # # 8. Определение итогового сигнала (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+      # # Используем среднее по всем предсказаниям вместо только последнего
+      # ensemble_proba_mean = np.mean(ensemble_proba, axis=0)
+      # predicted_class = np.argmax(ensemble_proba_mean)
+      # max_probability = np.max(ensemble_proba_mean)
+
+      # 6. Умная агрегация вероятностей с взвешиванием
+      logger.debug(f"Агрегация предсказаний от {len(all_probabilities)} моделей...")
+
+      # Проверяем консистентность размеров
+      ensemble_proba = self._aggregate_probabilities_safely(all_probabilities, model_predictions)
+
+      # 6.5. Применение временных весов (НОВЫЙ БЛОК)
+      if self.use_temporal_management and hasattr(self, 'temporal_manager'):
+        try:
+          weighted_probabilities = []
+          for proba in all_probabilities:
+            weighted_proba = self.temporal_manager.apply_temporal_weights(X_enhanced_clean, proba)
+            weighted_probabilities.append(weighted_proba)
+
+          if weighted_probabilities:
+            # Пересчитываем ансамблевые вероятности с учетом временных весов
+            ensemble_proba = self._aggregate_probabilities_safely(weighted_probabilities, model_predictions)
+            logger.debug("Применены временные веса к предсказаниям")
+
+        except Exception as temporal_error:
+          logger.warning(f"Ошибка применения временных весов: {temporal_error}")
 
       # 7. Анализ согласованности моделей
       model_agreement = self._calculate_model_agreement(all_probabilities)
+      confidence_boost = self._calculate_confidence_boost(model_agreement)
 
-      # 8. Определение итогового сигнала
-      predicted_class = np.argmax(ensemble_proba[-1])  # Берем последнее предсказание
-      max_probability = np.max(ensemble_proba[-1])
+      # 8. Определение итогового сигнала (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+      # Используем агрегированные вероятности для ВСЕХ образцов, не только последнего
+      if len(ensemble_proba.shape) == 1:
+        # Если у нас только один образец
+        final_proba = ensemble_proba
+      else:
+        # Если несколько образцов, используем взвешенное среднее последних N образцов
+        window_size = min(5, len(ensemble_proba))  # Используем последние 5 образцов или меньше
+        weights = np.exp(np.linspace(0, 1, window_size))  # Экспоненциальные веса (больший вес последним)
+        weights = weights / weights.sum()
 
-      signal_type = SignalType.HOLD
-      if predicted_class == 0:
+        recent_probas = ensemble_proba[-window_size:]
+        final_proba = np.average(recent_probas, axis=0, weights=weights)
+
+      predicted_class = np.argmax(final_proba)
+      max_probability = np.max(final_proba)
+      # ensemble_proba_mean = np.mean(ensemble_proba, axis=0)
+
+      # Применяем буст уверенности на основе согласованности моделей
+      adjusted_probability = min(max_probability * confidence_boost, 1.0)
+
+      logger.debug(f"Финальные вероятности: {final_proba}")
+      logger.debug(
+        f"Predicted class: {predicted_class}, confidence: {max_probability:.3f} -> {adjusted_probability:.3f}")
+
+      # ИСПРАВЛЕННАЯ ЛОГИКА КЛАССИФИКАЦИИ:
+      # 0 = SELL, 1 = HOLD, 2 = BUY
+      # Определение сигнала с учетом скорректированной уверенности
+      signal_type = SignalType.HOLD  # По умолчанию
+
+      # Минимальный порог уверенности для торговых сигналов
+      min_trading_confidence = 0.4
+
+      if predicted_class == 0 and adjusted_probability >= min_trading_confidence:
         signal_type = SignalType.SELL
-      elif predicted_class == 2:
+      elif predicted_class == 1:
+        signal_type = SignalType.HOLD  # Явно HOLD
+      elif predicted_class == 2 and adjusted_probability >= min_trading_confidence:
         signal_type = SignalType.BUY
+      else:
+        # Если уверенность недостаточна, переходим на HOLD
+        signal_type = SignalType.HOLD
+        logger.debug(f"Уверенность {adjusted_probability:.3f} ниже порога {min_trading_confidence}, используем HOLD")
+
+      # Финальная проверка: убеждаемся что торговый сигнал доминирует над HOLD
+      if signal_type != SignalType.HOLD:
+        hold_probability = final_proba[1]  # Вероятность HOLD (класс 1)
+        signal_probability = final_proba[predicted_class]
+
+        # Если HOLD почти такой же вероятный, лучше не торговать
+        if hold_probability >= signal_probability * 0.8:  # HOLD составляет >80% от сигнала
+          logger.debug(f"HOLD вероятность {hold_probability:.3f} слишком близка к сигналу {signal_probability:.3f}")
+          signal_type = SignalType.HOLD
+          adjusted_probability = hold_probability
+
+      logger.debug(f"Итоговый сигнал: {signal_type.value}, финальная уверенность: {adjusted_probability:.3f}")
 
       # 9. Расчет важности признаков (упрощенный)
       feature_importance = {}
@@ -2316,11 +2298,62 @@ class EnhancedEnsembleModel:
         except Exception:
           pass
 
-      # 10. Создание MLPrediction с обязательным metadata
+      # Рассчитываем процент NaN для метаданных (ДОБАВЛЕНО)
+      try:
+        nan_percentage = X.isnull().sum().sum() / (X.shape[0] * X.shape[1])
+      except:
+        nan_percentage = 0.0
+
+      # 10. Создание базовых метаданных (ИСПРАВЛЕНИЕ)
+      metadata = {
+        'models_used': list(model_predictions.keys()) if model_predictions else [],
+        'features_count': len(X_enhanced_clean.columns),
+        'data_quality': 'good' if nan_percentage < 0.1 else 'poor',
+        'ensemble_size': len(all_probabilities),
+        'model_agreement': model_agreement,
+        'signal_adjustments': []
+      }
+
+      # 11. Применение фильтров рыночной логики (ИСПРАВЛЕННЫЙ БЛОК)
+      if self.use_market_filters and hasattr(self, 'market_filter'):
+        try:
+          # Применяем фильтры только к последнему (актуальному) предсказанию
+          filtered_signal, filtered_confidence, filter_info = self.market_filter.apply_market_filters(
+            signal_type, adjusted_probability, X_enhanced_clean, 'current_symbol'
+          )
+
+          # Обновляем сигнал и уверенность
+          if filtered_signal != signal_type:
+            logger.info(f"Сигнал изменен фильтрами: {signal_type.value} -> {filtered_signal.value}")
+            metadata['signal_adjustments'].append(f"signal_changed_{signal_type.value}_to_{filtered_signal.value}")
+            signal_type = filtered_signal
+
+          if abs(filtered_confidence - adjusted_probability) > 0.05:
+            logger.info(
+              f"Уверенность скорректирована фильтрами: {adjusted_probability:.3f} -> {filtered_confidence:.3f}")
+            metadata['signal_adjustments'].append(
+              f"confidence_adjusted_{adjusted_probability:.3f}_to_{filtered_confidence:.3f}")
+            adjusted_probability = filtered_confidence
+
+          # Добавляем информацию о фильтрах в метаданные
+          metadata['market_filters'] = {
+            'filters_applied': filter_info.get('filters_applied', []),
+            'adjustments_made': filter_info.get('adjustments_made', []),
+            'market_conditions': filter_info.get('market_conditions', {})
+          }
+
+        except Exception as filter_error:
+          logger.warning(f"Ошибка применения рыночных фильтров: {filter_error}")
+          metadata['market_filters'] = {'error': str(filter_error)}
+          # Продолжаем без фильтров при ошибке
+
+
+
+      # 12. Создание финального MLPrediction с обновленными метаданными
       ml_prediction = MLPrediction(
         signal_type=signal_type,
         probability=float(max_probability),
-        confidence=float(max_probability * model_agreement),
+        confidence=float(adjusted_probability),
         model_agreement=float(model_agreement),
         feature_importance=feature_importance,
         risk_assessment={
@@ -2328,13 +2361,27 @@ class EnhancedEnsembleModel:
           'volatility_regime': 'normal',
           'market_stress': False
         },
-        metadata={
-          'models_used': list(model_predictions.keys()),
-          'features_count': len(X_enhanced_clean.columns),
-          'data_quality': 'good' if nan_percentage < 0.1 else 'poor',
-          'ensemble_size': len(all_probabilities)
-        }
+        metadata=metadata
       )
+      # 12.5. Корректировка на основе реального времени (НОВЫЙ БЛОК)
+      if self.use_temporal_management and hasattr(self, 'temporal_manager'):
+        try:
+          # Получаем контекст реального времени
+          real_time_context = self.temporal_manager.get_real_time_context(X_enhanced_clean, 'current_symbol')
+
+          # Корректируем ML предсказание
+          ml_prediction = self.temporal_manager.adjust_prediction_for_real_time(
+            ml_prediction, real_time_context
+          )
+
+          # Обновляем метаданные
+          if stale_data_warning:
+            ml_prediction.metadata['data_freshness_warning'] = stale_data_warning
+
+          ml_prediction.metadata['real_time_context'] = real_time_context
+
+        except Exception as rt_error:
+          logger.warning(f"Ошибка корректировки в реальном времени: {rt_error}")
 
       return ensemble_proba, ml_prediction
 
@@ -2352,6 +2399,171 @@ class EnhancedEnsembleModel:
         metadata={'error': str(e), 'fallback': True}
       )
       return neutral_proba, ml_prediction
+
+  def _aggregate_probabilities_safely(self, all_probabilities: List[np.ndarray],
+                                        model_predictions: Dict[str, np.ndarray]) -> np.ndarray:
+      """
+      Безопасная агрегация вероятностей с проверкой размеров и весов моделей
+      """
+      if not all_probabilities:
+        raise ValueError("Нет вероятностей для агрегации")
+
+      # Проверяем консистентность размеров
+      target_shape = all_probabilities[0].shape
+      consistent_probabilities = []
+      model_weights = {}
+
+      for i, proba in enumerate(all_probabilities):
+        if proba.shape == target_shape:
+          consistent_probabilities.append(proba)
+          # Вычисляем вес модели на основе ее "уверенности"
+          confidence_score = np.mean(np.max(proba, axis=1))  # Средняя максимальная вероятность
+          model_weights[i] = confidence_score
+        else:
+          logger.warning(f"Несоответствие размеров вероятностей: {proba.shape} vs {target_shape}")
+
+      if not consistent_probabilities:
+        raise ValueError("Нет консистентных вероятностей для агрегации")
+
+      # Нормализуем веса
+      total_weight = sum(model_weights.values())
+      if total_weight > 0:
+        normalized_weights = [model_weights.get(i, 0) / total_weight for i in range(len(consistent_probabilities))]
+      else:
+        normalized_weights = [1.0 / len(consistent_probabilities)] * len(consistent_probabilities)
+
+      # Взвешенное среднее
+      ensemble_proba = np.average(consistent_probabilities, axis=0, weights=normalized_weights)
+
+      logger.debug(f"Агрегированы {len(consistent_probabilities)} предсказаний с весами: {normalized_weights}")
+      return ensemble_proba
+
+  def _calculate_confidence_boost(self, model_agreement: float) -> float:
+    """
+    Рассчитывает буст уверенности на основе согласованности моделей
+    """
+    # Если модели согласны, увеличиваем уверенность
+    # Если не согласны, снижаем уверенность
+
+    if model_agreement >= 0.8:
+      boost = 1.2  # Высокая согласованность - увеличиваем уверенность на 20%
+    elif model_agreement >= 0.6:
+      boost = 1.1  # Средняя согласованность - небольшой буст
+    elif model_agreement >= 0.4:
+      boost = 1.0  # Низкая согласованность - без изменений
+    else:
+      boost = 0.8  # Очень низкая согласованность - снижаем уверенность
+
+    logger.debug(f"Model agreement: {model_agreement:.3f}, confidence boost: {boost:.2f}")
+    return boost
+
+  def _calculate_model_agreement(self, all_probabilities: List[np.ndarray]) -> float:
+    """
+    Рассчитывает согласованность между моделями (УЛУЧШЕННАЯ ВЕРСИЯ)
+    """
+    if len(all_probabilities) < 2:
+      return 1.0  # Если модель одна, согласованность максимальная
+
+    try:
+      # Проверяем размеры
+      target_shape = all_probabilities[0].shape
+      valid_probabilities = [p for p in all_probabilities if p.shape == target_shape]
+
+      if len(valid_probabilities) < 2:
+        return 0.5  # Минимальная согласованность если размеры не совпадают
+
+      # Получаем предсказанные классы от каждой модели
+      predicted_classes = [np.argmax(proba, axis=1) for proba in valid_probabilities]
+
+      # Рассчитываем согласованность как долю случаев, когда модели согласны
+      total_predictions = len(predicted_classes[0])
+      agreement_count = 0
+
+      for i in range(total_predictions):
+        # Смотрим предсказания всех моделей для i-го образца
+        sample_predictions = [pred_class[i] for pred_class in predicted_classes]
+
+        # Подсчитываем самый частый класс
+        most_common_class = max(set(sample_predictions), key=sample_predictions.count)
+        most_common_count = sample_predictions.count(most_common_class)
+
+        # Согласованность = доля моделей, предсказавших самый частый класс
+        sample_agreement = most_common_count / len(sample_predictions)
+        agreement_count += sample_agreement
+
+      overall_agreement = agreement_count / total_predictions
+
+      # Дополнительно учитываем согласованность вероятностей (не только классов)
+      probability_agreement = self._calculate_probability_agreement(valid_probabilities)
+
+      # Комбинированная метрика
+      final_agreement = 0.7 * overall_agreement + 0.3 * probability_agreement
+
+      return final_agreement
+
+    except Exception as e:
+      logger.warning(f"Ошибка расчета согласованности: {e}")
+      return 0.5  # Средняя согласованность при ошибке
+
+  def _calculate_probability_agreement(self, probabilities: List[np.ndarray]) -> float:
+    """
+    Рассчитывает согласованность на уровне вероятностей
+    """
+    try:
+      if len(probabilities) < 2:
+        return 1.0
+
+      # Вычисляем среднее расстояние между распределениями вероятностей
+      total_distance = 0
+      comparisons = 0
+
+      for i in range(len(probabilities)):
+        for j in range(i + 1, len(probabilities)):
+          # Используем Jensen-Shannon расстояние для сравнения распределений
+          distance = self._jensen_shannon_distance(probabilities[i], probabilities[j])
+          total_distance += distance
+          comparisons += 1
+
+      if comparisons == 0:
+        return 1.0
+
+      avg_distance = total_distance / comparisons
+      # Преобразуем расстояние в согласованность (чем меньше расстояние, тем выше согласованность)
+      agreement = max(0, 1 - avg_distance)
+
+      return agreement
+
+    except Exception as e:
+      logger.warning(f"Ошибка расчета согласованности вероятностей: {e}")
+      return 0.5
+
+  def _jensen_shannon_distance(self, p1: np.ndarray, p2: np.ndarray) -> float:
+    """
+    Рассчитывает Jensen-Shannon расстояние между двумя распределениями вероятностей
+    """
+    try:
+      # Берем среднее по всем образцам для каждого распределения
+      p1_mean = np.mean(p1, axis=0)
+      p2_mean = np.mean(p2, axis=0)
+
+      # Нормализуем чтобы получить корректные вероятности
+      p1_mean = p1_mean / p1_mean.sum()
+      p2_mean = p2_mean / p2_mean.sum()
+
+      # Избегаем log(0)
+      p1_mean = np.clip(p1_mean, 1e-10, 1.0)
+      p2_mean = np.clip(p2_mean, 1e-10, 1.0)
+
+      # Jensen-Shannon расстояние
+      m = 0.5 * (p1_mean + p2_mean)
+      js_div = 0.5 * np.sum(p1_mean * np.log(p1_mean / m)) + 0.5 * np.sum(p2_mean * np.log(p2_mean / m))
+      js_distance = np.sqrt(js_div)
+
+      return js_distance
+
+    except Exception as e:
+      logger.warning(f"Ошибка расчета JS расстояния: {e}")
+      return 1.0  # Максимальное расстояние при ошибке
 
   def fit_with_diagnostics(self, X: pd.DataFrame, y: pd.Series,
                            external_data: Optional[Dict[str, pd.DataFrame]] = None,
@@ -2401,28 +2613,28 @@ class EnhancedEnsembleModel:
         print(f"❌ Ошибка обучения: {e}")
       raise
 
-  def _calculate_model_agreement(self, all_probabilities: List[np.ndarray]) -> float:
-    """
-    Вычисляет согласованность между моделями
-    """
-    try:
-      if len(all_probabilities) < 2:
-        return 1.0
-
-      # Берем предсказания для последнего наблюдения
-      last_predictions = [proba[-1] for proba in all_probabilities]
-
-      # Вычисляем стандартное отклонение между предсказаниями моделей
-      std_across_models = np.std(last_predictions, axis=0)
-      avg_std = np.mean(std_across_models)
-
-      # Преобразуем в меру согласованности (чем меньше разброс, тем выше согласованность)
-      agreement = max(0.0, 1.0 - (avg_std * 3))  # Масштабируем
-
-      return agreement
-
-    except Exception:
-      return 0.5  # Средняя согласованность по умолчанию
+  # def _calculate_model_agreement(self, all_probabilities: List[np.ndarray]) -> float:
+  #   """
+  #   Вычисляет согласованность между моделями
+  #   """
+  #   try:
+  #     if len(all_probabilities) < 2:
+  #       return 1.0
+  #
+  #     # Берем предсказания для последнего наблюдения
+  #     last_predictions = [proba[-1] for proba in all_probabilities]
+  #
+  #     # Вычисляем стандартное отклонение между предсказаниями моделей
+  #     std_across_models = np.std(last_predictions, axis=0)
+  #     avg_std = np.mean(std_across_models)
+  #
+  #     # Преобразуем в меру согласованности (чем меньше разброс, тем выше согласованность)
+  #     agreement = max(0.0, 1.0 - (avg_std * 3))  # Масштабируем
+  #
+  #     return agreement
+  #
+  #   except Exception:
+  #     return 0.5  # Средняя согласованность по умолчанию
 
   def optimize_features(self, X: pd.DataFrame, y: pd.Series,
                         protect_base_columns: bool = True) -> Tuple[pd.DataFrame, List[str]]:
@@ -3197,4 +3409,782 @@ class EnhancedEnsembleModel:
       health_status['error'] = str(e)
       health_status['overall_health'] = 'ERROR'
       return health_status
+
+
+# =================== НОВЫЙ КЛАСС ДЛЯ РЫНОЧНЫХ ФИЛЬТРОВ ===================
+
+class MarketLogicFilter:
+  """
+  Класс для применения фильтров здравого смысла к ML предсказаниям
+  """
+
+  def __init__(self):
+    self.trend_window = 20
+    self.volatility_window = 14
+    self.volume_window = 10
+    self.rsi_oversold = 30
+    self.rsi_overbought = 70
+    self.min_trend_strength = 0.6
+    self.max_volatility_ratio = 3.0
+
+  def apply_market_filters(self, signal_type: SignalType, confidence: float,
+                           market_data: pd.DataFrame, symbol: str) -> Tuple[SignalType, float, Dict]:
+    """
+    Применяет фильтры рыночной логики к ML сигналу
+    """
+    logger.debug(f"Применение рыночных фильтров для {symbol}, исходный сигнал: {signal_type.value}")
+
+    filter_results = {
+      'original_signal': signal_type.value,
+      'original_confidence': confidence,
+      'filters_applied': [],
+      'adjustments_made': [],
+      'final_signal': signal_type.value,
+      'final_confidence': confidence,
+      'market_conditions': {}
+    }
+
+    try:
+      # 1. Анализ рыночных условий
+      market_conditions = self._analyze_market_conditions(market_data)
+      filter_results['market_conditions'] = market_conditions
+
+      # 2. Фильтр тренда
+      signal_type, confidence = self._apply_trend_filter(
+        signal_type, confidence, market_conditions, filter_results
+      )
+
+      # 3. Фильтр волатильности
+      signal_type, confidence = self._apply_volatility_filter(
+        signal_type, confidence, market_conditions, filter_results
+      )
+
+      # 4. Фильтр RSI (перекупленность/перепроданность)
+      signal_type, confidence = self._apply_rsi_filter(
+        signal_type, confidence, market_conditions, filter_results
+      )
+
+      # 5. Фильтр объема
+      signal_type, confidence = self._apply_volume_filter(
+        signal_type, confidence, market_conditions, filter_results
+      )
+
+      # 6. Фильтр поддержки/сопротивления
+      signal_type, confidence = self._apply_support_resistance_filter(
+        signal_type, confidence, market_conditions, filter_results
+      )
+
+      # 7. Режимный фильтр (трендовый/боковой рынок)
+      signal_type, confidence = self._apply_regime_filter(
+        signal_type, confidence, market_conditions, filter_results
+      )
+
+      filter_results['final_signal'] = signal_type.value
+      filter_results['final_confidence'] = confidence
+
+      # Логируем результаты фильтрации
+      if signal_type.value != filter_results['original_signal']:
+        logger.info(
+          f"Сигнал для {symbol} изменен фильтрами: {filter_results['original_signal']} -> {signal_type.value}")
+
+      if abs(confidence - filter_results['original_confidence']) > 0.1:
+        logger.info(
+          f"Уверенность для {symbol} скорректирована: {filter_results['original_confidence']:.3f} -> {confidence:.3f}")
+
+      return signal_type, confidence, filter_results
+
+    except Exception as e:
+      logger.error(f"Ошибка применения рыночных фильтров для {symbol}: {e}")
+      return signal_type, confidence, filter_results
+
+  def _analyze_market_conditions(self, data: pd.DataFrame) -> Dict:
+    """
+    Анализирует текущие рыночные условия
+    """
+    try:
+      conditions = {}
+
+      # Основные ценовые данные
+      close_prices = data['close'].values
+      high_prices = data['high'].values
+      low_prices = data['low'].values
+      volumes = data['volume'].values if 'volume' in data.columns else None
+
+      current_price = close_prices[-1]
+
+      # 1. Анализ тренда
+      if len(close_prices) >= self.trend_window:
+        trend_sma = np.mean(close_prices[-self.trend_window:])
+        price_vs_trend = (current_price - trend_sma) / trend_sma
+
+        # Линейная регрессия для определения направления тренда
+        x = np.arange(self.trend_window)
+        y = close_prices[-self.trend_window:]
+        trend_slope = np.polyfit(x, y, 1)[0]
+        trend_slope_normalized = trend_slope / current_price  # Нормализуем по цене
+
+        conditions['trend'] = {
+          'direction': 'up' if trend_slope_normalized > 0.001 else 'down' if trend_slope_normalized < -0.001 else 'sideways',
+          'strength': abs(trend_slope_normalized) * 1000,  # Умножаем для читаемости
+          'price_vs_ma': price_vs_trend,
+          'slope': trend_slope_normalized
+        }
+
+      # 2. Волатильность
+      if len(close_prices) >= self.volatility_window:
+        returns = np.diff(close_prices[-self.volatility_window:]) / close_prices[-self.volatility_window:-1]
+        current_volatility = np.std(returns) * np.sqrt(252)  # Годовая волатильность
+
+        # Сравниваем с исторической волатильностью
+        if len(close_prices) >= self.volatility_window * 2:
+          historical_returns = np.diff(
+            close_prices[-self.volatility_window * 2:-self.volatility_window]) / close_prices[
+                                                                                 -self.volatility_window * 2 - 1:-self.volatility_window - 1]
+          historical_volatility = np.std(historical_returns) * np.sqrt(252)
+          volatility_ratio = current_volatility / (historical_volatility + 1e-8)
+        else:
+          volatility_ratio = 1.0
+
+        conditions['volatility'] = {
+          'current': current_volatility,
+          'ratio_to_historical': volatility_ratio,
+          'regime': 'high' if volatility_ratio > 1.5 else 'low' if volatility_ratio < 0.7 else 'normal'
+        }
+
+      # 3. RSI
+      if len(close_prices) >= 14:
+        rsi = self._calculate_rsi(close_prices, 14)
+        conditions['rsi'] = {
+          'value': rsi,
+          'condition': 'oversold' if rsi < self.rsi_oversold else 'overbought' if rsi > self.rsi_overbought else 'neutral'
+        }
+
+      # 4. Объем (если доступен)
+      if volumes is not None and len(volumes) >= self.volume_window:
+        current_volume = volumes[-1]
+        avg_volume = np.mean(volumes[-self.volume_window:])
+        volume_ratio = current_volume / (avg_volume + 1e-8)
+
+        conditions['volume'] = {
+          'current': current_volume,
+          'ratio_to_average': volume_ratio,
+          'condition': 'high' if volume_ratio > 1.5 else 'low' if volume_ratio < 0.5 else 'normal'
+        }
+
+      # 5. Поддержка и сопротивление
+      if len(close_prices) >= 50:
+        support_resistance = self._find_support_resistance(high_prices, low_prices, close_prices)
+        conditions['support_resistance'] = support_resistance
+
+      # 6. Рыночный режим
+      if len(close_prices) >= 50:
+        market_regime = self._determine_market_regime(close_prices, high_prices, low_prices)
+        conditions['market_regime'] = market_regime
+
+      return conditions
+
+    except Exception as e:
+      logger.error(f"Ошибка анализа рыночных условий: {e}")
+      return {}
+
+  def _apply_trend_filter(self, signal_type: SignalType, confidence: float,
+                          market_conditions: Dict, filter_results: Dict) -> Tuple[SignalType, float]:
+    """
+    Фильтр на основе тренда
+    """
+    if 'trend' not in market_conditions:
+      return signal_type, confidence
+
+    trend_info = market_conditions['trend']
+    trend_direction = trend_info['direction']
+    trend_strength = trend_info['strength']
+
+    filter_results['filters_applied'].append('trend_filter')
+
+    # Не торгуем против сильного тренда
+    if trend_strength > self.min_trend_strength:
+      if signal_type == SignalType.BUY and trend_direction == 'down':
+        logger.debug(f"BUY сигнал против нисходящего тренда (сила: {trend_strength:.3f})")
+        confidence *= 0.5  # Снижаем уверенность
+        filter_results['adjustments_made'].append('reduced_confidence_against_downtrend')
+
+        if confidence < 0.4:  # Если уверенность стала слишком низкой
+          signal_type = SignalType.HOLD
+          filter_results['adjustments_made'].append('changed_to_hold_weak_against_trend')
+
+      elif signal_type == SignalType.SELL and trend_direction == 'up':
+        logger.debug(f"SELL сигнал против восходящего тренда (сила: {trend_strength:.3f})")
+        confidence *= 0.5
+        filter_results['adjustments_made'].append('reduced_confidence_against_uptrend')
+
+        if confidence < 0.4:
+          signal_type = SignalType.HOLD
+          filter_results['adjustments_made'].append('changed_to_hold_weak_against_trend')
+
+    # Усиливаем сигналы по тренду
+    elif trend_strength > 0.3:  # Умеренный тренд
+      if (signal_type == SignalType.BUY and trend_direction == 'up') or \
+          (signal_type == SignalType.SELL and trend_direction == 'down'):
+        confidence = min(confidence * 1.2, 1.0)  # Повышаем уверенность
+        filter_results['adjustments_made'].append('boosted_confidence_with_trend')
+
+    return signal_type, confidence
+
+  def _apply_volatility_filter(self, signal_type: SignalType, confidence: float,
+                               market_conditions: Dict, filter_results: Dict) -> Tuple[SignalType, float]:
+    """
+    Фильтр на основе волатильности
+    """
+    if 'volatility' not in market_conditions:
+      return signal_type, confidence
+
+    vol_info = market_conditions['volatility']
+    vol_ratio = vol_info['ratio_to_historical']
+    vol_regime = vol_info['regime']
+
+    filter_results['filters_applied'].append('volatility_filter')
+
+    # В периоды экстремальной волатильности снижаем уверенность
+    if vol_ratio > self.max_volatility_ratio:
+      logger.debug(f"Экстремальная волатильность обнаружена: {vol_ratio:.2f}x")
+      confidence *= 0.6
+      filter_results['adjustments_made'].append('reduced_confidence_high_volatility')
+
+      # При очень высокой волатильности переходим на HOLD
+      if vol_ratio > 5.0 and signal_type != SignalType.HOLD:
+        signal_type = SignalType.HOLD
+        filter_results['adjustments_made'].append('changed_to_hold_extreme_volatility')
+
+    # В периоды низкой волатильности тоже снижаем уверенность (возможен прорыв)
+    elif vol_ratio < 0.3:
+      logger.debug(f"Аномально низкая волатильность: {vol_ratio:.2f}x")
+      confidence *= 0.8
+      filter_results['adjustments_made'].append('reduced_confidence_low_volatility')
+
+    return signal_type, confidence
+
+  def _apply_rsi_filter(self, signal_type: SignalType, confidence: float,
+                        market_conditions: Dict, filter_results: Dict) -> Tuple[SignalType, float]:
+    """
+    Фильтр на основе RSI
+    """
+    if 'rsi' not in market_conditions:
+      return signal_type, confidence
+
+    rsi_info = market_conditions['rsi']
+    rsi_value = rsi_info['value']
+    rsi_condition = rsi_info['condition']
+
+    filter_results['filters_applied'].append('rsi_filter')
+
+    # Не покупаем в перекупленности, не продаем в перепроданности
+    if signal_type == SignalType.BUY and rsi_condition == 'overbought':
+      logger.debug(f"BUY сигнал при перекупленности (RSI: {rsi_value:.1f})")
+      confidence *= 0.4
+      filter_results['adjustments_made'].append('reduced_confidence_overbought')
+
+      if rsi_value > 80:  # Экстремальная перекупленность
+        signal_type = SignalType.HOLD
+        filter_results['adjustments_made'].append('changed_to_hold_extreme_overbought')
+
+    elif signal_type == SignalType.SELL and rsi_condition == 'oversold':
+      logger.debug(f"SELL сигнал при перепроданности (RSI: {rsi_value:.1f})")
+      confidence *= 0.4
+      filter_results['adjustments_made'].append('reduced_confidence_oversold')
+
+      if rsi_value < 20:  # Экстремальная перепроданность
+        signal_type = SignalType.HOLD
+        filter_results['adjustments_made'].append('changed_to_hold_extreme_oversold')
+
+    # Усиливаем сигналы в правильном направлении
+    elif signal_type == SignalType.BUY and rsi_condition == 'oversold':
+      confidence = min(confidence * 1.3, 1.0)
+      filter_results['adjustments_made'].append('boosted_confidence_buy_oversold')
+
+    elif signal_type == SignalType.SELL and rsi_condition == 'overbought':
+      confidence = min(confidence * 1.3, 1.0)
+      filter_results['adjustments_made'].append('boosted_confidence_sell_overbought')
+
+    return signal_type, confidence
+
+  def _apply_volume_filter(self, signal_type: SignalType, confidence: float,
+                           market_conditions: Dict, filter_results: Dict) -> Tuple[SignalType, float]:
+    """
+    Фильтр на основе объема
+    """
+    if 'volume' not in market_conditions:
+      return signal_type, confidence
+
+    volume_info = market_conditions['volume']
+    volume_condition = volume_info['condition']
+    volume_ratio = volume_info['ratio_to_average']
+
+    filter_results['filters_applied'].append('volume_filter')
+
+    # Низкий объем снижает уверенность в сигнале
+    if volume_condition == 'low':
+      logger.debug(f"Низкий объем обнаружен: {volume_ratio:.2f}x")
+      confidence *= 0.7
+      filter_results['adjustments_made'].append('reduced_confidence_low_volume')
+
+    # Высокий объем усиливает сигнал
+    elif volume_condition == 'high' and signal_type != SignalType.HOLD:
+      logger.debug(f"Высокий объем подтверждает сигнал: {volume_ratio:.2f}x")
+      confidence = min(confidence * 1.2, 1.0)
+      filter_results['adjustments_made'].append('boosted_confidence_high_volume')
+
+    return signal_type, confidence
+
+  def _apply_support_resistance_filter(self, signal_type: SignalType, confidence: float,
+                                       market_conditions: Dict, filter_results: Dict) -> Tuple[SignalType, float]:
+    """
+    Фильтр на основе уровней поддержки и сопротивления
+    """
+    if 'support_resistance' not in market_conditions:
+      return signal_type, confidence
+
+    sr_info = market_conditions['support_resistance']
+    filter_results['filters_applied'].append('support_resistance_filter')
+
+    # Если цена близко к сопротивлению, не покупаем
+    if signal_type == SignalType.BUY and sr_info.get('near_resistance', False):
+      logger.debug("BUY сигнал близко к сопротивлению")
+      confidence *= 0.6
+      filter_results['adjustments_made'].append('reduced_confidence_near_resistance')
+
+    # Если цена близко к поддержке, не продаем
+    elif signal_type == SignalType.SELL and sr_info.get('near_support', False):
+      logger.debug("SELL сигнал близко к поддержке")
+      confidence *= 0.6
+      filter_results['adjustments_made'].append('reduced_confidence_near_support')
+
+    return signal_type, confidence
+
+  def _apply_regime_filter(self, signal_type: SignalType, confidence: float,
+                           market_conditions: Dict, filter_results: Dict) -> Tuple[SignalType, float]:
+    """
+    Фильтр на основе рыночного режима
+    """
+    if 'market_regime' not in market_conditions:
+      return signal_type, confidence
+
+    regime_info = market_conditions['market_regime']
+    regime_type = regime_info.get('type', 'unknown')
+
+    filter_results['filters_applied'].append('regime_filter')
+
+    # В боковом рынке снижаем уверенность в трендовых сигналах
+    if regime_type == 'sideways' and signal_type != SignalType.HOLD:
+      logger.debug("Трендовый сигнал в боковом рынке")
+      confidence *= 0.7
+      filter_results['adjustments_made'].append('reduced_confidence_sideways_market')
+
+    # В трендовом рынке усиливаем сигналы по тренду
+    elif regime_type == 'trending':
+      trend_direction = market_conditions.get('trend', {}).get('direction', 'unknown')
+      if (signal_type == SignalType.BUY and trend_direction == 'up') or \
+          (signal_type == SignalType.SELL and trend_direction == 'down'):
+        confidence = min(confidence * 1.15, 1.0)
+        filter_results['adjustments_made'].append('boosted_confidence_trending_market')
+
+    return signal_type, confidence
+
+  def _calculate_rsi(self, prices: np.ndarray, period: int = 14) -> float:
+    """
+    Рассчитывает RSI
+    """
+    try:
+      if len(prices) < period + 1:
+        return 50.0  # Нейтральное значение
+
+      deltas = np.diff(prices)
+      gains = np.where(deltas > 0, deltas, 0)
+      losses = np.where(deltas < 0, -deltas, 0)
+
+      avg_gain = np.mean(gains[-period:])
+      avg_loss = np.mean(losses[-period:])
+
+      if avg_loss == 0:
+        return 100.0
+
+      rs = avg_gain / avg_loss
+      rsi = 100 - (100 / (1 + rs))
+
+      return float(rsi)
+
+    except Exception as e:
+      logger.warning(f"Ошибка расчета RSI: {e}")
+      return 50.0
+
+  def _find_support_resistance(self, highs: np.ndarray, lows: np.ndarray,
+                               closes: np.ndarray) -> Dict:
+    """
+    Находит уровни поддержки и сопротивления
+    """
+    try:
+      current_price = closes[-1]
+
+      # Простой алгоритм поиска локальных экстремумов
+      window = 5
+      resistance_levels = []
+      support_levels = []
+
+      # Ищем локальные максимумы (сопротивления)
+      for i in range(window, len(highs) - window):
+        if highs[i] == max(highs[i - window:i + window + 1]):
+          resistance_levels.append(highs[i])
+
+      # Ищем локальные минимумы (поддержки)
+      for i in range(window, len(lows) - window):
+        if lows[i] == min(lows[i - window:i + window + 1]):
+          support_levels.append(lows[i])
+
+      # Находим ближайшие уровни
+      resistance_levels = sorted(resistance_levels, reverse=True)
+      support_levels = sorted(support_levels, reverse=True)
+
+      nearest_resistance = None
+      nearest_support = None
+
+      for level in resistance_levels:
+        if level > current_price:
+          nearest_resistance = level
+          break
+
+      for level in support_levels:
+        if level < current_price:
+          nearest_support = level
+          break
+
+      # Проверяем близость к уровням (в пределах 2%)
+      threshold = 0.02
+      near_resistance = (nearest_resistance is not None and
+                         abs(current_price - nearest_resistance) / current_price < threshold)
+      near_support = (nearest_support is not None and
+                      abs(current_price - nearest_support) / current_price < threshold)
+
+      return {
+        'nearest_resistance': nearest_resistance,
+        'nearest_support': nearest_support,
+        'near_resistance': near_resistance,
+        'near_support': near_support,
+        'resistance_levels': resistance_levels[:3],  # Топ 3
+        'support_levels': support_levels[:3]
+      }
+
+    except Exception as e:
+      logger.warning(f"Ошибка поиска поддержек/сопротивлений: {e}")
+      return {}
+
+  def _determine_market_regime(self, closes: np.ndarray, highs: np.ndarray,
+                               lows: np.ndarray) -> Dict:
+    """
+    Определяет рыночный режим (трендовый/боковой)
+    """
+    try:
+      # Используем ADX-подобный подход для определения режима
+      period = 20
+      if len(closes) < period:
+        return {'type': 'unknown'}
+
+      # Рассчитываем направленное движение
+      high_diff = np.diff(highs[-period:])
+      low_diff = -np.diff(lows[-period:])
+
+      # True Range
+      tr1 = highs[1:] - lows[1:]
+      tr2 = np.abs(highs[1:] - closes[:-1])
+      tr3 = np.abs(lows[1:] - closes[:-1])
+      true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+
+      # Направленные индексы
+      plus_dm = np.where((high_diff > low_diff) & (high_diff > 0), high_diff, 0)
+      minus_dm = np.where((low_diff > high_diff) & (low_diff > 0), low_diff, 0)
+
+      # Сглаживание
+      atr = np.mean(true_range[-14:])
+      plus_di = 100 * np.mean(plus_dm[-14:]) / atr if atr > 0 else 0
+      minus_di = 100 * np.mean(minus_dm[-14:]) / atr if atr > 0 else 0
+
+      # ADX
+      dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di) if (plus_di + minus_di) > 0 else 0
+
+      # Определяем режим
+      if dx > 25:
+        regime_type = 'trending'
+        strength = 'strong' if dx > 40 else 'moderate'
+      else:
+        regime_type = 'sideways'
+        strength = 'weak'
+
+      return {
+        'type': regime_type,
+        'strength': strength,
+        'adx_value': dx,
+        'plus_di': plus_di,
+        'minus_di': minus_di
+      }
+
+    except Exception as e:
+      logger.warning(f"Ошибка определения рыночного режима: {e}")
+      return {'type': 'unknown'}
+
+class TemporalDataManager:
+    """
+    Класс для управления временными аспектами данных и обеспечения актуальности
+    """
+
+    def __init__(self):
+      self.max_data_age_minutes = 15  # Максимальный возраст данных в минутах
+      self.required_recent_bars = 5  # Минимум недавних баров для анализа
+      self.temporal_weights = True  # Использовать временные веса
+      self.real_time_adjustments = True  # Использовать корректировки в реальном времени
+
+    def validate_data_freshness(self, data: pd.DataFrame, symbol: str) -> Dict[str, Any]:
+      """
+      Проверяет свежесть и актуальность данных
+      """
+      validation_result = {
+        'is_fresh': False,
+        'last_update': None,
+        'data_age_minutes': None,
+        'warnings': [],
+        'recommendations': []
+      }
+
+      try:
+        if data.empty:
+          validation_result['warnings'].append("Данные отсутствуют")
+          return validation_result
+
+        # Проверяем наличие временных меток
+        if 'timestamp' in data.columns:
+          last_timestamp = pd.to_datetime(data['timestamp'].iloc[-1])
+        elif data.index.name == 'timestamp' or isinstance(data.index, pd.DatetimeIndex):
+          last_timestamp = data.index[-1]
+        else:
+          validation_result['warnings'].append("Временные метки не найдены")
+          validation_result['recommendations'].append("Добавьте временные метки к данным")
+          return validation_result
+
+        # Рассчитываем возраст данных
+        current_time = pd.Timestamp.now()
+        if last_timestamp.tz is None:
+          last_timestamp = last_timestamp.tz_localize('UTC')
+        if current_time.tz is None:
+          current_time = current_time.tz_localize('UTC')
+
+        data_age = current_time - last_timestamp
+        data_age_minutes = data_age.total_seconds() / 60
+
+        validation_result['last_update'] = last_timestamp
+        validation_result['data_age_minutes'] = data_age_minutes
+
+        # Проверяем свежесть
+        if data_age_minutes <= self.max_data_age_minutes:
+          validation_result['is_fresh'] = True
+        else:
+          validation_result['warnings'].append(
+            f"Данные устарели: {data_age_minutes:.1f} мин (макс: {self.max_data_age_minutes})"
+          )
+          validation_result['recommendations'].append("Обновите данные перед принятием торговых решений")
+
+        # Проверяем количество недавних баров
+        recent_threshold = current_time - pd.Timedelta(minutes=self.max_data_age_minutes)
+        if 'timestamp' in data.columns:
+          recent_data = data[pd.to_datetime(data['timestamp']) >= recent_threshold]
+        else:
+          recent_data = data[data.index >= recent_threshold]
+
+        if len(recent_data) < self.required_recent_bars:
+          validation_result['warnings'].append(
+            f"Недостаточно недавних баров: {len(recent_data)} < {self.required_recent_bars}"
+          )
+
+        logger.debug(
+          f"Валидация данных для {symbol}: возраст {data_age_minutes:.1f} мин, свежесть: {validation_result['is_fresh']}")
+
+        return validation_result
+
+      except Exception as e:
+        logger.error(f"Ошибка валидации свежести данных для {symbol}: {e}")
+        validation_result['warnings'].append(f"Ошибка валидации: {e}")
+        return validation_result
+
+    def apply_temporal_weights(self, data: pd.DataFrame, predictions: np.ndarray) -> np.ndarray:
+      """
+      Применяет временные веса к предсказаниям (больший вес последним данным)
+      """
+      try:
+        if not self.temporal_weights or len(predictions.shape) != 2:
+          return predictions
+
+        n_samples = predictions.shape[0]
+
+        # Создаем экспоненциальные веса (больший вес последним наблюдениям)
+        weights = np.exp(np.linspace(0, 1, n_samples))
+        weights = weights / weights.sum()
+
+        # Применяем веса к каждому классу
+        weighted_predictions = predictions * weights.reshape(-1, 1)
+
+        logger.debug(f"Применены временные веса к {n_samples} предсказаниям")
+        return weighted_predictions
+
+      except Exception as e:
+        logger.warning(f"Ошибка применения временных весов: {e}")
+        return predictions
+
+    def get_real_time_context(self, data: pd.DataFrame, symbol: str) -> Dict[str, Any]:
+      """
+      Получает контекст реального времени для корректировки предсказаний
+      """
+      context = {
+        'price_momentum': 0.0,
+        'recent_volatility': 0.0,
+        'volume_trend': 'neutral',
+        'market_phase': 'unknown',
+        'confidence_adjustment': 1.0
+      }
+
+      try:
+        if len(data) < 10:
+          return context
+
+        close_prices = data['close'].values
+        volumes = data['volume'].values if 'volume' in data.columns else None
+
+        # 1. Анализ ценового моментума (последние vs предыдущие бары)
+        recent_bars = min(5, len(close_prices) // 2)
+        recent_avg = np.mean(close_prices[-recent_bars:])
+        previous_avg = np.mean(close_prices[-recent_bars * 2:-recent_bars])
+
+        if previous_avg > 0:
+          momentum = (recent_avg - previous_avg) / previous_avg
+          context['price_momentum'] = momentum
+
+        # 2. Недавняя волатильность
+        if len(close_prices) >= 10:
+          recent_returns = np.diff(close_prices[-10:]) / close_prices[-11:-1]
+          context['recent_volatility'] = np.std(recent_returns)
+
+        # 3. Тренд объема
+        if volumes is not None and len(volumes) >= 10:
+          recent_vol_avg = np.mean(volumes[-5:])
+          previous_vol_avg = np.mean(volumes[-10:-5])
+
+          if previous_vol_avg > 0:
+            vol_ratio = recent_vol_avg / previous_vol_avg
+            if vol_ratio > 1.2:
+              context['volume_trend'] = 'increasing'
+            elif vol_ratio < 0.8:
+              context['volume_trend'] = 'decreasing'
+            else:
+              context['volume_trend'] = 'stable'
+
+        # 4. Определение фазы рынка
+        if len(close_prices) >= 20:
+          short_ma = np.mean(close_prices[-5:])
+          long_ma = np.mean(close_prices[-20:])
+
+          if short_ma > long_ma * 1.01:
+            context['market_phase'] = 'bullish'
+          elif short_ma < long_ma * 0.99:
+            context['market_phase'] = 'bearish'
+          else:
+            context['market_phase'] = 'neutral'
+
+        # 5. Корректировка уверенности на основе контекста
+        confidence_factors = []
+
+        # Высокий моментум увеличивает уверенность
+        if abs(momentum) > 0.005:  # > 0.5%
+          confidence_factors.append(1.1)
+        else:
+          confidence_factors.append(0.95)
+
+        # Стабильная волатильность увеличивает уверенность
+        if 0.01 < context['recent_volatility'] < 0.05:  # Умеренная волатильность
+          confidence_factors.append(1.05)
+        else:
+          confidence_factors.append(0.9)
+
+        # Растущий объем увеличивает уверенность
+        if context['volume_trend'] == 'increasing':
+          confidence_factors.append(1.1)
+        elif context['volume_trend'] == 'decreasing':
+          confidence_factors.append(0.9)
+
+        context['confidence_adjustment'] = np.mean(confidence_factors)
+
+        logger.debug(f"Контекст реального времени для {symbol}: {context}")
+        return context
+
+      except Exception as e:
+        logger.warning(f"Ошибка получения контекста реального времени для {symbol}: {e}")
+        return context
+
+    def adjust_prediction_for_real_time(self, prediction: 'MLPrediction',
+                                        real_time_context: Dict[str, Any]) -> 'MLPrediction':
+      """
+      Корректирует предсказание на основе контекста реального времени
+      """
+      try:
+        if not self.real_time_adjustments:
+          return prediction
+
+        # Корректируем уверенность
+        original_confidence = prediction.confidence
+        adjusted_confidence = original_confidence * real_time_context.get('confidence_adjustment', 1.0)
+        adjusted_confidence = np.clip(adjusted_confidence, 0.1, 1.0)
+
+        # Корректируем сигнал на основе моментума
+        momentum = real_time_context.get('price_momentum', 0.0)
+        market_phase = real_time_context.get('market_phase', 'unknown')
+
+        adjusted_signal = prediction.signal_type
+
+        # Если моментум сильно противоречит сигналу, снижаем уверенность
+        if prediction.signal_type == SignalType.BUY and momentum < -0.01:  # -1%
+          adjusted_confidence *= 0.7
+          logger.debug("BUY сигнал против отрицательного моментума")
+        elif prediction.signal_type == SignalType.SELL and momentum > 0.01:  # +1%
+          adjusted_confidence *= 0.7
+          logger.debug("SELL сигнал против положительного моментума")
+
+        # Если уверенность стала слишком низкой, переходим на HOLD
+        if adjusted_confidence < 0.3 and adjusted_signal != SignalType.HOLD:
+          adjusted_signal = SignalType.HOLD
+          adjusted_confidence = 0.3
+          logger.debug("Сигнал изменен на HOLD из-за низкой скорректированной уверенности")
+
+        # Создаем скорректированное предсказание
+        adjusted_prediction = MLPrediction(
+          signal_type=adjusted_signal,
+          probability=prediction.probability,
+          confidence=adjusted_confidence,
+          model_agreement=prediction.model_agreement,
+          feature_importance=prediction.feature_importance,
+          risk_assessment=prediction.risk_assessment,
+          metadata={
+            **prediction.metadata,
+            'real_time_adjustments': {
+              'original_confidence': original_confidence,
+              'confidence_adjustment_factor': real_time_context.get('confidence_adjustment', 1.0),
+              'momentum_impact': momentum,
+              'market_phase': market_phase,
+              'volume_trend': real_time_context.get('volume_trend', 'neutral')
+            }
+          }
+        )
+
+        if abs(adjusted_confidence - original_confidence) > 0.05:
+          logger.info(
+            f"Уверенность скорректирована в реальном времени: {original_confidence:.3f} -> {adjusted_confidence:.3f}")
+
+        return adjusted_prediction
+
+      except Exception as e:
+        logger.error(f"Ошибка корректировки предсказания в реальном времени: {e}")
+        return prediction
 

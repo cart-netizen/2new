@@ -554,33 +554,88 @@ class IntegratedTradingSystem:
           signal_logger.info(
             f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, Уверенность: {signal.confidence:.2f}")
 
-      # --- УРОВЕНЬ 3: МЕТА-МОДЕЛЬ С ДИАГНОСТИКОЙ ---
+      # --- УРОВЕНЬ 3: МЕТА-МОДЕЛЬ С ДИАГНОСТИКОЙ И ВРЕМЕННОЙ ВАЛИДАЦИЕЙ ---
       final_signal: Optional[TradingSignal] = None
+      ml_prediction = None  # Инициализируем переменную
 
       if self.enhanced_ml_model and self.use_enhanced_ml:
+        # === БЛОК ВАЛИДАЦИИ СВЕЖЕСТИ ДАННЫХ ===
+        data_is_fresh = True
+        data_age_info = "N/A"
+
+        if hasattr(self.enhanced_ml_model, 'temporal_manager'):
+          try:
+            data_validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
+            data_is_fresh = data_validation['is_fresh']
+            data_age_info = f"{data_validation.get('data_age_minutes', 0):.1f} мин"
+
+            if not data_is_fresh:
+              logger.warning(f"Данные для {symbol} устарели ({data_age_info})")
+
+              # Если данные ОЧЕНЬ старые (>30 мин), пропускаем ML анализ полностью
+              if data_validation.get('data_age_minutes', 0) > 30:
+                logger.warning(f"Данные для {symbol} слишком старые, пропускаем ML анализ")
+                ml_prediction = None
+                data_is_fresh = False
+              else:
+                logger.debug(f"Продолжаем с предупреждением о свежести данных для {symbol}")
+                data_is_fresh = True  # Разрешаем анализ с предупреждением
+
+          except Exception as validation_error:
+            logger.warning(f"Ошибка валидации свежести данных для {symbol}: {validation_error}")
+            data_is_fresh = True  # При ошибке продолжаем без валидации
+
+        # === БЛОК ПОЛУЧЕНИЯ ML ПРЕДСКАЗАНИЯ ===
+        if data_is_fresh and ml_prediction is None:  # Получаем предсказание только если данные свежие
+          try:
+            logger.debug(f"Получение ML предсказания для {symbol}...")
+            _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+          except Exception as ml_error:
+            logger.error(f"Ошибка получения ML предсказания для {symbol}: {ml_error}")
+            ml_prediction = None
+
         # === ДИАГНОСТИЧЕСКИЙ БЛОК ===
         current_price = htf_data['close'].iloc[-1]
-        price_change_24h = ((current_price - htf_data['close'].iloc[-24]) / htf_data['close'].iloc[-24]) * 100 if len(
-          htf_data) >= 24 else 0
+        price_change_24h = 0
+        try:
+          if len(htf_data) >= 24:
+            price_change_24h = ((current_price - htf_data['close'].iloc[-24]) / htf_data['close'].iloc[-24]) * 100
+        except Exception:
+          price_change_24h = 0
 
         signal_logger.info(f"🔍 ДИАГНОСТИКА МЕТА-МОДЕЛИ для {symbol}:")
         signal_logger.info(
           f"  Режим: {regime_characteristics.primary_regime.value} (уверенность: {regime_characteristics.confidence:.2f})")
         signal_logger.info(f"  Цена 24ч: {price_change_24h:+.2f}%")
-        signal_logger.info(f"  Кандидаты: {list(candidate_signals.keys())}")
+        signal_logger.info(f"  Данные: {'✅ свежие' if data_is_fresh else f'⚠️ устарели ({data_age_info})'}")
+        signal_logger.info(f"  ML предсказание: {'✅ получено' if ml_prediction else '❌ пропущено'}")
 
-        for strategy_name, signal in candidate_signals.items():
-          signal_logger.info(f"  {strategy_name}: {signal.signal_type.value}, уверенность={signal.confidence:.3f}")
+        if candidate_signals:
+          signal_logger.info(f"  Кандидаты: {list(candidate_signals.keys())}")
+          for strategy_name, signal in candidate_signals.items():
+            signal_logger.info(f"    {strategy_name}: {signal.signal_type.value}, уверенность={signal.confidence:.3f}")
+        else:
+          signal_logger.info(f"  Кандидаты: нет")
 
-        # Получаем предсказание мета-модели
-        _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
-
+        # === БЛОК АНАЛИЗА ML ПРЕДСКАЗАНИЯ ===
         if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
-          # === РАСШИРЕННАЯ ДИАГНОСТИКА ПРЕДСКАЗАНИЯ ===
+          # РАСШИРЕННАЯ ДИАГНОСТИКА ПРЕДСКАЗАНИЯ
           signal_logger.info(f"МЕТА-МОДЕЛЬ ДЕТАЛЬНО:")
           signal_logger.info(f"  Предсказание: {ml_prediction.signal_type.value}")
           signal_logger.info(f"  Уверенность: {ml_prediction.confidence:.3f}")
-          signal_logger.info(f"  Метаданные: {ml_prediction.metadata}")
+          signal_logger.info(f"  Согласованность моделей: {ml_prediction.model_agreement:.3f}")
+
+          # Проверяем наличие информации о фильтрах
+          if hasattr(ml_prediction, 'metadata') and isinstance(ml_prediction.metadata, dict):
+            market_filters = ml_prediction.metadata.get('market_filters', {})
+            if market_filters:
+              signal_logger.info(f"  Фильтры: {len(market_filters.get('filters_applied', []))} применено")
+              if market_filters.get('adjustments_made'):
+                signal_logger.info(f"  Корректировки: {market_filters['adjustments_made']}")
+
+            # Информация о свежести данных из ML модели
+            if 'data_freshness_warning' in ml_prediction.metadata:
+              signal_logger.info(f"  ⚠️ Предупреждение: данные не свежие")
 
           # Анализ соответствия режиму
           regime_expected_direction = None
@@ -597,69 +652,216 @@ class IntegratedTradingSystem:
             # КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ при несоответствии
             if not direction_match and regime_characteristics.confidence > 0.8:
               signal_logger.warning(
-                f"⚠️ КОНФЛИКТ: Мета-модель предсказывает {ml_prediction.signal_type.value}, но режим {regime_characteristics.primary_regime.value}")
-              signal_logger.warning(
-                f"⚠️ Цена движется {'вверх' if price_change_24h > 0 else 'вниз'} ({price_change_24h:+.2f}%)")
+                f"🚨 КРИТИЧЕСКОЕ НЕСООТВЕТСТВИЕ: ML предсказывает {ml_prediction.signal_type.value}, но режим указывает на {regime_expected_direction}")
+              signal_logger.warning(f"🚨 Уверенность режима: {regime_characteristics.confidence:.2f}")
 
-          # === НОВАЯ ЛОГИКА ВАЛИДАЦИИ ===
-          # Используем существующий метод валидации согласованности (если есть)
-          is_consistent = True
-          consistency_reason = "Базовая проверка пройдена"
+              # Снижаем уверенность ML предсказания при сильном несоответствии
+              if hasattr(ml_prediction, 'confidence'):
+                original_confidence = ml_prediction.confidence
+                ml_prediction.confidence *= 0.5  # Снижаем уверенность вдвое
+                signal_logger.warning(
+                  f"🚨 Уверенность ML снижена: {original_confidence:.3f} -> {ml_prediction.confidence:.3f}")
 
-          if hasattr(self, '_validate_signal_consistency'):
-            is_consistent, consistency_reason = await self._validate_signal_consistency(
-              symbol, ml_prediction, regime_characteristics, htf_data
+          # === ПРОВЕРКА ПОДТВЕРЖДЕНИЯ ДРУГИМИ СТРАТЕГИЯМИ ===
+          confirming_strategies = []
+          for strategy_name, signal in candidate_signals.items():
+            if signal.signal_type == ml_prediction.signal_type:
+              confirming_strategies.append(strategy_name)
+
+          if confirming_strategies:
+            logger.info(f"Мета-модель подтверждена стратегиями: {confirming_strategies} для {symbol}")
+
+            # Выбираем стратегию с наибольшей уверенностью для подтверждения
+            best_confirming_signal = max(
+              [candidate_signals[name] for name in confirming_strategies],
+              key=lambda x: x.confidence
             )
-            signal_logger.info(f"СОГЛАСОВАННОСТЬ: {consistency_reason}")
 
-          # Проверяем подтверждение от стратегий
-          has_confirmation = any(s.signal_type == ml_prediction.signal_type for s in candidate_signals.values())
-
-          if is_consistent and has_confirmation:
+            # Создаем финальный сигнал с комбинированной уверенностью
             final_signal = TradingSignal(
               signal_type=ml_prediction.signal_type,
               symbol=symbol,
-              price=htf_data['close'].iloc[-1],
-              confidence=ml_prediction.confidence,
-              strategy_name="Ensemble_Validated",
+              price=current_price,
+              confidence=min(0.95, (best_confirming_signal.confidence + ml_prediction.confidence) / 2),
+              strategy_name="Ensemble_ML_Confirmed",
               timestamp=datetime.now(),
-              metadata={'ml_prediction': ml_prediction.metadata, 'consistency_check': consistency_reason}
+              metadata={
+                'ml_prediction': ml_prediction.metadata if hasattr(ml_prediction, 'metadata') else {},
+                'confirming_strategies': confirming_strategies,
+                'best_confirming_strategy':
+                  [name for name, sig in candidate_signals.items() if sig == best_confirming_signal][0],
+                'data_freshness': {'is_fresh': data_is_fresh, 'age_info': data_age_info},
+                'regime_match': direction_match if regime_expected_direction else None
+              }
             )
-            signal_logger.info(f"✅ РЕШЕНИЕ: Сигнал мета-модели принят после валидации.")
-          elif not is_consistent:
-            signal_logger.warning(f"❌ МЕТА-МОДЕЛЬ ОТКЛОНЕНА: {consistency_reason}")
+            signal_logger.info(f"РЕШЕНИЕ: Сигнал мета-модели ПРИНЯТ с подтверждением")
+
           else:
-            signal_logger.warning(f"РЕШЕНИЕ: Сигнал мета-модели отклонен - нет подтверждения.")
+            # ML предсказание без подтверждения
+            signal_logger.warning(f"Мета-модель НЕ подтверждена другими стратегиями для {symbol}")
+
+            # Проверяем уверенность ML модели
+            if ml_prediction.confidence >= 0.7:
+              logger.info(f"ML модель очень уверена ({ml_prediction.confidence:.3f}), принимаем без подтверждения")
+              final_signal = TradingSignal(
+                signal_type=ml_prediction.signal_type,
+                symbol=symbol,
+                price=current_price,
+                confidence=ml_prediction.confidence * 0.8,  # Небольшое снижение за отсутствие подтверждения
+                strategy_name="Ensemble_ML_Solo",
+                timestamp=datetime.now(),
+                metadata={
+                  'ml_prediction': ml_prediction.metadata if hasattr(ml_prediction, 'metadata') else {},
+                  'solo_decision': True,
+                  'data_freshness': {'is_fresh': data_is_fresh, 'age_info': data_age_info},
+                  'regime_match': direction_match if regime_expected_direction else None
+                }
+              )
+              signal_logger.info(f"РЕШЕНИЕ: Сигнал мета-модели принят БЕЗ подтверждения (высокая уверенность)")
+            else:
+              signal_logger.info(f"ML модель недостаточно уверена ({ml_prediction.confidence:.3f}), отклоняем")
+              final_signal = None
+
         else:
-          signal_logger.info(f"РЕШЕНИЕ: Мета-модель предсказывает HOLD, сигнал не генерируется.")
+          # ML модель предсказала HOLD или произошла ошибка
+          if ml_prediction:
+            signal_logger.info(f"МЕТА-МОДЕЛЬ: Предсказание HOLD для {symbol}")
+          else:
+            signal_logger.warning(f"МЕТА-МОДЕЛЬ: Предсказание не получено для {symbol}")
 
-      # === FALLBACK: Приоритет режима при отклонении мета-модели ===
-      if not final_signal and candidate_signals and regime_characteristics.confidence > 0.8:
-        regime_expected = None
-        if 'trend_up' in regime_characteristics.primary_regime.value.lower():
-          regime_expected = SignalType.BUY
-        elif 'trend_down' in regime_characteristics.primary_regime.value.lower():
-          regime_expected = SignalType.SELL
-
-        if regime_expected:
-          regime_aligned_signals = [
-            signal for signal in candidate_signals.values()
-            if signal.signal_type == regime_expected and signal.confidence > 0.6
-          ]
-
-          if regime_aligned_signals:
-            best_regime_signal = max(regime_aligned_signals, key=lambda s: s.confidence)
-            final_signal = best_regime_signal
-            signal_logger.info(f"🎯 FALLBACK: Принят сигнал {best_regime_signal.strategy_name} по направлению режима")
-
-      # Если ничего не сработало, выбираем лучший кандидат
+      # === ФОЛБЭК НА ОБЫЧНЫЕ СТРАТЕГИИ ===
       if not final_signal and candidate_signals:
-        best_signal = max(candidate_signals.values(), key=lambda s: s.confidence)
-        if best_signal.confidence > regime_params.min_signal_quality:
-          final_signal = best_signal
-          signal_logger.info(f"РЕШЕНИЕ: Принят лучший сигнал от стратегии {best_signal.strategy_name}.")
-        else:
-          signal_logger.warning(f"РЕШЕНИЕ: Лучший сигнал ({best_signal.strategy_name}) отклонен - низкая уверенность.")
+        # Если ML не дала результат, выбираем лучший сигнал из кандидатов
+        best_strategy, best_signal = max(candidate_signals.items(), key=lambda x: x[1].confidence)
+        final_signal = best_signal
+        logger.info(
+          f"Фолбэк: выбран сигнал от {best_strategy} для {symbol} (уверенность: {best_signal.confidence:.3f})")
+        signal_logger.info(f"РЕШЕНИЕ: Использован фолбэк на стратегию {best_strategy}")
+
+      # # --- УРОВЕНЬ 3: МЕТА-МОДЕЛЬ С ДИАГНОСТИКОЙ ---
+      # final_signal: Optional[TradingSignal] = None
+      #
+      # if self.enhanced_ml_model and self.use_enhanced_ml:
+      #   # === ДИАГНОСТИЧЕСКИЙ БЛОК ===
+      #   # Проверяем свежесть данных
+      #   if hasattr(self.enhanced_ml_model, 'temporal_manager'):
+      #     data_validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
+      #
+      #     if not data_validation['is_fresh']:
+      #       logger.warning(f"Данные для {symbol} устарели ({data_validation.get('data_age_minutes', 'N/A')} мин)")
+      #
+      #       # Если данные очень старые, пропускаем ML анализ
+      #       if data_validation.get('data_age_minutes', 0) > 30:  # 30 минут
+      #         logger.warning(f"Данные для {symbol} слишком старые, пропускаем ML анализ")
+      #         ml_prediction = None
+      #       else:
+      #         logger.debug(f"Продолжаем с предупреждением о свежести данных для {symbol}")
+      #         _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+      #     else:
+      #       _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+      #   else:
+      #     _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+      #   current_price = htf_data['close'].iloc[-1]
+      #   price_change_24h = ((current_price - htf_data['close'].iloc[-24]) / htf_data['close'].iloc[-24]) * 100 if len(
+      #     htf_data) >= 24 else 0
+      #
+      #   signal_logger.info(f"🔍 ДИАГНОСТИКА МЕТА-МОДЕЛИ для {symbol}:")
+      #   signal_logger.info(
+      #     f"  Режим: {regime_characteristics.primary_regime.value} (уверенность: {regime_characteristics.confidence:.2f})")
+      #   signal_logger.info(f"  Цена 24ч: {price_change_24h:+.2f}%")
+      #   signal_logger.info(f"  Кандидаты: {list(candidate_signals.keys())}")
+      #
+      #   for strategy_name, signal in candidate_signals.items():
+      #     signal_logger.info(f"  {strategy_name}: {signal.signal_type.value}, уверенность={signal.confidence:.3f}")
+      #
+      #   # Получаем предсказание мета-модели
+      #   _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+      #
+      #   if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
+      #     # === РАСШИРЕННАЯ ДИАГНОСТИКА ПРЕДСКАЗАНИЯ ===
+      #     signal_logger.info(f"МЕТА-МОДЕЛЬ ДЕТАЛЬНО:")
+      #     signal_logger.info(f"  Предсказание: {ml_prediction.signal_type.value}")
+      #     signal_logger.info(f"  Уверенность: {ml_prediction.confidence:.3f}")
+      #     signal_logger.info(f"  Метаданные: {ml_prediction.metadata}")
+      #
+      #     # Анализ соответствия режиму
+      #     regime_expected_direction = None
+      #     if 'trend_up' in regime_characteristics.primary_regime.value.lower():
+      #       regime_expected_direction = 'BUY'
+      #     elif 'trend_down' in regime_characteristics.primary_regime.value.lower():
+      #       regime_expected_direction = 'SELL'
+      #
+      #     if regime_expected_direction:
+      #       direction_match = ml_prediction.signal_type.value == regime_expected_direction
+      #       signal_logger.info(
+      #         f"  Соответствие режиму: {'✅' if direction_match else '❌'} (ожидался {regime_expected_direction})")
+      #
+      #       # КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ при несоответствии
+      #       if not direction_match and regime_characteristics.confidence > 0.8:
+      #         signal_logger.warning(
+      #           f"⚠️ КОНФЛИКТ: Мета-модель предсказывает {ml_prediction.signal_type.value}, но режим {regime_characteristics.primary_regime.value}")
+      #         signal_logger.warning(
+      #           f"⚠️ Цена движется {'вверх' if price_change_24h > 0 else 'вниз'} ({price_change_24h:+.2f}%)")
+      #
+      #     # === НОВАЯ ЛОГИКА ВАЛИДАЦИИ ===
+      #     # Используем существующий метод валидации согласованности (если есть)
+      #     is_consistent = True
+      #     consistency_reason = "Базовая проверка пройдена"
+      #
+      #     if hasattr(self, '_validate_signal_consistency'):
+      #       is_consistent, consistency_reason = await self._validate_signal_consistency(
+      #         symbol, ml_prediction, regime_characteristics, htf_data
+      #       )
+      #       signal_logger.info(f"СОГЛАСОВАННОСТЬ: {consistency_reason}")
+      #
+      #     # Проверяем подтверждение от стратегий
+      #     has_confirmation = any(s.signal_type == ml_prediction.signal_type for s in candidate_signals.values())
+      #
+      #     if is_consistent and has_confirmation:
+      #       final_signal = TradingSignal(
+      #         signal_type=ml_prediction.signal_type,
+      #         symbol=symbol,
+      #         price=htf_data['close'].iloc[-1],
+      #         confidence=ml_prediction.confidence,
+      #         strategy_name="Ensemble_Validated",
+      #         timestamp=datetime.now(),
+      #         metadata={'ml_prediction': ml_prediction.metadata, 'consistency_check': consistency_reason}
+      #       )
+      #       signal_logger.info(f"✅ РЕШЕНИЕ: Сигнал мета-модели принят после валидации.")
+      #     elif not is_consistent:
+      #       signal_logger.warning(f"❌ МЕТА-МОДЕЛЬ ОТКЛОНЕНА: {consistency_reason}")
+      #     else:
+      #       signal_logger.warning(f"РЕШЕНИЕ: Сигнал мета-модели отклонен - нет подтверждения.")
+      #   else:
+      #     signal_logger.info(f"РЕШЕНИЕ: Мета-модель предсказывает HOLD, сигнал не генерируется.")
+      #
+      # # === FALLBACK: Приоритет режима при отклонении мета-модели ===
+      # if not final_signal and candidate_signals and regime_characteristics.confidence > 0.8:
+      #   regime_expected = None
+      #   if 'trend_up' in regime_characteristics.primary_regime.value.lower():
+      #     regime_expected = SignalType.BUY
+      #   elif 'trend_down' in regime_characteristics.primary_regime.value.lower():
+      #     regime_expected = SignalType.SELL
+      #
+      #   if regime_expected:
+      #     regime_aligned_signals = [
+      #       signal for signal in candidate_signals.values()
+      #       if signal.signal_type == regime_expected and signal.confidence > 0.6
+      #     ]
+      #
+      #     if regime_aligned_signals:
+      #       best_regime_signal = max(regime_aligned_signals, key=lambda s: s.confidence)
+      #       final_signal = best_regime_signal
+      #       signal_logger.info(f"🎯 FALLBACK: Принят сигнал {best_regime_signal.strategy_name} по направлению режима")
+      #
+      # # Если ничего не сработало, выбираем лучший кандидат
+      # if not final_signal and candidate_signals:
+      #   best_signal = max(candidate_signals.values(), key=lambda s: s.confidence)
+      #   if best_signal.confidence > regime_params.min_signal_quality:
+      #     final_signal = best_signal
+      #     signal_logger.info(f"РЕШЕНИЕ: Принят лучший сигнал от стратегии {best_signal.strategy_name}.")
+      #   else:
+      #     signal_logger.warning(f"РЕШЕНИЕ: Лучший сигнал ({best_signal.strategy_name}) отклонен - низкая уверенность.")
 
       # === ОБРАБОТКА ФИНАЛЬНОГО СИГНАЛА ===
       if final_signal and final_signal.signal_type != SignalType.HOLD:
@@ -3962,3 +4164,30 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка запуска переобучения: {e}")
 
+  def force_data_refresh(self, symbol: str, data_fetcher) -> Optional[pd.DataFrame]:
+    """
+    Принудительно обновляет данные если они устарели
+    """
+    try:
+      logger.info(f"Принудительное обновление данных для {symbol}")
+
+      # Получаем свежие данные
+      fresh_data = asyncio.run(data_fetcher.get_recent_data(symbol, timeframe='1h', limit=100))
+
+      if fresh_data is not None and not fresh_data.empty:
+        # Проверяем свежесть новых данных
+        validation = self.temporal_manager.validate_data_freshness(fresh_data, symbol)
+
+        if validation['is_fresh']:
+          logger.info(f"Получены свежие данные для {symbol}")
+          return fresh_data
+        else:
+          logger.warning(f"Даже обновленные данные для {symbol} не являются свежими")
+          return fresh_data  # Возвращаем в любом случае
+      else:
+        logger.error(f"Не удалось получить обновленные данные для {symbol}")
+        return None
+
+    except Exception as e:
+      logger.error(f"Ошибка принудительного обновления данных для {symbol}: {e}")
+      return None

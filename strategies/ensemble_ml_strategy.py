@@ -76,23 +76,69 @@ class EnsembleMLStrategy(BaseStrategy):
         logger.error(f"Модель вернула некорректные вероятности для {symbol}. Используем fallback.")
         return await self._fallback_strategy(symbol, data)
 
-      # Логика принятия решения по вероятностям
+      # # Логика принятия решения по вероятностям
+      # # Наши метки: 0=SELL, 1=HOLD, 2=BUY
+      # sell_prob, hold_prob, buy_prob = prediction_proba[0]
+      # confidence = float(np.max(prediction_proba[0]))
+      #
+      # # Порог уверенности из конфига
+      # confidence_threshold = self.settings.get('signal_confidence_threshold', 0.55)
+      # if confidence < confidence_threshold:
+      #   return None  # Сигнал недостаточно уверенный
+      #
+      # # Определяем тип сигнала
+      # if buy_prob > sell_prob and buy_prob > hold_prob:
+      #   signal_type = SignalType.BUY
+      # elif sell_prob > buy_prob and sell_prob > hold_prob:
+      #   signal_type = SignalType.SELL
+      # else:
+      #   return None  # Сигнал HOLD, пропускаем
+      # Логика принятия решения по вероятностям (ИСПРАВЛЕННАЯ)
       # Наши метки: 0=SELL, 1=HOLD, 2=BUY
       sell_prob, hold_prob, buy_prob = prediction_proba[0]
+      predicted_class = np.argmax(prediction_proba[0])
       confidence = float(np.max(prediction_proba[0]))
 
+      logger.debug(f"Вероятности для {symbol}: SELL={sell_prob:.3f}, HOLD={hold_prob:.3f}, BUY={buy_prob:.3f}")
+      logger.debug(f"Предсказанный класс: {predicted_class}, уверенность: {confidence:.3f}")
+
       # Порог уверенности из конфига
-      confidence_threshold = self.settings.get('signal_confidence_threshold', 0.55)
-      if confidence < confidence_threshold:
+      base_confidence_threshold = self.settings.get('signal_confidence_threshold', 0.55)
+
+      # Адаптивные пороги для разных классов (HOLD должен иметь более низкий порог)
+      confidence_thresholds = {
+        0: base_confidence_threshold,  # SELL
+        1: base_confidence_threshold * 0.7,  # HOLD - более низкий порог
+        2: base_confidence_threshold  # BUY
+      }
+
+      current_threshold = confidence_thresholds.get(predicted_class, base_confidence_threshold)
+
+      if confidence < current_threshold:
+        logger.debug(f"Уверенность {confidence:.3f} ниже порога {current_threshold:.3f} для класса {predicted_class}")
         return None  # Сигнал недостаточно уверенный
 
-      # Определяем тип сигнала
-      if buy_prob > sell_prob and buy_prob > hold_prob:
-        signal_type = SignalType.BUY
-      elif sell_prob > buy_prob and sell_prob > hold_prob:
+      # Определяем тип сигнала на основе предсказанного класса
+      if predicted_class == 0:
         signal_type = SignalType.SELL
+      elif predicted_class == 1:
+        logger.debug(f"Модель предсказала HOLD для {symbol}, пропускаем")
+        return None  # Сигнал HOLD, не торгуем
+      elif predicted_class == 2:
+        signal_type = SignalType.BUY
       else:
-        return None  # Сигнал HOLD, пропускаем
+        logger.warning(f"Неожиданный predicted_class: {predicted_class} для {symbol}")
+        return None
+
+      # Дополнительная проверка: убеждаемся, что выбранный сигнал действительно доминирует
+      if signal_type == SignalType.BUY and buy_prob <= hold_prob:
+        logger.debug(f"BUY вероятность {buy_prob:.3f} не доминирует над HOLD {hold_prob:.3f}")
+        return None
+      elif signal_type == SignalType.SELL and sell_prob <= hold_prob:
+        logger.debug(f"SELL вероятность {sell_prob:.3f} не доминирует над HOLD {hold_prob:.3f}")
+        return None
+
+      logger.info(f"Финальный сигнал для {symbol}: {signal_type.value} с уверенностью {confidence:.3f}")
 
       # --- КОРРЕКТНЫЙ РАСЧЕТ STOP-LOSS И TAKE-PROFIT ---
       # --- ФИНАЛЬНЫЙ БЛОК РАСЧЕТА STOP-LOSS И TAKE-PROFIT НА ОСНОВЕ ROI ---

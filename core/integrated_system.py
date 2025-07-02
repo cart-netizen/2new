@@ -11,6 +11,7 @@ import sys
 from core.adaptive_strategy_selector import AdaptiveStrategySelector
 from core.indicators import crossover_series, crossunder_series
 from core.market_regime_detector import MarketRegimeDetector, RegimeCharacteristics, MarketRegime
+from core.signal_processor import SignalProcessor
 from ml.feature_engineering import unified_feature_engineer
 from ml.volatility_system import VolatilityPredictor, VolatilityPredictionSystem
 import joblib
@@ -196,11 +197,18 @@ class IntegratedTradingSystem:
 
     if self.shadow_trading and self.data_fetcher:
       self.data_fetcher.shadow_trading_manager = self.shadow_trading
+    self.market_regime_detector = MarketRegimeDetector(self.data_fetcher)
+    # Инициализация корреляционного менеджера
+    self.correlation_manager = CorrelationManager(self.data_fetcher)
+    self._correlation_update_interval = 3600  # Обновление корреляций каждый час
+    self._last_correlation_update = 0
+    self._correlation_task: Optional[asyncio.Task] = None
 
-    self.signal_filter = SignalFilter(
-      settings=strategy_settings,
-      data_fetcher=self.data_fetcher
-    )
+    self.signal_quality_analyzer = SignalQualityAnalyzer(self.data_fetcher, self.db_manager)
+    self.min_quality_score = 0.6  # Минимальный балл качества для исполнения
+    self.signal_filter = SignalFilter(self.config, self.data_fetcher, self.market_regime_detector, self.correlation_manager)
+
+
     self.position_manager = PositionManager(
       db_manager=self.db_manager,
       trade_executor=self.trade_executor,
@@ -209,7 +217,7 @@ class IntegratedTradingSystem:
       signal_filter = self.signal_filter,
       risk_manager=self.risk_manager
     )
-
+    self.position_manager.trading_system = self
     self.active_symbols: List[str] = []
     self.account_balance: Optional[RiskMetrics] = None
     self.is_running = False
@@ -232,21 +240,17 @@ class IntegratedTradingSystem:
       logger.error(f"Ошибка при загрузке предиктора волатильности: {e}")
     # --- КОНЕЦ НОВОГО БЛОКА ---
 
-    self.market_regime_detector = MarketRegimeDetector(self.data_fetcher)
+
     # Флаги для включения/выключения ML моделей (оставляем как есть)
     self.use_enhanced_ml = True
     self.use_base_ml = True
     self._last_regime_check = {}
     self._regime_check_interval = 300
 
-    # Инициализация корреляционного менеджера
-    self.correlation_manager = CorrelationManager(self.data_fetcher)
-    self._correlation_update_interval = 3600  # Обновление корреляций каждый час
-    self._last_correlation_update = 0
-    self._correlation_task: Optional[asyncio.Task] = None
-    self.position_manager.trading_system = self
-    self.signal_quality_analyzer = SignalQualityAnalyzer(self.data_fetcher, self.db_manager)
-    self.min_quality_score = 0.6  # Минимальный балл качества для исполнения
+
+
+    self.signal_filter = SignalFilter(self.config, self.data_fetcher, self.market_regime_detector, self.correlation_manager)
+    self.signal_processor = SignalProcessor(self.risk_manager, self.signal_filter, self.signal_quality_analyzer)
 
     logger.info("IntegratedTradingSystem полностью инициализирован.")
 
@@ -532,27 +536,87 @@ class IntegratedTradingSystem:
             logger.error(f"Ошибка получения SAR сигнала для {symbol}: {e}")
 
       # Проверяем остальные стратегии
-      for strategy_name in regime_params.recommended_strategies:
+      # ИСПРАВЛЕНИЕ: Расширяем список проверяемых стратегий
+      all_possible_strategies = [
+        "Live_ML_Strategy", "Ichimoku_Cloud", "Dual_Thrust",
+        "Mean_Reversion_BB", "Momentum_Spike"
+      ]
+
+      # Объединяем рекомендованные и все возможные стратегии
+      strategies_to_check = list(set(regime_params.recommended_strategies + all_possible_strategies))
+
+      for strategy_name in strategies_to_check:
         if strategy_name in ["Grid_Trading", "Stop_and_Reverse"]:
           continue  # Уже обработаны выше
 
-        if not active_strategies_from_dashboard.get(strategy_name, True):
+        # ИСПРАВЛЕНИЕ: Более мягкая проверка активности
+        is_dashboard_active = active_strategies_from_dashboard.get(strategy_name, True)
+        is_avoided = strategy_name in regime_params.avoided_strategies
+
+        # Разрешаем стратегию если она не явно отключена И не в списке избегаемых для критичных режимов
+        if not is_dashboard_active:
           logger.debug(f"Стратегия {strategy_name} отключена в дашборде, пропускаем.")
           continue
 
-        if not self.adaptive_selector.should_activate_strategy(strategy_name,
-                                                               regime_characteristics.primary_regime.value):
-          logger.debug(f"Стратегия {strategy_name} неактивна для {symbol}")
+        # Для avoided стратегий - даем шанс если режим не критичный
+        if is_avoided and regime_characteristics.confidence > 0.8:
+          logger.debug(f"Стратегия {strategy_name} избегается в режиме {regime_characteristics.primary_regime.value}")
           continue
 
-        signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
-        if signal and signal.signal_type != SignalType.HOLD:
-          weight = self.adaptive_selector.get_strategy_weight(strategy_name,
-                                                              regime_characteristics.primary_regime.value)
-          signal.confidence *= weight
-          candidate_signals[strategy_name] = signal
-          signal_logger.info(
-            f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, Уверенность: {signal.confidence:.2f}")
+        # Проверяем адаптивную активность с более мягким условием
+        if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
+          should_activate = self.adaptive_selector.should_activate_strategy(
+            strategy_name, regime_characteristics.primary_regime.value
+          )
+          # ИСПРАВЛЕНИЕ: Даем шанс даже отключенным стратегиям если их вес > 0.2
+          strategy_weight = self.adaptive_selector.get_strategy_weight(
+            strategy_name, regime_characteristics.primary_regime.value
+          )
+          if not should_activate and strategy_weight < 0.2:
+            logger.debug(f"Стратегия {strategy_name} неактивна для {symbol} (вес={strategy_weight:.2f})")
+            continue
+
+        try:
+          signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
+          if signal and signal.signal_type != SignalType.HOLD:
+            # ИСПРАВЛЕНИЕ: Снижен порог уверенности кандидатов с 0.5 до 0.3
+            if signal.confidence >= 0.3:
+              weight = 1.0
+              if hasattr(self, 'adaptive_selector'):
+                weight = self.adaptive_selector.get_strategy_weight(
+                  strategy_name, regime_characteristics.primary_regime.value
+                )
+              signal.confidence *= weight
+              candidate_signals[strategy_name] = signal
+              signal_logger.info(
+                f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, "
+                f"Уверенность: {signal.confidence:.2f}, Вес: {weight:.2f}"
+              )
+        except Exception as e:
+          logger.error(f"Ошибка получения сигнала от {strategy_name} для {symbol}: {e}")
+
+      # # Проверяем остальные стратегии
+      # for strategy_name in regime_params.recommended_strategies:
+      #   if strategy_name in ["Grid_Trading", "Stop_and_Reverse"]:
+      #     continue  # Уже обработаны выше
+      #
+      #   if not active_strategies_from_dashboard.get(strategy_name, True):
+      #     logger.debug(f"Стратегия {strategy_name} отключена в дашборде, пропускаем.")
+      #     continue
+      #
+      #   if not self.adaptive_selector.should_activate_strategy(strategy_name,
+      #                                                          regime_characteristics.primary_regime.value):
+      #     logger.debug(f"Стратегия {strategy_name} неактивна для {symbol}")
+      #     continue
+      #
+      #   signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
+      #   if signal and signal.signal_type != SignalType.HOLD:
+      #     weight = self.adaptive_selector.get_strategy_weight(strategy_name,
+      #                                                         regime_characteristics.primary_regime.value)
+      #     signal.confidence *= weight
+      #     candidate_signals[strategy_name] = signal
+      #     signal_logger.info(
+      #       f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, Уверенность: {signal.confidence:.2f}")
 
       # --- УРОВЕНЬ 3: МЕТА-МОДЕЛЬ С ДИАГНОСТИКОЙ И ВРЕМЕННОЙ ВАЛИДАЦИЕЙ ---
       final_signal: Optional[TradingSignal] = None
@@ -620,6 +684,23 @@ class IntegratedTradingSystem:
         # === БЛОК АНАЛИЗА ML ПРЕДСКАЗАНИЯ ===
         if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
           # === ПРОВЕРКА ПОДТВЕРЖДЕНИЯ ДРУГИМИ СТРАТЕГИЯМИ ===
+          regime_expected_direction = None
+          regime_name = regime_characteristics.primary_regime.value.lower()
+
+          if 'trend_up' in regime_name or 'uptrend' in regime_name:
+            regime_expected_direction = 'BUY'
+          elif 'trend_down' in regime_name or 'downtrend' in regime_name:
+            regime_expected_direction = 'SELL'
+
+          # Проверяем соответствие направления
+          direction_match = False
+          if regime_expected_direction and ml_prediction:
+            direction_match = ml_prediction.signal_type.value == regime_expected_direction
+            signal_logger.info(
+              f"  Соответствие режиму: {'✅' if direction_match else '❌'} "
+              f"(режим {regime_name} → ожидается {regime_expected_direction})"
+            )
+
           confirming_strategies = []
           for strategy_name, signal in candidate_signals.items():
             if signal.signal_type == ml_prediction.signal_type:
@@ -627,6 +708,7 @@ class IntegratedTradingSystem:
 
           if confirming_strategies:
             logger.info(f"Мета-модель подтверждена стратегиями: {confirming_strategies} для {symbol}")
+
 
             # Выбираем стратегию с наибольшей уверенностью для подтверждения
             best_confirming_signal = max(
@@ -674,6 +756,13 @@ class IntegratedTradingSystem:
             if ((ml_prediction.signal_type == SignalType.BUY and price_change_24h > 1.0) or
                 (ml_prediction.signal_type == SignalType.SELL and price_change_24h < -1.0)):
               price_momentum_support = True
+
+            # Анализ движения цены за 24 часа
+            price_change_24h = 0
+            if len(htf_data) >= 24:
+              price_24h_ago = htf_data['close'].iloc[-24]
+              price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
+              signal_logger.info(f"  Движение цены за 24ч: {price_change_24h:+.2f}%")
 
             # ПРИНИМАЕМ СИГНАЛ если выполнено ЛЮБОЕ из условий:
             accept_signal = (
@@ -1110,14 +1199,19 @@ class IntegratedTradingSystem:
           return
 
         # Добавляем информацию о качестве в метаданные
-        if hasattr(signal, 'metadata') and signal.metadata:
-          signal.metadata['quality_score'] = quality_metrics.overall_score
-          signal.metadata['quality_category'] = quality_metrics.quality_category.value
-
-        logger.info(f"✅ Оценка качества пройдена: {quality_metrics.overall_score:.2f}")
-
+        if hasattr(signal, 'metadata'):
+          signal.metadata['quick_quality_check'] = True
+          signal.metadata['quality_timestamp'] = datetime.now().isoformat()
     except Exception as quality_error:
-      logger.debug(f"Ошибка оценки качества для {symbol}: {quality_error}")
+          logger.debug(f"Ошибка быстрой оценки качества: {quality_error}")
+    #     if hasattr(signal, 'metadata') and signal.metadata:
+    #       signal.metadata['quality_score'] = quality_metrics.overall_score
+    #       signal.metadata['quality_category'] = quality_metrics.quality_category.value
+    #
+    #     logger.info(f"✅ Оценка качества пройдена: {quality_metrics.overall_score:.2f}")
+    #
+    # except Exception as quality_error:
+    #   logger.debug(f"Ошибка оценки качества для {symbol}: {quality_error}")
       # Не блокируем сигнал при ошибке оценки качества
     # === КОНЕЦ БЛОКА ОЦЕНКИ КАЧЕСТВА ===
 
@@ -2428,6 +2522,9 @@ class IntegratedTradingSystem:
     if hasattr(self, '_regime_analysis_task') and self._regime_analysis_task:
       tasks_to_cancel.append(self._regime_analysis_task)
 
+    if hasattr(self, '_fast_pending_check_task') and self._fast_pending_check_task:
+      tasks_to_cancel.append(self._fast_pending_check_task)
+
     if self.shadow_trading:
       try:
         # Генерируем финальный отчет
@@ -2901,22 +2998,121 @@ class IntegratedTradingSystem:
 
       # --- 3. Финальная логика триггера ---
 
+      # Добавляем дополнительные проверки для более гибкого входа
+      price_momentum = False
+      volume_confirmation = False
+      volatility_ok = True
+
+      # Проверка импульса цены (последние 5 свечей)
+      if len(df) >= 5:
+        recent_move = (df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5] * 100
+        if signal_type == SignalType.BUY and recent_move > 0.2:  # Рост > 0.2%
+          price_momentum = True
+        elif signal_type == SignalType.SELL and recent_move < -0.2:  # Падение > 0.2%
+          price_momentum = True
+
+      # Проверка объема (если доступен)
+      if 'volume' in df.columns and len(df) >= 20:
+        vol_ma = df['volume'].rolling(20).mean().iloc[-1]
+        current_vol = df['volume'].iloc[-1]
+        if current_vol > vol_ma * 1.1:  # Объем выше среднего на 10%
+          volume_confirmation = True
+
+      # Проверка волатильности
+      if 'atr' in locals() and atr is not None and len(atr) > 0:
+        current_atr = atr.iloc[-1]
+        avg_price = df['close'].mean()
+        volatility_pct = (current_atr / avg_price) * 100
+
+        # Блокируем только при ОЧЕНЬ низкой волатильности
+        if volatility_pct < 0.05:  # менее 0.05% (вместо 0.1%)
+          volatility_ok = False
+          logger.debug(f"Волатильность критически низкая ({volatility_pct:.3f}%)")
+
+      # СИЛЬНЫЕ триггеры (основные условия из оригинала)
+      strong_buy_trigger = False
+      strong_sell_trigger = False
+
       if signal_type == SignalType.BUY:
-        # Вход в LONG, если (MFI вышел из перепроданности ИЛИ было пересечение EMA) И (есть бычий импульс ИЛИ EMA близки к развороту)
-        if (mfi_oversold_crossover or ema_crossover) and (bullish_momentum or ema_near_crossover):
-          logger.info(f"✅ ТРИГГЕР LTF для BUY сработал!")
-          return True
-
+        strong_buy_trigger = (mfi_oversold_crossover or ema_crossover) and (bullish_momentum or ema_near_crossover)
       elif signal_type == SignalType.SELL:
-        # Вход в SHORT, если (MFI вышел из перекупленности ИЛИ было пересечение EMA) И (есть медвежий импульс ИЛИ EMA близки к развороту)
-        if (mfi_overbought_crossunder or ema_crossunder) and (bearish_momentum or ema_near_crossover):
-          logger.info(f"✅ ТРИГГЕР LTF для SELL сработал!")
-          return True
+        strong_sell_trigger = (mfi_overbought_crossunder or ema_crossunder) and (
+              bearish_momentum or ema_near_crossover)
 
+      # СРЕДНИЕ триггеры (упрощенные условия)
+      medium_buy_trigger = False
+      medium_sell_trigger = False
 
-        logger.debug(
-          f"Триггер LTF для {signal_type} не сработал. MFI_OB_Cross={mfi_overbought_crossunder}, MFI_OS_Cross={mfi_oversold_crossover}, EMA_Cross={ema_crossover or ema_crossunder}, MomentumOK={bullish_momentum if signal_type == 'BUY' else bearish_momentum}")
-      return False
+      if signal_type == SignalType.BUY:
+        medium_buy_trigger = (
+            (df['mfi'].iloc[-1] < 40 and bullish_momentum) or  # MFI низкий + RSI растет
+            (ema_crossover and price_momentum) or  # EMA пересечение + импульс цены
+            (df['rsi'].iloc[-1] > 50 and df['rsi'].iloc[-1] > df['rsi'].iloc[-2])  # RSI растет выше 50
+        )
+      elif signal_type == SignalType.SELL:
+        medium_sell_trigger = (
+            (df['mfi'].iloc[-1] > 60 and bearish_momentum) or  # MFI высокий + RSI падает
+            (ema_crossunder and price_momentum) or  # EMA пересечение + импульс цены
+            (df['rsi'].iloc[-1] < 50 and df['rsi'].iloc[-1] < df['rsi'].iloc[-2])  # RSI падает ниже 50
+        )
+
+      # СЛАБЫЕ триггеры (для старых сигналов)
+      weak_trigger = False
+      signal_age_minutes = 0
+
+      # Проверяем возраст сигнала если есть доступ к pending_signals
+      try:
+        if hasattr(self, 'state_manager'):
+          pending_signals = self.state_manager.get_pending_signals()
+          for sym, sig_data in pending_signals.items():
+            if 'metadata' in sig_data and 'signal_time' in sig_data['metadata']:
+              signal_time = datetime.fromisoformat(sig_data['metadata']['signal_time'])
+              signal_age_minutes = (datetime.now() - signal_time).seconds / 60
+              break
+      except:
+        pass
+
+      # Если сигнал старше 30 минут - смягчаем условия
+      if signal_age_minutes > 30:
+        if signal_type == SignalType.BUY:
+          weak_trigger = df['rsi'].iloc[-1] > 40 and price_momentum
+        else:
+          weak_trigger = df['rsi'].iloc[-1] < 60 and price_momentum
+
+      # ФИНАЛЬНОЕ РЕШЕНИЕ
+      trigger_fired = False
+      trigger_reason = ""
+
+      if strong_buy_trigger or strong_sell_trigger:
+        trigger_fired = True
+        trigger_reason = "STRONG"
+      elif medium_buy_trigger or medium_sell_trigger:
+        trigger_fired = True
+        trigger_reason = "MEDIUM"
+      elif weak_trigger and signal_age_minutes > 30:
+        trigger_fired = True
+        trigger_reason = f"WEAK (age: {signal_age_minutes:.0f}m)"
+      elif (volume_confirmation and price_momentum and volatility_ok):
+        # Экстренный режим - если есть объем и импульс
+        trigger_fired = True
+        trigger_reason = "EMERGENCY"
+
+      # Проверка волатильности блокирует все триггеры
+      if not volatility_ok:
+        trigger_fired = False
+        trigger_reason = "BLOCKED_BY_VOLATILITY"
+
+      # Расширенное логирование
+      if trigger_fired:
+        logger.info(f"✅ ТРИГГЕР LTF для {signal_type.value} сработал! Причина: {trigger_reason}")
+        logger.debug(f"Детали: MFI={df['mfi'].iloc[-1]:.1f}, RSI={df['rsi'].iloc[-1]:.1f}, "
+                     f"Momentum={'✓' if price_momentum else '✗'}, "
+                     f"Volume={'✓' if volume_confirmation else '✗'}")
+      else:
+        logger.debug(f"Триггер LTF не сработал. RSI={df['rsi'].iloc[-1]:.1f}, "
+                     f"MFI={df['mfi'].iloc[-1]:.1f}, Volatility={'OK' if volatility_ok else 'LOW'}")
+
+      return trigger_fired
 
     except Exception as e:
       logger.error(f"Ошибка в триггере LTF: {e}", exc_info=True)
@@ -2995,7 +3191,7 @@ class IntegratedTradingSystem:
     """
     logger.info("Запуск оптимизированного цикла мониторинга...")
 
-    monitoring_interval = self.config.get('general_settings', {}).get('monitoring_interval_seconds', 60)
+    monitoring_interval = self.config.get('general_settings', {}).get('monitoring_interval_seconds', 45)
     batch_size = 5  # Обрабатываем символы батчами
 
     # Счетчики для отслеживания
@@ -3292,6 +3488,42 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка при проверке критических условий для {symbol}: {e}")
 
+  async def _fast_pending_signals_loop(self):
+    """
+    НОВЫЙ МЕТОД: Быстрый цикл проверки pending signals каждые 10 секунд
+    """
+    logger.info("Запуск быстрого цикла проверки pending signals...")
+
+    while self.is_running:
+      try:
+        pending_signals = self.state_manager.get_pending_signals()
+
+        if pending_signals:
+          logger.debug(f"Быстрая проверка {len(pending_signals)} ожидающих сигналов...")
+
+          # Проверяем все pending signals параллельно
+          tasks = []
+          for symbol in list(pending_signals.keys()):
+            tasks.append(self._check_pending_signal_for_entry(symbol))
+
+          if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Логируем ошибки
+            for i, result in enumerate(results):
+              if isinstance(result, Exception):
+                logger.error(f"Ошибка быстрой проверки: {result}")
+
+        # Ждем 10 секунд перед следующей проверкой
+        await asyncio.sleep(10)
+
+      except asyncio.CancelledError:
+        logger.info("Быстрый цикл проверки pending signals остановлен")
+        break
+      except Exception as e:
+        logger.error(f"Ошибка в быстром цикле проверки: {e}")
+        await asyncio.sleep(10)
+
   async def _check_pending_signal_for_entry(self, symbol: str):
     """Проверяет ожидающий сигнал на точку входа с использованием продвинутой логики"""
     pending_signals = self.state_manager.get_pending_signals()
@@ -3304,7 +3536,7 @@ class IntegratedTradingSystem:
 
       # Проверяем таймаут сигнала (2 часа вместо 30 минут для большей гибкости)
       signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
-      if (datetime.now() - signal_time) > timedelta(hours=2):
+      if (datetime.now() - signal_time) > timedelta(hours=3):
         logger.info(f"Сигнал для {symbol} устарел, удаляем из очереди")
         del pending_signals[symbol]
         self.state_manager.update_pending_signals(pending_signals)
@@ -3335,6 +3567,16 @@ class IntegratedTradingSystem:
       # Используем продвинутую проверку триггера
       if self._check_ltf_entry_trigger(ltf_data, signal_type):
         logger.info(f"✅ ТРИГГЕР LTF для {symbol} сработал! Исполняем сделку...")
+        signal_age_minutes = ((datetime.now() - signal_time).seconds / 60)
+        logger.info(f"Проверка LTF триггера для {symbol}:")
+        logger.info(f"  - Возраст сигнала: {signal_age_minutes:.1f} минут")
+        logger.info(f"  - Таймфрейм: {ltf_str}")
+        logger.info(f"  - Тип сигнала: {signal_type.value}")
+
+        trigger_result = self._check_ltf_entry_trigger(ltf_data, signal_type)
+
+        if trigger_result:
+          logger.info(f"✅ ТРИГГЕР LTF для {symbol} сработал после {signal_age_minutes:.1f} минут ожидания!")
 
         # Восстанавливаем полный TradingSignal
         trading_signal = TradingSignal(
@@ -3579,6 +3821,10 @@ class IntegratedTradingSystem:
       # 8. Периодический анализ режимов рынка
       self._regime_analysis_task = asyncio.create_task(self.periodic_regime_analysis())
       logger.info("✅ Запущен периодический анализ режимов рынка")
+
+      # 9. НОВАЯ ЗАДАЧА: Быстрая проверка pending signals
+      self._fast_pending_check_task = asyncio.create_task(self._fast_pending_signals_loop())
+      logger.info("✅ Запущена быстрая проверка pending signals")
 
       logger.info("🚀 Все фоновые задачи успешно запущены")
 

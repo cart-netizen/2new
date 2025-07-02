@@ -3,8 +3,9 @@
 import pandas as pd
 import pandas_ta as ta
 from typing import Tuple, Dict, Any
-
+from core.correlation_manager import CorrelationManager
 from core.data_fetcher import DataFetcher
+from core.market_regime_detector import MarketRegimeDetector, MarketRegime
 from core.schemas import TradingSignal
 from core.enums import SignalType, Timeframe
 from utils.logging_config import get_logger
@@ -18,10 +19,19 @@ class SignalFilter:
   Класс для фильтрации торговых сигналов на основе настроек из конфига.
   """
 
-  def __init__(self, settings: Dict[str, Any], data_fetcher: DataFetcher):
-    self.settings = settings
+  def __init__(self, config: Dict[str, Any], data_fetcher: DataFetcher, market_regime_detector: MarketRegimeDetector, correlation_manager: CorrelationManager):
+    self.config = config.get('filters', {})
+    self.market_regime_detector = market_regime_detector
+    self.correlation_manager = correlation_manager  # Добавляем менеджер корреляции
+
+    # Настройки для фильтра по тренду BTC
+    btc_filter_config = self.config.get('btc_trend_filter', {})
+    self.btc_trend_filter_enabled = btc_filter_config.get('enabled', True)
+    # Новый параметр: порог корреляции. По умолчанию 0.75
+    self.correlation_threshold = btc_filter_config.get('correlation_threshold', 0.75)
+    # >>> КОНЕЦ ПАТЧА (Часть 2)
     self.data_fetcher = data_fetcher
-    logger.info(f"SignalFilter инициализирован с настройками: {self.settings}")
+    logger.info(f"SignalFilter инициализирован с настройками: {self.config}")
 
   async def filter_signal(self, signal: TradingSignal, data: pd.DataFrame) -> Tuple[bool, str]:
     if not signal:
@@ -31,7 +41,7 @@ class SignalFilter:
       current_price = signal.price
 
       # --- НОВЫЙ УМНЫЙ БЛОК: ФИЛЬТР ПО ТРЕНДУ BTC ---
-      if self.settings.get('use_btc_trend_filter', True) and 'BTC' not in signal.symbol:
+      if self.config.get('use_btc_trend_filter', True) and 'BTC' not in signal.symbol:
 
         # Проверяем, нет ли на текущем активе аномального всплеска объема
         # Мы уже рассчитываем `volume_spike_ratio` в FeatureEngineer
@@ -58,8 +68,8 @@ class SignalFilter:
       # --- КОНЕЦ НОВОГО БЛОКА ---
 
       # --- 1. Фильтр по тренду (EMA) ---
-      if self.settings.get('use_trend_filter'):
-        ema_period = self.settings.get('ema_period', 200)
+      if self.config.get('use_trend_filter'):
+        ema_period = self.config.get('ema_period', 200)
         ema_long = ta.ema(data['close'], length=ema_period)
         if ema_long is not None and not ema_long.empty:
           last_ema = ema_long.iloc[-1]
@@ -71,8 +81,8 @@ class SignalFilter:
             return False, f"Цена выше EMA({ema_period})"
 
       # --- 2. Фильтр силы тренда (ADX) ---
-      if self.settings.get('use_adx_filter'):
-        adx_threshold = self.settings.get('adx_threshold', 20)
+      if self.config.get('use_adx_filter'):
+        adx_threshold = self.config.get('adx_threshold', 20)
         adx_data = ta.adx(data['high'], data['low'], data['close'], length=14)
         if adx_data is not None and not adx_data.empty:
           last_adx = adx_data.iloc[-1, 0]
@@ -81,7 +91,7 @@ class SignalFilter:
             return False, f"Слабый тренд (ADX < {adx_threshold})"
 
       # --- НОВЫЙ БЛОК: Фильтр по силе и направлению тренда (Aroon) ---
-      if self.settings.get('use_aroon_filter', True):  # Добавим возможность отключать
+      if self.config.get('use_aroon_filter', True):  # Добавим возможность отключать
         aroon_up_col = next((col for col in data.columns if 'AROONU' in col), None)
         aroon_down_col = next((col for col in data.columns if 'AROOND' in col), None)
 
@@ -98,10 +108,32 @@ class SignalFilter:
 
       # --- КОНЕЦ НОВОГО БЛОКА ---
 
+      if self.btc_trend_filter_enabled and signal.symbol != 'BTCUSDT':
+        btc_regime = await self.market_regime_detector.get_market_regime('BTCUSDT')
+        if btc_regime:
+          is_sell_vs_up = signal.side == OrderSide.SELL and btc_regime.regime in [MarketRegime.TREND_UP,
+                                                                                  MarketRegime.STRONG_TREND_UP]
+          is_buy_vs_down = signal.side == OrderSide.BUY and btc_regime.regime in [MarketRegime.TREND_DOWN,
+                                                                                  MarketRegime.STRONG_TREND_DOWN]
+
+          # Проверяем, идет ли сигнал против тренда BTC
+          if is_sell_vs_up or is_buy_vs_down:
+            # Если да, то проверяем корреляцию
+            correlation = await self.correlation_manager.get_correlation(signal.symbol, 'BTCUSDT')
+
+            # Отклоняем только если корреляция высокая
+            if correlation is not None and correlation >= self.correlation_threshold:
+              trend_direction = "восходящем" if is_sell_vs_up else "нисходящем"
+              reason = f"Отклонено: сигнал {signal.side.value}, но BTC в {trend_direction} тренде и корреляция высока ({correlation:.2f})"
+              logger.warning(f"ФИЛЬТР BTC: {reason}")
+              return False, reason
+            else:
+              logger.info(
+                f"ФИЛЬТР BTC: Сигнал {signal.symbol} пропущен, т.к. идет против тренда BTC, но корреляция низкая ({correlation if correlation is not None else 'N/A'})")
 
       # --- 3. Фильтр по волатильности (ATR) ---
-      if self.settings.get('use_volatility_filter'):
-        max_atr_percentage = self.settings.get('max_atr_percentage', 5.0) / 100
+      if self.config.get('use_volatility_filter'):
+        max_atr_percentage = self.config.get('max_atr_percentage', 5.0) / 100
         atr_data = ta.atr(data['high'], data['low'], data['close'], length=14)
         if atr_data is not None and not atr_data.empty:
           last_atr = atr_data.iloc[-1]

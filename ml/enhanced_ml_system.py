@@ -20,7 +20,7 @@ import joblib
 import json
 from sklearn.metrics import accuracy_score, f1_score, classification_report
 from sklearn.utils import compute_sample_weight
-
+from sklearn.linear_model import LogisticRegression
 from core.enums import SignalType
 from utils.logging_config import get_logger
 from ml.anomaly_detector import MarketAnomalyDetector, AnomalyType
@@ -1002,13 +1002,13 @@ class EnhancedEnsembleModel:
     #   use_label_encoder=False,
     #   eval_metric='logloss'
     # )
-    # self.meta_model = LogisticRegression(
-    #   C=1.0,
-    #   class_weight='balanced',
-    #   random_state=42,
-    #   max_iter=1000,
-    #   solver='liblinear'  # Лучше работает с малыми данными
-    # )
+    self.meta_model = LogisticRegression(
+      C=1.0,
+      class_weight='balanced',
+      random_state=42,
+      max_iter=1000,
+      solver='liblinear'  # Лучше работает с малыми данными
+    )
     self.backup_meta_model = xgb.XGBClassifier(
       n_estimators=30,  # Уменьшено для предотвращения переобучения
       learning_rate=0.05,  # Более консервативный learning rate
@@ -1100,6 +1100,19 @@ class EnhancedEnsembleModel:
 
         # 5. Финальное обучение мета-модели
         logger.info("Финальное обучение мета-модели...")
+        # Проверяем, что мета-модель инициализирована
+        if not hasattr(self, 'meta_model') or self.meta_model is None:
+          # Инициализируем мета-модель если она отсутствует
+
+          self.meta_model = LogisticRegression(
+            C=1.0,
+            class_weight='balanced',
+            random_state=42,
+            max_iter=1000,
+            solver='liblinear'
+          )
+          logger.info("Мета-модель инициализирована автоматически")
+
         self.meta_model.fit(meta_features_train, y_train_resampled)
 
         # 6. Валидация на отложенной выборке
@@ -1626,7 +1639,22 @@ class EnhancedEnsembleModel:
       #     model.fit(X_train_resampled, y_train_resampled)
       logger.info("Обучение базовых моделей...")
       for name, model in self.models.items():
-        logger.debug(f"Обучение модели {name}...")
+        try:
+          logger.info(f"Начинаем обучение модели {name}...")
+          model.fit(X_train_resampled, y_train_resampled)
+          logger.info(f"✅ Модель {name} успешно обучена")
+
+          # Проверяем что модель действительно обучилась
+          if hasattr(model, 'predict'):
+            test_pred = model.predict(X_train_resampled[:1])
+            logger.debug(f"Тестовое предсказание {name}: {test_pred}")
+
+        except Exception as model_error:
+          logger.error(f"❌ ОШИБКА обучения модели {name}: {model_error}")
+          # Удаляем проблемную модель из словаря
+          if name in self.models:
+            del self.models[name]
+          continue
 
         # Убираем дополнительное взвешивание для XGBoost
         # если уже применена балансировка на уровне данных или модели
@@ -1667,14 +1695,50 @@ class EnhancedEnsembleModel:
       # Шаг 8: Оценка производительности на валидационных данных
       logger.info("=" * 20 + " ОЦЕНКА МОДЕЛИ НА ВАЛИДАЦИОННЫХ ДАННЫХ " + "=" * 20)
 
-      # Получаем предсказания мета-модели для валидационного набора
-      meta_features_val = []
-      for name, model in self.models.items():
-        preds_val = model.predict_proba(X_val)[:, 1] if hasattr(model, 'predict_proba') else model.predict(X_val)
-        meta_features_val.append(preds_val)
+      # Безопасная проверка мета-модели для валидации
+      if hasattr(self, 'meta_model') and self.meta_model is not None:
+        try:
+          # Получаем предсказания мета-модели для валидационного набора
+          meta_features_val = []
+          for name, model in self.models.items():
+            preds_val = model.predict_proba(X_val)[:, 1] if hasattr(model, 'predict_proba') else model.predict(X_val)
+            meta_features_val.append(preds_val)
 
-      meta_X_val = np.column_stack(meta_features_val)
-      final_predictions = self.meta_model.predict(meta_X_val)
+          if meta_features_val:
+            meta_X_val = np.column_stack(meta_features_val)
+            final_predictions = self.meta_model.predict(meta_X_val)
+
+            # Рассчитываем и выводим метрики
+            accuracy = accuracy_score(y_val, final_predictions)
+            f1 = f1_score(y_val, final_predictions, average='macro')
+
+            logger.info(f"Итоговая точность (Accuracy) на валидации: {accuracy:.4f}")
+            logger.info(f"Итоговый F1-score (Macro) на валидации: {f1:.4f}")
+          else:
+            logger.warning("Не удалось получить мета-признаки для валидации")
+
+        except Exception as meta_eval_error:
+          logger.warning(f"Ошибка оценки мета-модели: {meta_eval_error}")
+          logger.info("Продолжаем без оценки мета-модели")
+      else:
+        logger.info("Мета-модель недоступна, оценка производится только по базовым моделям")
+        # Используем простое голосование базовых моделей для оценки
+        try:
+          base_predictions = []
+          for name, model in self.models.items():
+            pred = model.predict(X_val)
+            base_predictions.append(pred)
+
+          if base_predictions:
+            # Мажоритарное голосование
+            ensemble_pred = np.round(np.mean(base_predictions, axis=0)).astype(int)
+            accuracy = accuracy_score(y_val, ensemble_pred)
+            f1 = f1_score(y_val, ensemble_pred, average='macro')
+
+            logger.info(f"Точность базового ансамбля на валидации: {accuracy:.4f}")
+            logger.info(f"F1-score базового ансамбля на валидации: {f1:.4f}")
+        except Exception as base_eval_error:
+          logger.warning(f"Ошибка оценки базовых моделей: {base_eval_error}")
 
       # Рассчитываем и выводим метрики
       accuracy = accuracy_score(y_val, final_predictions)
@@ -1690,6 +1754,12 @@ class EnhancedEnsembleModel:
       print(classification_report(y_val, final_predictions, target_names=target_names))
       print("----------------------------------------------------------\n")
       # ===================================================================================
+      if hasattr(self, 'selected_features') and self.selected_features:
+        self.training_features = self.selected_features.copy()
+        logger.info(f"Сохранена информация о {len(self.training_features)} признаках обучения")
+      else:
+        logger.warning("Информация о выбранных признаках отсутствует")
+
 
     except Exception as e:
       logger.error(f"Критическая ошибка при обучении модели: {e}", exc_info=True)
@@ -1743,8 +1813,15 @@ class EnhancedEnsembleModel:
       if name not in models_to_tune:
         model.fit(X_train_res, y_train_res)
 
-    meta_features = [m.predict_proba(X_train_res)[:, 1] for m in self.models.values() if hasattr(m, 'predict_proba')]
-    self.meta_model.fit(np.column_stack(meta_features), y_train_res)
+    logger.info("Обучение мета-модели...")
+    meta_model_success = self._train_meta_model_safely(
+      X_train_res, y_train_res, X_val, y_val
+    )
+
+    if not meta_model_success:
+      logger.warning(f"Мета-модель не обучена: {self.meta_model_stats.get('fallback_reason', 'unknown')}")
+      logger.info("Система будет работать только с базовыми моделями")
+      # Не устанавливаем meta_model в None, так как ее может не быть
 
     self.is_fitted = True
     logger.info("=" * 20 + " ОБУЧЕНИЕ С ПОДБОРОМ ГИПЕРПАРАМЕТРОВ ЗАВЕРШЕНО " + "=" * 20)
@@ -1800,7 +1877,7 @@ class EnhancedEnsembleModel:
     self.selected_features = list(X_clean.columns)
 
     logger.info("Шаг 4: Скалирование данных...")
-    X_scaled = self.scalers['standard'].fit_transform(X_clean)
+    X_scaled = self._safe_scaling(X_clean, is_training=True)
     X_scaled = pd.DataFrame(X_scaled, columns=X_clean.columns, index=X_clean.index)
 
     logger.info("Шаг 5: Разделение и балансировка (SMOTE)...")
@@ -1898,7 +1975,7 @@ class EnhancedEnsembleModel:
 
       # 4. Скалирование
       try:
-        X_scaled = self.scalers['standard'].transform(X_enhanced)
+        X_scaled = self._safe_scaling(X_enhanced, is_training=False)
         X_scaled = pd.DataFrame(X_scaled, columns=X_enhanced.columns, index=X_enhanced.index)
       except Exception as scale_error:
         logger.warning(f"Ошибка скалирования: {scale_error}, используем исходные данные")
@@ -1936,8 +2013,10 @@ class EnhancedEnsembleModel:
 
       use_meta_model = (
           len(predictions) > 1 and
+          hasattr(self, 'meta_model') and
+          self.meta_model is not None and
           hasattr(self.meta_model, 'predict') and
-          self.meta_model_stats.get('is_reliable', False)
+          getattr(self, 'meta_model_stats', {}).get('is_reliable', False)
       )
 
       if use_meta_model:
@@ -2817,8 +2896,11 @@ class EnhancedEnsembleModel:
     """Сохранение модели"""
     model_data = {
       'models': self.models,
-      'meta_model': self.meta_model,
-      'scalers': self.scalers,
+      # 'meta_model': self.meta_model,
+      'meta_model': getattr(self, 'meta_model', None),
+      'meta_model_stats': getattr(self, 'meta_model_stats', {}),
+      'scaler': self.scaler,
+      'scaler_type_used': getattr(self, 'scaler_type_used', 'standard'),
       'selected_features': self.selected_features,
       'feature_engineer': self.feature_engineer,
       'performance_history': self.performance_history,
@@ -2835,8 +2917,11 @@ class EnhancedEnsembleModel:
 
     instance = cls(anomaly_detector)
     instance.models = model_data['models']
-    instance.meta_model = model_data['meta_model']
-    instance.scalers = model_data['scalers']
+    # instance.meta_model = model_data['meta_model']
+    instance.meta_model = model_data.get('meta_model', None)
+    instance.meta_model_stats = model_data.get('meta_model_stats', {})
+    instance.scaler = model_data.get('scaler', StandardScaler())
+    instance.scaler_type_used = model_data.get('scaler_type_used', 'standard')
     instance.selected_features = model_data['selected_features']
     instance.feature_engineer = model_data['feature_engineer']
     instance.performance_history = model_data['performance_history']
@@ -3341,24 +3426,75 @@ class EnhancedEnsembleModel:
 
       # Проверка мета-модели
       try:
-        if hasattr(self.meta_model, 'feature_importances_') or hasattr(self.meta_model, 'coef_'):
-          health_status['components']['meta_model'] = 'OK'
+        if hasattr(self, 'meta_model') and self.meta_model is not None:
+          # Проверяем что мета-модель действительно обучена
+          meta_is_fitted = (
+              hasattr(self.meta_model, 'coef_') or
+              hasattr(self.meta_model, 'feature_importances_') or
+              (hasattr(self.meta_model, '_check_is_fitted') and
+               getattr(self, 'meta_model_stats', {}).get('is_reliable', False))
+          )
+
+          if meta_is_fitted:
+            health_status['components']['meta_model'] = 'OK'
+          else:
+            health_status['components']['meta_model'] = 'NOT_TRAINED'
         else:
-          health_status['components']['meta_model'] = 'NOT_TRAINED'
+          health_status['components']['meta_model'] = 'NOT_AVAILABLE'
       except Exception as e:
         health_status['components']['meta_model'] = f'ERROR: {str(e)}'
 
       # Проверка скейлеров
       scalers_ok = 0
-      for name, scaler in self.scalers.items():
-        try:
-          if hasattr(scaler, 'mean_') or hasattr(scaler, 'center_'):
-            scalers_ok += 1
-            health_status['components'][f'scaler_{name}'] = 'OK'
+      scaler_details = {}
+
+      try:
+        # Проверка основного скейлера
+        if hasattr(self, 'scaler') and self.scaler is not None:
+          scaler_type = getattr(self, 'scaler_type_used', type(self.scaler).__name__)
+
+          # Проверяем разные типы скейлеров
+          is_fitted = False
+          if hasattr(self.scaler, 'mean_'):  # StandardScaler
+            is_fitted = True
+            scaler_details['mean_features'] = len(self.scaler.mean_)
+          elif hasattr(self.scaler, 'center_'):  # RobustScaler
+            is_fitted = True
+            scaler_details['center_features'] = len(self.scaler.center_)
+          elif hasattr(self.scaler, 'scale_'):  # Общий атрибут
+            is_fitted = True
+            scaler_details['scale_features'] = len(self.scaler.scale_)
+
+          if is_fitted:
+            scalers_ok = 1
+            health_status['components'][f'scaler_{scaler_type}'] = 'OK'
+            logger.debug(f"Скейлер {scaler_type} обучен и готов к использованию")
           else:
-            health_status['components'][f'scaler_{name}'] = 'NOT_FITTED'
-        except Exception as e:
-          health_status['components'][f'scaler_{name}'] = f'ERROR: {str(e)}'
+            health_status['components'][f'scaler_{scaler_type}'] = 'NOT_FITTED'
+            logger.warning(f"Скейлер {scaler_type} присутствует, но не обучен")
+        else:
+          health_status['components']['scaler_main'] = 'MISSING'
+          logger.error("Основной скейлер отсутствует")
+
+        # Проверка резервного скейлера
+        if hasattr(self, 'backup_scaler') and self.backup_scaler is not None:
+          backup_fitted = (hasattr(self.backup_scaler, 'mean_') or
+                           hasattr(self.backup_scaler, 'center_') or
+                           hasattr(self.backup_scaler, 'scale_'))
+
+          health_status['components']['scaler_backup'] = 'OK' if backup_fitted else 'NOT_FITTED'
+          scaler_details['backup_available'] = True
+        else:
+          health_status['components']['scaler_backup'] = 'NOT_AVAILABLE'
+          scaler_details['backup_available'] = False
+
+        # Добавляем детали в метаданные
+        health_status['scaler_details'] = scaler_details
+
+      except Exception as e:
+        health_status['components']['scaler_system'] = f'ERROR: {str(e)}'
+        logger.error(f"Критическая ошибка проверки скейлеров: {e}")
+        scalers_ok = 0
 
       # Проверка feature_engineer
       try:
@@ -3399,8 +3535,11 @@ class EnhancedEnsembleModel:
         health_status['recommendations'].append("Переобучите проблемные модели")
 
       if scalers_ok == 0:
-        health_status['issues'].append("Ни один скейлер не обучен")
+        health_status['issues'].append("Скейлер не обучен или недоступен")
         health_status['recommendations'].append("Переобучите модель полностью")
+      elif not hasattr(self, 'scaler') or self.scaler is None:
+        health_status['issues'].append("Отсутствует основной скейлер")
+        health_status['recommendations'].append("Проверьте инициализацию модели")
 
       return health_status
 
@@ -3504,72 +3643,110 @@ class MarketLogicFilter:
     try:
       conditions = {}
 
-      # Основные ценовые данные
-      close_prices = data['close'].values
-      high_prices = data['high'].values
-      low_prices = data['low'].values
-      volumes = data['volume'].values if 'volume' in data.columns else None
+      # БЕЗОПАСНОЕ ИЗВЛЕЧЕНИЕ ДАННЫХ
+      if len(data) < 5:
+        logger.warning("Недостаточно данных для анализа рыночных условий")
+        return conditions
+
+      # Безопасное извлечение ценовых данных
+      try:
+        close_prices = data['close'].dropna().values
+        high_prices = data['high'].dropna().values
+        low_prices = data['low'].dropna().values
+        volumes = data['volume'].dropna().values if 'volume' in data.columns else None
+      except Exception as extraction_error:
+        logger.warning(f"Ошибка извлечения базовых данных: {extraction_error}")
+        return conditions
+
+      if len(close_prices) < 5:
+        logger.warning("Недостаточно валидных ценовых данных")
+        return conditions
 
       current_price = close_prices[-1]
 
-      # 1. Анализ тренда
-      if len(close_prices) >= self.trend_window:
-        trend_sma = np.mean(close_prices[-self.trend_window:])
-        price_vs_trend = (current_price - trend_sma) / trend_sma
+      # 1. БЕЗОПАСНЫЙ АНАЛИЗ ТРЕНДА
+      try:
+        trend_window = min(self.trend_window, len(close_prices))
+        if trend_window >= 5:
+          trend_prices = close_prices[-trend_window:]
+          trend_sma = np.mean(trend_prices)
+          price_vs_trend = (current_price - trend_sma) / trend_sma
 
-        # Линейная регрессия для определения направления тренда
-        x = np.arange(self.trend_window)
-        y = close_prices[-self.trend_window:]
-        trend_slope = np.polyfit(x, y, 1)[0]
-        trend_slope_normalized = trend_slope / current_price  # Нормализуем по цене
+          # ИСПРАВЛЕННАЯ линейная регрессия
+          x = np.arange(len(trend_prices))  # Используем фактическую длину
+          y = trend_prices
 
-        conditions['trend'] = {
-          'direction': 'up' if trend_slope_normalized > 0.001 else 'down' if trend_slope_normalized < -0.001 else 'sideways',
-          'strength': abs(trend_slope_normalized) * 1000,  # Умножаем для читаемости
-          'price_vs_ma': price_vs_trend,
-          'slope': trend_slope_normalized
-        }
+          if len(x) == len(y) and len(x) > 1:  # Проверяем совпадение размеров
+            trend_slope = np.polyfit(x, y, 1)[0]
+            trend_slope_normalized = trend_slope / current_price
 
-      # 2. Волатильность
-      if len(close_prices) >= self.volatility_window:
-        returns = np.diff(close_prices[-self.volatility_window:]) / close_prices[-self.volatility_window:-1]
-        current_volatility = np.std(returns) * np.sqrt(252)  # Годовая волатильность
+            conditions['trend'] = {
+              'direction': 'up' if trend_slope_normalized > 0.001 else 'down' if trend_slope_normalized < -0.001 else 'sideways',
+              'strength': abs(trend_slope_normalized) * 1000,
+              'price_vs_ma': price_vs_trend,
+              'slope': trend_slope_normalized
+            }
+          else:
+            logger.warning(f"Размеры не совпадают для тренда: x={len(x)}, y={len(y)}")
+      except Exception as trend_error:
+        logger.warning(f"Ошибка анализа тренда: {trend_error}")
 
-        # Сравниваем с исторической волатильностью
-        if len(close_prices) >= self.volatility_window * 2:
-          historical_returns = np.diff(
-            close_prices[-self.volatility_window * 2:-self.volatility_window]) / close_prices[
-                                                                                 -self.volatility_window * 2 - 1:-self.volatility_window - 1]
-          historical_volatility = np.std(historical_returns) * np.sqrt(252)
-          volatility_ratio = current_volatility / (historical_volatility + 1e-8)
-        else:
-          volatility_ratio = 1.0
+      # 2. БЕЗОПАСНЫЙ АНАЛИЗ ВОЛАТИЛЬНОСТИ
+      try:
+        vol_window = min(self.volatility_window, len(close_prices))
+        if vol_window >= 5:
+          vol_prices = close_prices[-vol_window:]
+          if len(vol_prices) > 1:
+            returns = np.diff(vol_prices) / vol_prices[:-1]  # ИСПРАВЛЕНО: правильная индексация
+            current_volatility = np.std(returns) * np.sqrt(252)
 
-        conditions['volatility'] = {
-          'current': current_volatility,
-          'ratio_to_historical': volatility_ratio,
-          'regime': 'high' if volatility_ratio > 1.5 else 'low' if volatility_ratio < 0.7 else 'normal'
-        }
+            # Сравниваем с исторической волатильностью
+            hist_window = min(vol_window * 2, len(close_prices))
+            if hist_window > vol_window:
+              hist_prices = close_prices[-hist_window:-vol_window]
+              if len(hist_prices) > 1:
+                hist_returns = np.diff(hist_prices) / hist_prices[:-1]
+                historical_volatility = np.std(hist_returns) * np.sqrt(252)
+                volatility_ratio = current_volatility / (historical_volatility + 1e-8)
+              else:
+                volatility_ratio = 1.0
+            else:
+              volatility_ratio = 1.0
 
-      # 3. RSI
-      if len(close_prices) >= 14:
-        rsi = self._calculate_rsi(close_prices, 14)
-        conditions['rsi'] = {
-          'value': rsi,
-          'condition': 'oversold' if rsi < self.rsi_oversold else 'overbought' if rsi > self.rsi_overbought else 'neutral'
-        }
+            conditions['volatility'] = {
+              'current': current_volatility,
+              'ratio_to_historical': volatility_ratio,
+              'regime': 'high' if volatility_ratio > 1.5 else 'low' if volatility_ratio < 0.7 else 'normal'
+            }
+      except Exception as vol_error:
+        logger.warning(f"Ошибка анализа волатильности: {vol_error}")
 
-      # 4. Объем (если доступен)
-      if volumes is not None and len(volumes) >= self.volume_window:
-        current_volume = volumes[-1]
-        avg_volume = np.mean(volumes[-self.volume_window:])
-        volume_ratio = current_volume / (avg_volume + 1e-8)
+      # 3. БЕЗОПАСНЫЙ РАСЧЕТ RSI
+      try:
+        if len(close_prices) >= 14:
+          rsi = self._calculate_rsi(close_prices, 14)
+          conditions['rsi'] = {
+            'value': rsi,
+            'condition': 'oversold' if rsi < self.rsi_oversold else 'overbought' if rsi > self.rsi_overbought else 'neutral'
+          }
+      except Exception as rsi_error:
+        logger.warning(f"Ошибка расчета RSI: {rsi_error}")
 
-        conditions['volume'] = {
-          'current': current_volume,
-          'ratio_to_average': volume_ratio,
-          'condition': 'high' if volume_ratio > 1.5 else 'low' if volume_ratio < 0.5 else 'normal'
-        }
+      # 4. БЕЗОПАСНЫЙ АНАЛИЗ ОБЪЕМА
+      try:
+        if volumes is not None and len(volumes) >= self.volume_window:
+          vol_window = min(self.volume_window, len(volumes))
+          current_volume = volumes[-1]
+          avg_volume = np.mean(volumes[-vol_window:])
+          volume_ratio = current_volume / (avg_volume + 1e-8)
+
+          conditions['volume'] = {
+            'current': current_volume,
+            'ratio_to_average': volume_ratio,
+            'condition': 'high' if volume_ratio > 1.5 else 'low' if volume_ratio < 0.5 else 'normal'
+          }
+      except Exception as volume_error:
+        logger.warning(f"Ошибка анализа объема: {volume_error}")
 
       # 5. Поддержка и сопротивление
       if len(close_prices) >= 50:
@@ -3940,14 +4117,48 @@ class TemporalDataManager:
       self.temporal_weights = True  # Использовать временные веса
       self.real_time_adjustments = True  # Использовать корректировки в реальном времени
 
-    def validate_data_freshness(self, data: pd.DataFrame, symbol: str) -> Dict[str, Any]:
+    def _calculate_real_data_age(self, last_timestamp: pd.Timestamp, timeframe: str = '1h') -> float:
       """
-      Проверяет свежесть и актуальность данных
+      Рассчитывает реальный возраст данных с учетом таймфрейма
       """
+      try:
+        current_time_utc = pd.Timestamp.now(tz='UTC')
+
+        # Определяем интервал таймфрейма в минутах
+        timeframe_minutes = {
+          '1m': 1, '5m': 5, '15m': 15, '30m': 30,
+          '1h': 60, '4h': 240, '1d': 1440
+        }
+
+        interval_minutes = timeframe_minutes.get(timeframe, 60)  # По умолчанию час
+
+        # Корректируем время последней свечи
+        # Для часовых свечей: если timestamp = 09:00, то свеча закрылась в 10:00
+        last_candle_close_time = last_timestamp + pd.Timedelta(minutes=interval_minutes)
+
+        # Рассчитываем реальный возраст
+        real_age = current_time_utc - last_candle_close_time
+        real_age_minutes = real_age.total_seconds() / 60
+
+        logger.debug(f"Коррекция времени для {timeframe}:")
+        logger.debug(f"  Timestamp свечи: {last_timestamp}")
+        logger.debug(f"  Время закрытия свечи: {last_candle_close_time}")
+        logger.debug(f"  Текущее время: {current_time_utc}")
+        logger.debug(f"  Реальный возраст: {real_age_minutes:.1f} мин")
+
+        return max(0, real_age_minutes)  # Не может быть отрицательным
+
+      except Exception as e:
+        logger.warning(f"Ошибка корректировки возраста данных: {e}")
+        # Fallback к обычному расчету
+        return (current_time_utc - last_timestamp).total_seconds() / 60
+
+    def validate_data_freshness(self, data: pd.DataFrame, symbol: str, timeframe: str = '1h') -> Dict[str, Any]:
       validation_result = {
         'is_fresh': False,
         'last_update': None,
         'data_age_minutes': None,
+        'real_age_minutes': None,  # Добавляем реальный возраст
         'warnings': [],
         'recommendations': []
       }
@@ -3957,58 +4168,65 @@ class TemporalDataManager:
           validation_result['warnings'].append("Данные отсутствуют")
           return validation_result
 
-        # Проверяем наличие временных меток
+        # ИСПРАВЛЕННАЯ ОБРАБОТКА ВРЕМЕННЫХ МЕТОК С УЧЕТОМ UTC
+        last_timestamp = None
+
+        # 1. Ищем временные метки
         if 'timestamp' in data.columns:
-          last_timestamp = pd.to_datetime(data['timestamp'].iloc[-1])
-        elif data.index.name == 'timestamp' or isinstance(data.index, pd.DatetimeIndex):
-          last_timestamp = data.index[-1]
-        else:
+          try:
+            last_timestamp = pd.to_datetime(data['timestamp'].iloc[-1])
+          except Exception as e:
+            logger.debug(f"Ошибка парсинга timestamp колонки: {e}")
+
+        if last_timestamp is None and hasattr(data.index, 'to_pydatetime'):
+          try:
+            last_timestamp = data.index[-1]
+            if hasattr(last_timestamp, 'to_pydatetime'):
+              last_timestamp = last_timestamp.to_pydatetime()
+            last_timestamp = pd.Timestamp(last_timestamp)
+          except Exception as e:
+            logger.debug(f"Ошибка использования индекса как timestamp: {e}")
+
+        if last_timestamp is None:
           validation_result['warnings'].append("Временные метки не найдены")
-          validation_result['recommendations'].append("Добавьте временные метки к данным")
           return validation_result
 
-        # Рассчитываем возраст данных
-        current_time = pd.Timestamp.now()
-        if last_timestamp.tz is None:
-          last_timestamp = last_timestamp.tz_localize('UTC')
-        if current_time.tz is None:
-          current_time = current_time.tz_localize('UTC')
+        # 2. КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: ПРИВЕДЕНИЕ К UTC
+        try:
+          # Приводим к UTC
+          if hasattr(last_timestamp, 'tz') and last_timestamp.tz is not None:
+            last_timestamp_utc = last_timestamp.astimezone(pd.Timestamp.utcnow().tzinfo)
+          else:
+            last_timestamp_utc = pd.Timestamp(last_timestamp).tz_localize('UTC')
 
-        data_age = current_time - last_timestamp
-        data_age_minutes = data_age.total_seconds() / 60
+          # Рассчитываем РЕАЛЬНЫЙ возраст с учетом таймфрейма
+          real_age_minutes = self._calculate_real_data_age(last_timestamp_utc, timeframe)
 
-        validation_result['last_update'] = last_timestamp
-        validation_result['data_age_minutes'] = data_age_minutes
+          # Также сохраняем "сырой" возраст для отладки
+          raw_age_minutes = (pd.Timestamp.now(tz='UTC') - last_timestamp_utc).total_seconds() / 60
 
-        # Проверяем свежесть
-        if data_age_minutes <= self.max_data_age_minutes:
+          validation_result['data_age_minutes'] = raw_age_minutes
+          validation_result['real_age_minutes'] = real_age_minutes
+
+          logger.debug(
+            f"Возраст данных для {symbol}: сырой={raw_age_minutes:.1f}мин, реальный={real_age_minutes:.1f}мин")
+
+        except Exception as age_error:
+          logger.warning(f"Ошибка расчета возраста данных: {age_error}")
+          real_age_minutes = 999999
+
+          # Проверяем свежесть по РЕАЛЬНОМУ возрасту
+        if real_age_minutes <= self.max_data_age_minutes:
           validation_result['is_fresh'] = True
         else:
           validation_result['warnings'].append(
-            f"Данные устарели: {data_age_minutes:.1f} мин (макс: {self.max_data_age_minutes})"
+            f"Данные устарели: {real_age_minutes:.1f} мин (макс: {self.max_data_age_minutes})"
           )
-          validation_result['recommendations'].append("Обновите данные перед принятием торговых решений")
-
-        # Проверяем количество недавних баров
-        recent_threshold = current_time - pd.Timedelta(minutes=self.max_data_age_minutes)
-        if 'timestamp' in data.columns:
-          recent_data = data[pd.to_datetime(data['timestamp']) >= recent_threshold]
-        else:
-          recent_data = data[data.index >= recent_threshold]
-
-        if len(recent_data) < self.required_recent_bars:
-          validation_result['warnings'].append(
-            f"Недостаточно недавних баров: {len(recent_data)} < {self.required_recent_bars}"
-          )
-
-        logger.debug(
-          f"Валидация данных для {symbol}: возраст {data_age_minutes:.1f} мин, свежесть: {validation_result['is_fresh']}")
 
         return validation_result
 
       except Exception as e:
-        logger.error(f"Ошибка валидации свежести данных для {symbol}: {e}")
-        validation_result['warnings'].append(f"Ошибка валидации: {e}")
+        logger.error(f"Критическая ошибка валидации: {e}")
         return validation_result
 
     def apply_temporal_weights(self, data: pd.DataFrame, predictions: np.ndarray) -> np.ndarray:
@@ -4037,7 +4255,7 @@ class TemporalDataManager:
 
     def get_real_time_context(self, data: pd.DataFrame, symbol: str) -> Dict[str, Any]:
       """
-      Получает контекст реального времени для корректировки предсказаний
+      Получает контекст реального времени (ИСПРАВЛЕННАЯ ВЕРСИЯ)
       """
       context = {
         'price_momentum': 0.0,
@@ -4051,77 +4269,116 @@ class TemporalDataManager:
         if len(data) < 10:
           return context
 
-        close_prices = data['close'].values
-        volumes = data['volume'].values if 'volume' in data.columns else None
+        # БЕЗОПАСНОЕ ИЗВЛЕЧЕНИЕ ДАННЫХ
+        close_prices = data['close'].dropna().values
+        volumes = data['volume'].dropna().values if 'volume' in data.columns else None
 
-        # 1. Анализ ценового моментума (последние vs предыдущие бары)
-        recent_bars = min(5, len(close_prices) // 2)
-        recent_avg = np.mean(close_prices[-recent_bars:])
-        previous_avg = np.mean(close_prices[-recent_bars * 2:-recent_bars])
+        if len(close_prices) < 10:
+          return context
 
-        if previous_avg > 0:
-          momentum = (recent_avg - previous_avg) / previous_avg
-          context['price_momentum'] = momentum
+        # 1. ИСПРАВЛЕННЫЙ АНАЛИЗ ЦЕНОВОГО МОМЕНТУМА
+        try:
+          recent_bars = min(5, len(close_prices) // 2)
+          if recent_bars >= 2:
+            recent_avg = np.mean(close_prices[-recent_bars:])
 
-        # 2. Недавняя волатильность
-        if len(close_prices) >= 10:
-          recent_returns = np.diff(close_prices[-10:]) / close_prices[-11:-1]
-          context['recent_volatility'] = np.std(recent_returns)
+            # ИСПРАВЛЕНО: проверяем наличие достаточных данных
+            if len(close_prices) >= recent_bars * 2:
+              previous_avg = np.mean(close_prices[-recent_bars * 2:-recent_bars])
 
-        # 3. Тренд объема
-        if volumes is not None and len(volumes) >= 10:
-          recent_vol_avg = np.mean(volumes[-5:])
-          previous_vol_avg = np.mean(volumes[-10:-5])
+              if previous_avg > 0:
+                momentum = (recent_avg - previous_avg) / previous_avg
+                context['price_momentum'] = momentum
+        except Exception as momentum_error:
+          logger.warning(f"Ошибка расчета моментума: {momentum_error}")
 
-          if previous_vol_avg > 0:
-            vol_ratio = recent_vol_avg / previous_vol_avg
-            if vol_ratio > 1.2:
-              context['volume_trend'] = 'increasing'
-            elif vol_ratio < 0.8:
-              context['volume_trend'] = 'decreasing'
-            else:
-              context['volume_trend'] = 'stable'
+        # 2. БЕЗОПАСНЫЙ АНАЛИЗ ВОЛАТИЛЬНОСТИ
+        try:
+          if len(close_prices) >= 10:
+            vol_window = min(10, len(close_prices))
+            vol_prices = close_prices[-vol_window:]
 
-        # 4. Определение фазы рынка
-        if len(close_prices) >= 20:
-          short_ma = np.mean(close_prices[-5:])
-          long_ma = np.mean(close_prices[-20:])
+            if len(vol_prices) > 1:
+              recent_returns = np.diff(vol_prices) / vol_prices[:-1]
+              context['recent_volatility'] = np.std(recent_returns)
+        except Exception as vol_error:
+          logger.warning(f"Ошибка расчета волатильности: {vol_error}")
 
-          if short_ma > long_ma * 1.01:
-            context['market_phase'] = 'bullish'
-          elif short_ma < long_ma * 0.99:
-            context['market_phase'] = 'bearish'
+        # 3. БЕЗОПАСНЫЙ АНАЛИЗ ОБЪЕМА
+        try:
+          if volumes is not None and len(volumes) >= 10:
+            vol_window = min(10, len(volumes))
+            if vol_window >= 5:
+              recent_vol_avg = np.mean(volumes[-5:])
+              if vol_window >= 10:
+                previous_vol_avg = np.mean(volumes[-10:-5])
+
+                if previous_vol_avg > 0:
+                  vol_ratio = recent_vol_avg / previous_vol_avg
+                  if vol_ratio > 1.2:
+                    context['volume_trend'] = 'increasing'
+                  elif vol_ratio < 0.8:
+                    context['volume_trend'] = 'decreasing'
+                  else:
+                    context['volume_trend'] = 'stable'
+        except Exception as volume_error:
+          logger.warning(f"Ошибка анализа объема: {volume_error}")
+
+        # 4. БЕЗОПАСНОЕ ОПРЕДЕЛЕНИЕ ФАЗЫ РЫНКА
+        try:
+          if len(close_prices) >= 20:
+            short_ma = np.mean(close_prices[-5:])
+            long_ma = np.mean(close_prices[-20:])
+
+            if long_ma > 0:
+              if short_ma > long_ma * 1.01:
+                context['market_phase'] = 'bullish'
+              elif short_ma < long_ma * 0.99:
+                context['market_phase'] = 'bearish'
+              else:
+                context['market_phase'] = 'neutral'
+        except Exception as phase_error:
+          logger.warning(f"Ошибка определения фазы рынка: {phase_error}")
+
+        # 5. БЕЗОПАСНАЯ КОРРЕКТИРОВКА УВЕРЕННОСТИ
+        try:
+          confidence_factors = []
+
+          # Проверяем моментум
+          momentum = context.get('price_momentum', 0)
+          if abs(momentum) > 0.005:
+            confidence_factors.append(1.1)
           else:
-            context['market_phase'] = 'neutral'
+            confidence_factors.append(0.95)
 
-        # 5. Корректировка уверенности на основе контекста
-        confidence_factors = []
+          # Проверяем волатильность
+          volatility = context.get('recent_volatility', 0)
+          if 0.01 < volatility < 0.05:
+            confidence_factors.append(1.05)
+          else:
+            confidence_factors.append(0.9)
 
-        # Высокий моментум увеличивает уверенность
-        if abs(momentum) > 0.005:  # > 0.5%
-          confidence_factors.append(1.1)
-        else:
-          confidence_factors.append(0.95)
+          # Проверяем объем
+          volume_trend = context.get('volume_trend', 'neutral')
+          if volume_trend == 'increasing':
+            confidence_factors.append(1.1)
+          elif volume_trend == 'decreasing':
+            confidence_factors.append(0.9)
+          else:
+            confidence_factors.append(1.0)
 
-        # Стабильная волатильность увеличивает уверенность
-        if 0.01 < context['recent_volatility'] < 0.05:  # Умеренная волатильность
-          confidence_factors.append(1.05)
-        else:
-          confidence_factors.append(0.9)
+          if confidence_factors:
+            context['confidence_adjustment'] = np.mean(confidence_factors)
 
-        # Растущий объем увеличивает уверенность
-        if context['volume_trend'] == 'increasing':
-          confidence_factors.append(1.1)
-        elif context['volume_trend'] == 'decreasing':
-          confidence_factors.append(0.9)
-
-        context['confidence_adjustment'] = np.mean(confidence_factors)
+        except Exception as conf_error:
+          logger.warning(f"Ошибка корректировки уверенности: {conf_error}")
+          context['confidence_adjustment'] = 1.0
 
         logger.debug(f"Контекст реального времени для {symbol}: {context}")
         return context
 
       except Exception as e:
-        logger.warning(f"Ошибка получения контекста реального времени для {symbol}: {e}")
+        logger.error(f"Критическая ошибка получения контекста реального времени для {symbol}: {e}")
         return context
 
     def adjust_prediction_for_real_time(self, prediction: 'MLPrediction',

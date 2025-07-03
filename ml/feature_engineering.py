@@ -131,17 +131,28 @@ class AdvancedFeatureEngineer:
         for col in required_cols:
             data[col] = pd.to_numeric(data[col], errors='coerce')
 
-        # Удаляем ЛЮБУЮ строку, где есть хотя бы одно значение NaN в ключевых колонках.
+        # УЛУЧШЕННАЯ ОЧИСТКА: более мягкий подход
         initial_rows = len(data)
-        data.dropna(subset=required_cols, inplace=True)
+
+        # Сначала заполняем NaN методом forward/backward fill
+        data[required_cols] = data[required_cols].fillna(method='ffill').fillna(method='bfill')
+
+        # Удаляем только строки, где ВСЕ основные колонки NaN
+        data = data.dropna(subset=required_cols, how='all')
+
+        # Дополнительно удаляем строки где цена закрытия NaN (критично)
+        data = data.dropna(subset=['close'])
 
         if len(data) < initial_rows:
             logger.warning(f"Удалено {initial_rows - len(data)} строк с невалидными данными.")
 
-        # Если после очистки данных не осталось, прекращаем работу
-        if data.empty or len(data) < 50:  # 50 - минимум для многих индикаторов
-            logger.error("После очистки не осталось достаточно данных для расчета индикаторов.")
+        # КРИТИЧЕСКОЕ ИЗМЕНЕНИЕ: снижаем минимальный порог
+        if data.empty or len(data) < 20:  # Было 50, делаем 20
+            logger.error(
+                f"После очистки не осталось достаточно данных для расчета индикаторов. Осталось: {len(data)} строк")
             return pd.DataFrame()
+
+        logger.info(f"После очистки данных осталось {len(data)} строк для расчета индикаторов")
 
         # # Убеждаемся, что у нас есть необходимые колонки
         # required_cols = ['open', 'high', 'low', 'close', 'volume']
@@ -156,11 +167,37 @@ class AdvancedFeatureEngineer:
             # === ТРЕНДОВЫЕ ИНДИКАТОРЫ ===
             try:
                 # === ГРУППА 1: Базовые индикаторы и волатильность (из прошлых версий) ===
-                data.ta.rsi(length=14, append=True)
-                data.ta.ema(length=50, append=True)
-                data.ta.ema(length=200, append=True)
-                data.ta.adx(length=14, append=True)
-                data.ta.atr(length=14, append=True)
+                # data.ta.rsi(length=14, append=True)
+                # data.ta.ema(length=50, append=True)
+                # data.ta.ema(length=200, append=True)
+                # data.ta.adx(length=14, append=True)
+                # data.ta.atr(length=14, append=True)
+                # RSI
+                rsi_14 = ta.rsi(data['close'], length=14)
+                if rsi_14 is not None:
+                    data['RSI_14'] = rsi_14
+
+                # EMA - ключевые периоды
+                ema_50 = ta.ema(data['close'], length=50)
+                if ema_50 is not None:
+                    data['EMA_50'] = ema_50
+
+                ema_200 = ta.ema(data['close'], length=200)
+                if ema_200 is not None:
+                    data['EMA_200'] = ema_200
+
+                # ADX
+                adx_14 = ta.adx(data['high'], data['low'], data['close'], length=14)
+                if adx_14 is not None and not adx_14.empty:
+                    data['ADX_14'] = adx_14.iloc[:, 0]  # Основное значение ADX
+
+                # ATR
+                atr_14 = ta.atr(data['high'], data['low'], data['close'], length=14)
+                if atr_14 is not None:
+                    data['ATR_14'] = atr_14
+                    data['atr_ratio'] = atr_14 / (data['close'] + 1e-9)
+
+                logger.debug("Базовые индикаторы рассчитаны")
                 # data['atr_ratio'] = data['atr'] / data['close']
                 # Рассчитываем ATR и ATR_Ratio в одном блоке
                 # atr = ta.atr(data['high'], data['low'], data['close'], length=14)
@@ -228,21 +265,49 @@ class AdvancedFeatureEngineer:
             # Скользящие средние различных типов
             for period in self.lookback_periods:
                 try:
-                    data[f'sma_{period}'] = ta.sma(data['close'], length=period)
-                    data[f'ema_{period}'] = ta.ema(data['close'], length=period)
-                    data[f'wma_{period}'] = ta.wma(data['close'], length=period)
+                    # Создаем консистентные имена
+                    sma_val = ta.sma(data['close'], length=period)
+                    if sma_val is not None:
+                        data[f'SMA_{period}'] = sma_val
+                        data[f'price_to_sma_{period}'] = data['close'] / (sma_val + 1e-9)
 
-                    # Отношения цены к скользящим средним
-                    data[f'price_to_sma_{period}'] = data['close'] / data[f'sma_{period}']
-                    data[f'price_to_ema_{period}'] = data['close'] / data[f'ema_{period}']
+                    ema_val = ta.ema(data['close'], length=period)
+                    if ema_val is not None:
+                        data[f'EMA_{period}'] = ema_val
+                        data[f'price_to_ema_{period}'] = data['close'] / (ema_val + 1e-9)
+
+                    wma_val = ta.wma(data['close'], length=period)
+                    if wma_val is not None:
+                        data[f'WMA_{period}'] = wma_val
+
                 except Exception as e:
                     logger.warning(f"Ошибка при расчете скользящих средних для периода {period}: {e}")
 
             # MACD семейство
             try:
-                macd_data = ta.macd(data['close'])
+                macd_data = ta.macd(data['close'], fast=12, slow=26, signal=9)
                 if macd_data is not None and not macd_data.empty:
+                    # Явно именуем колонки для консистентности
+                    macd_data.columns = ['MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9']
                     data = pd.concat([data, macd_data], axis=1)
+
+                    # Дополнительные признаки на основе MACD
+                    macd_values = data['MACD_12_26_9']
+                    if not macd_values.isnull().all():
+                        # Статистики по скользящему окну
+                        data['MACD_12_26_9_rolling_mean_20'] = macd_values.rolling(20, min_periods=5).mean()
+                        data['MACD_12_26_9_rolling_max_20'] = macd_values.rolling(20, min_periods=5).max()
+                        data['MACD_12_26_9_rolling_min_20'] = macd_values.rolling(20, min_periods=5).min()
+
+                        # Позиция в диапазоне
+                        rolling_max = data['MACD_12_26_9_rolling_max_20']
+                        rolling_min = data['MACD_12_26_9_rolling_min_20']
+                        data['MACD_12_26_9_position_in_range_20'] = (
+                            (macd_values - rolling_min) / (rolling_max - rolling_min + 1e-9)
+                        )
+
+                    logger.debug("MACD и дополнительные признаки рассчитаны")
+
             except Exception as e:
                 logger.warning(f"Ошибка при расчете MACD: {e}")
 
@@ -260,31 +325,56 @@ class AdvancedFeatureEngineer:
 
             # ++ ДОБАВЛЯЕМ ПРИЗНАКИ ГЛОБАЛЬНОГО ТРЕНДА ++
             try:
-                ema_200 = ta.ema(data['close'], length=200)
+                # АДАПТИВНЫЙ РАСЧЕТ EMA_200: используем доступную длину
+                available_length = len(data)
+
+                if available_length >= 200:
+                    ema_period = 200
+                elif available_length >= 100:
+                    ema_period = 100
+                    logger.info(f"Используем EMA_{ema_period} вместо EMA_200 (недостаточно данных)")
+                elif available_length >= 50:
+                    ema_period = 50
+                    logger.info(f"Используем EMA_{ema_period} вместо EMA_200 (недостаточно данных)")
+                else:
+                    ema_period = min(20, available_length - 1)
+                    logger.info(f"Используем EMA_{ema_period} вместо EMA_200 (критически мало данных)")
+
+                ema_200 = ta.ema(data['close'], length=ema_period)
+
                 if ema_200 is not None and not ema_200.isnull().all():
                     # Отношение цены к долгосрочной EMA показывает позицию в тренде
                     data['price_to_ema_200_ratio'] = data['close'] / ema_200
                     # Также сохраняем саму EMA_200 как признак
                     data['EMA_200'] = ema_200
+                    logger.debug(f"EMA_{ema_period} успешно рассчитана")
                 else:
-                    logger.warning("EMA_200 не удалось рассчитать, заполняем единицами")
+                    logger.warning(f"EMA_{ema_period} не удалось рассчитать, заполняем нейтральными значениями")
                     data['price_to_ema_200_ratio'] = 1.0
-                    data['EMA_200'] = data['close']  # Заполняем текущей ценой
+                    data['EMA_200'] = data['close']
 
-                # Долгосрочный ADX для оценки силы глобального тренда
-                adx_long = ta.adx(data['high'], data['low'], data['close'], length=50)
-                if adx_long is not None and not adx_long.empty and adx_long.shape[1] > 0:
-                    data['adx_long_term'] = adx_long.iloc[:, 0]  # Берем значение 'ADX_50'
+                # АДАПТИВНЫЙ РАСЧЕТ ADX: используем доступную длину
+                if available_length >= 50:
+                    adx_period = 50
+                elif available_length >= 30:
+                    adx_period = 30
                 else:
-                    logger.warning("ADX долгосрочный не удалось рассчитать, заполняем нулями")
-                    data['adx_long_term'] = 0.0
+                    adx_period = min(14, available_length - 1)
+
+                adx_long = ta.adx(data['high'], data['low'], data['close'], length=adx_period)
+                if adx_long is not None and not adx_long.empty and adx_long.shape[1] > 0:
+                    data['adx_long_term'] = adx_long.iloc[:, 0]
+                    logger.debug(f"ADX_{adx_period} успешно рассчитан")
+                else:
+                    logger.warning(f"ADX_{adx_period} не удалось рассчитать, заполняем нулями")
+                    data['adx_long_term'] = 20.0  # Нейтральное значение для ADX
 
             except Exception as e:
                 logger.error(f"Ошибка при расчете признаков глобального тренда: {e}")
                 # Устанавливаем значения по умолчанию в случае ошибки
                 data['price_to_ema_200_ratio'] = 1.0
                 data['EMA_200'] = data['close']
-                data['adx_long_term'] = 0.0
+                data['adx_long_term'] = 20.0
 
 
             # === ОСЦИЛЛЯТОРЫ ===
@@ -947,28 +1037,56 @@ class AdvancedFeatureEngineer:
         """
         Рассчитывает УПРОЩЕННЫЙ набор индикаторов с ЗАЩИТОЙ от ошибок.
         """
+        if data.empty or len(data) < 10:  # Снижаем минимальный порог с 20 до 10
+            logger.warning(f"Недостаточно данных для расчета индикаторов{suffix}: {len(data)} строк")
+            # Возвращаем DataFrame с нейтральными значениями
+            result_df = pd.DataFrame(index=data.index if not data.empty else [0])
+            result_df[f'price_to_ema_200{suffix}'] = 1.0
+            result_df[f'rsi_14{suffix}'] = 50.0
+            result_df[f'volume_spike_ratio{suffix}'] = 1.0
+            return result_df
+
         df = data.copy()
 
         # Сначала рассчитываем всплеск объема
         df = self._add_volume_spike_feature(df, suffix)
 
         try:
-            # Расчет EMA и RSI
-            ema_200 = ta.ema(df['close'], length=200)
-            rsi_14 = ta.rsi(df['close'], length=14)
+            # АДАПТИВНЫЕ ПЕРИОДЫ в зависимости от количества данных
+            available_length = len(df)
+
+            # Для EMA: адаптируем период
+            if available_length >= 200:
+                ema_period = 200
+            elif available_length >= 100:
+                ema_period = 100
+            elif available_length >= 50:
+                ema_period = 50
+            else:
+                ema_period = min(20, available_length - 5)
+
+            # Для RSI: адаптируем период
+            rsi_period = min(14, max(5, available_length // 3))
+
+            ema_200 = ta.ema(df['close'], length=ema_period)
+            rsi_14 = ta.rsi(df['close'], length=rsi_period)
 
             # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ: ПРОВЕРЯЕМ РЕЗУЛЬТАТ ПЕРЕД ИСПОЛЬЗОВАНИЕМ ---
             if ema_200 is not None and not ema_200.isnull().all():
                 df[f'price_to_ema_200{suffix}'] = df['close'] / ema_200
             else:
                 # Если рассчитать не удалось, создаем колонку с нейтральным значением
+                logger.warning(f"EMA_{ema_period} не удалось рассчитать для {suffix}, заполняем единицами")
                 df[f'price_to_ema_200{suffix}'] = 1.0
 
             if rsi_14 is not None and not rsi_14.isnull().all():
                 df[f'rsi_14{suffix}'] = rsi_14
             else:
                 # Нейтральное значение для RSI - 50
+                logger.warning(f"RSI_{rsi_period} не удалось рассчитать для {suffix}, заполняем нейтральным значением")
                 df[f'rsi_14{suffix}'] = 50.0
+
+            logger.debug(f"Индикаторы{suffix} рассчитаны с EMA_{ema_period} и RSI_{rsi_period}")
 
         except Exception as e:
             logger.warning(f"Не удалось рассчитать индикаторы для {suffix}: {e}")

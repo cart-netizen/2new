@@ -140,6 +140,15 @@ def train_worker_function(features: pd.DataFrame, labels: pd.Series, model_save_
       k_neighbors=14,
       feature_weights=feature_weights  # <--- ПЕРЕДАЕМ ВЕСА
     )
+
+    new_model.fit(features, labels)
+    # ВАЖНО: Синхронизируем имена признаков между feature_engineer и моделью
+    # Это гарантирует, что оба компонента используют одинаковые имена
+    if hasattr(new_model, 'feature_names_in_'):
+      logger.info(f"Модель уже имеет эталонные признаки: {new_model.feature_names_in_}")
+    else:
+      logger.info(f"Устанавливаем эталонные признаки для модели: {features.columns.tolist()}")
+
     new_model.fit(features, labels)
 
     logger.info("WORKER: Расчет точности на выборке...")
@@ -386,14 +395,14 @@ class ModelRetrainingManager:
 
       # --- ЭТАП 3: Обучение и оценка (выполняется в основном процессе) ---
       logger.info("Обучение основной модели...")
-      model = LorentzianClassifier(k_neighbors=16)
+      model = LorentzianClassifier(k_neighbors=14)
       # fit() для k-NN - это быстрая операция, ее можно оставить в основном потоке
       model.fit(combined_features, combined_labels)
 
       logger.info("Расчет точности на выборке...")
       # predict() - медленная операция, но для небольшой выборки это приемлемо
-      sample_features = combined_features.head(20000)
-      sample_labels = combined_labels.iloc[:20000]
+      sample_features = combined_features.head(12000)
+      sample_labels = combined_labels.iloc[:12000]
       predictions = model.predict(sample_features)
 
       if predictions is None or len(sample_labels) != len(predictions):
@@ -1310,11 +1319,11 @@ class ModelRetrainingManager:
     """
     try:
       logger.info("Worker Process: Начало обучения новой модели LorentzianClassifier...")
-      new_model = LorentzianClassifier(k_neighbors=8)
+      new_model = LorentzianClassifier(k_neighbors=14)
       new_model.fit(features, labels)
 
       logger.info("Worker Process: Расчет точности на выборке...")
-      sample_features = features.head(2000)  # Используем небольшую выборку для быстрой оценки
+      sample_features = features.head(12000)  # Используем небольшую выборку для быстрой оценки
       sample_labels = labels.loc[sample_features.index]
       predictions = new_model.predict(sample_features)
 

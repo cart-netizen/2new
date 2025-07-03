@@ -52,7 +52,6 @@
         "use_reverse_function": true,
         "tp_multiplier": 2.5,
         "ltf_entry_timeframe": "1m",
-
         "fast_monitoring_interval": 5,
         "min_profit_for_reverse_pct": 0.225,
         "use_partial_profit_taking": true,
@@ -68,24 +67,32 @@
         "monitoring_interval_seconds": 30
     },
     "feature_weights": {
-        "price_to_ema_200_4h": 1.5,
-        "volume_spike_ratio_4h": 1.5,
-        "rsi_14_4h": 1.4,
-        "vpt": 1.3,
-        "price_to_ema_200_1d": 1.2,
-        "rsi_14_1d": 1.1,
-        "volume_spike_ratio_1d": 1.1,
-        "ema_50": 1.1,
-        "volatility_20": 1.1,
-        "AROONOSC_14_1H": 1.2,
-        "rsi_14_15m": 0.5,
-        "price_to_ema_200_30m": 0.6
+    "price_to_ema_200_4h": 1.5,
+    "EMA_200": 1.3,
+    "adx_long_term": 1.2,
+    "price_to_ema_200_ratio": 1.4,
+    "volume_spike_ratio_4h": 1.5,
+    "rsi_14_4h": 1.4,
+    "vpt": 1.3,
+    "price_to_ema_200_1d": 1.2,
+    "rsi_14_1d": 1.1,
+    "volume_spike_ratio_1d": 1.1,
+    "ema_50": 1.1,
+    "volatility_20": 1.1,
+    "AROONOSC_14_1H": 1.2,
+    "rsi_14_15m": 0.5,
+    "price_to_ema_200_30m": 0.6
     },
     "shadow_trading": {
         "enabled": true,
         "use_enhanced_config": true,
         "config_file": "config/enhanced_shadow_trading_config.json"
     },
+    "filters": {
+    "btc_trend_filter": {
+        "enabled": true,
+        "correlation_threshold": 0.85
+    }},
     "stop_and_reverse_strategy": {
         "enabled": true,
         "description": "Профессиональная SAR стратегия с многоуровневой фильтрацией",

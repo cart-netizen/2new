@@ -261,16 +261,30 @@ class AdvancedFeatureEngineer:
             # ++ ДОБАВЛЯЕМ ПРИЗНАКИ ГЛОБАЛЬНОГО ТРЕНДА ++
             try:
                 ema_200 = ta.ema(data['close'], length=200)
-                # Отношение цены к долгосрочной EMA показывает позицию в тренде
-                data['price_to_ema_200_ratio'] = data['close'] / ema_200
+                if ema_200 is not None and not ema_200.isnull().all():
+                    # Отношение цены к долгосрочной EMA показывает позицию в тренде
+                    data['price_to_ema_200_ratio'] = data['close'] / ema_200
+                    # Также сохраняем саму EMA_200 как признак
+                    data['EMA_200'] = ema_200
+                else:
+                    logger.warning("EMA_200 не удалось рассчитать, заполняем единицами")
+                    data['price_to_ema_200_ratio'] = 1.0
+                    data['EMA_200'] = data['close']  # Заполняем текущей ценой
 
                 # Долгосрочный ADX для оценки силы глобального тренда
                 adx_long = ta.adx(data['high'], data['low'], data['close'], length=50)
-                if adx_long is not None:
+                if adx_long is not None and not adx_long.empty and adx_long.shape[1] > 0:
                     data['adx_long_term'] = adx_long.iloc[:, 0]  # Берем значение 'ADX_50'
+                else:
+                    logger.warning("ADX долгосрочный не удалось рассчитать, заполняем нулями")
+                    data['adx_long_term'] = 0.0
 
             except Exception as e:
-                logger.warning(f"Ошибка при расчете признаков глобального тренда: {e}")
+                logger.error(f"Ошибка при расчете признаков глобального тренда: {e}")
+                # Устанавливаем значения по умолчанию в случае ошибки
+                data['price_to_ema_200_ratio'] = 1.0
+                data['EMA_200'] = data['close']
+                data['adx_long_term'] = 0.0
 
 
             # === ОСЦИЛЛЯТОРЫ ===
@@ -1019,30 +1033,45 @@ class AdvancedFeatureEngineer:
                 # Сохраняем имена признаков в том порядке, в котором они были при обучении
                 self.feature_names_in_ = features_df.columns.tolist()
                 features_scaled = pd.DataFrame(scaled_data, columns=self.feature_names_in_, index=features_df.index)
+                logger.info(
+                    f"Скейлер обучен на {len(self.feature_names_in_)} признаках: {self.feature_names_in_[:10]}...")
             else:
                 # Последующие запуски: приводим колонки к эталону
-                current_columns = features_df.columns
+                current_columns = set(features_df.columns)
+                expected_columns = set(self.feature_names_in_)
 
-                # Добавляем недостающие колонки (которые были при обучении, но нет сейчас)
-                missing_cols = set(self.feature_names_in_) - set(current_columns)
-                for col in missing_cols:
-                    features_df[col] = 0 # Заполняем нулем
+                # Находим различия
+                missing_cols = expected_columns - current_columns
+                extra_cols = current_columns - expected_columns
 
-                # Удаляем лишние колонки (которые есть сейчас, но не было при обучении)
-                extra_cols = set(current_columns) - set(self.feature_names_in_)
-                if extra_cols:
-                    features_df = features_df.drop(columns=list(extra_cols))
+                if missing_cols or extra_cols:
+                    logger.warning(f"Обнаружены различия в признаках:")
+                    if missing_cols:
+                        logger.warning(f"  Недостающие: {list(missing_cols)}")
+                        # Добавляем недостающие признаки, заполняя медианными значениями
+                        for col in missing_cols:
+                            # Используем медианное значение из обучающей выборки или 0
+                            features_df[col] = 0.0
 
-                # Гарантируем правильный порядок колонок
-                features_df = features_df[self.feature_names_in_]
+                    if extra_cols:
+                        logger.warning(f"  Лишние: {list(extra_cols)}")
+                        # Удаляем лишние признаки
+                        features_df = features_df.drop(columns=list(extra_cols))
 
-                # Теперь нормализуем, зная, что структура совпадает
+                # Приводим к правильному порядку колонок
+                features_df = features_df.reindex(columns=self.feature_names_in_, fill_value=0.0)
+
+                # Теперь нормализуем
                 scaled_data = self.scaler.transform(features_df)
                 features_scaled = pd.DataFrame(scaled_data, columns=self.feature_names_in_, index=features_df.index)
 
         except Exception as e:
             logger.error(f"Ошибка нормализации: {e}")
-            return None, None
+            logger.error(f"Текущие признаки: {features_df.columns.tolist()}")
+            if hasattr(self, 'feature_names_in_'):
+                logger.error(f"Эталонные признаки: {self.feature_names_in_}")
+            # Возвращаем исходные данные без нормализации в крайнем случае
+            features_scaled = features_df
 
         if labels is None:
             return features_scaled, None

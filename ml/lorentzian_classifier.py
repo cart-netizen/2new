@@ -27,7 +27,7 @@ class LorentzianClassifier(BaseEstimator, ClassifierMixin):
   Использует Lorentzian distance для классификации.
   """
 
-  def __init__(self, k_neighbors=16, max_lookback=240000, feature_weights=None):
+  def __init__(self, k_neighbors=14, max_lookback=120000, feature_weights=None):
     self.k_neighbors = k_neighbors
     self.max_lookback = max_lookback
     self.feature_weights = feature_weights or {}
@@ -92,6 +92,9 @@ class LorentzianClassifier(BaseEstimator, ClassifierMixin):
     # Сохраняем эталонный список и порядок признаков
     self.feature_names_in_ = X.columns.tolist()
     self.n_features_in_ = len(self.feature_names_in_)
+
+    # Логируем эталонные признаки для отладки
+    logger.info(f"Эталонные признаки модели: {self.feature_names_in_}")
 
     # --- ВОТ КЛЮЧЕВОЙ БЛОК ---
     # Создаем массив весов
@@ -400,7 +403,7 @@ if __name__ == '__main__':
   y_test = y_labels[split_idx:]
 
   # Обучаем модель
-  model = LorentzianClassifier(k_neighbors=8)
+  model = LorentzianClassifier(k_neighbors=14)
   model.fit(X_train, y_train)
 
   # Делаем предсказания

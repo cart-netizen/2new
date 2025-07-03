@@ -945,7 +945,7 @@ class PositionManager:
     # --- ИСПРАВЛЕННАЯ ПРОВЕРКА НА БЕЗУБЫТОЧНОСТЬ ---
     # Комиссии: открытие + закрытие
     commission_rate = 0.00075  # Taker fee 0.075%
-    total_commission_rate = commission_rate * 3  # За вход и выход
+    total_commission_rate = commission_rate * 4  # За вход и выход
 
     # Добавляем небольшой буфер для гарантии прибыльности
     min_profit_buffer = 0.001  # 0.1% дополнительно
@@ -1013,7 +1013,7 @@ class PositionManager:
 
     # Расчет комиссий и минимальной прибыли
     commission_rate = 0.00075  # Taker fee
-    min_profit_buffer = (commission_rate * 3) * 1.7  # 3 комиссии с запасом 70%
+    min_profit_buffer = (commission_rate * 3) * 2.5  # 3 комиссии с запасом 70%
 
     # Получаем максимальную/минимальную цену с момента входа
     # Это ключевое отличие Chandelier Exit от обычного ATR stop

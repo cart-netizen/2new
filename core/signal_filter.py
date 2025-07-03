@@ -109,27 +109,33 @@ class SignalFilter:
       # --- КОНЕЦ НОВОГО БЛОКА ---
 
       if self.btc_trend_filter_enabled and signal.symbol != 'BTCUSDT':
-        btc_regime = await self.market_regime_detector.get_market_regime('BTCUSDT')
-        if btc_regime:
-          is_sell_vs_up = signal.side == OrderSide.SELL and btc_regime.regime in [MarketRegime.TREND_UP,
-                                                                                  MarketRegime.STRONG_TREND_UP]
-          is_buy_vs_down = signal.side == OrderSide.BUY and btc_regime.regime in [MarketRegime.TREND_DOWN,
-                                                                                  MarketRegime.STRONG_TREND_DOWN]
+        # Получаем данные BTC для анализа режима
+        btc_data = await self.data_fetcher.get_historical_candles('BTCUSDT', Timeframe.ONE_HOUR, limit=100)
+        if not btc_data.empty:
+          btc_regime = await self.market_regime_detector.detect_regime('BTCUSDT', btc_data)
+          if btc_regime:
+            # Используем signal.signal_type вместо signal.side
+            is_sell_vs_up = signal.signal_type == SignalType.SELL and btc_regime.primary_regime in [
+              MarketRegime.TREND_UP,
+              MarketRegime.STRONG_TREND_UP]
+            is_buy_vs_down = signal.signal_type == SignalType.BUY and btc_regime.primary_regime in [
+              MarketRegime.TREND_DOWN,
+              MarketRegime.STRONG_TREND_DOWN]
 
-          # Проверяем, идет ли сигнал против тренда BTC
-          if is_sell_vs_up or is_buy_vs_down:
-            # Если да, то проверяем корреляцию
-            correlation = await self.correlation_manager.get_correlation(signal.symbol, 'BTCUSDT')
+            # Проверяем, идет ли сигнал против тренда BTC
+            if is_sell_vs_up or is_buy_vs_down:
+              # Если да, то проверяем корреляцию (синхронный метод)
+              correlation = self.correlation_manager.get_correlation_between(signal.symbol, 'BTCUSDT')
 
-            # Отклоняем только если корреляция высокая
-            if correlation is not None and correlation >= self.correlation_threshold:
-              trend_direction = "восходящем" if is_sell_vs_up else "нисходящем"
-              reason = f"Отклонено: сигнал {signal.side.value}, но BTC в {trend_direction} тренде и корреляция высока ({correlation:.2f})"
-              logger.warning(f"ФИЛЬТР BTC: {reason}")
-              return False, reason
-            else:
-              logger.info(
-                f"ФИЛЬТР BTC: Сигнал {signal.symbol} пропущен, т.к. идет против тренда BTC, но корреляция низкая ({correlation if correlation is not None else 'N/A'})")
+              # Отклоняем только если корреляция высокая
+              if correlation is not None and correlation >= self.correlation_threshold:
+                trend_direction = "восходящем" if is_sell_vs_up else "нисходящем"
+                reason = f"Отклонено: сигнал {signal.signal_type.value}, но BTC в {trend_direction} тренде и корреляция высока ({correlation:.2f})"
+                logger.warning(f"ФИЛЬТР BTC: {reason}")
+                return False, reason
+              else:
+                logger.info(
+                  f"ФИЛЬТР BTC: Сигнал {signal.symbol} пропущен, т.к. идет против тренда BTC, но корреляция низкая ({correlation if correlation is not None else 'N/A'})")
 
       # --- 3. Фильтр по волатильности (ATR) ---
       if self.config.get('use_volatility_filter'):

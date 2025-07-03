@@ -160,6 +160,7 @@ class PositionManager:
         htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=100)
         if htf_data.empty:
           continue
+        # add_atr(htf_data)
         current_price = htf_data['close'].iloc[-1]
 
         # 2. Загружаем данные малого таймфрейма (1m) для анализа разворота
@@ -221,6 +222,7 @@ class PositionManager:
               if reverse_success:
                 logger.info(f"✅ Позиция {symbol} успешно развернута")
                 # Обновляем статистику
+
                 if hasattr(self, 'trading_system') and self.trading_system:
                   await self.trading_system.update_strategy_performance(
                     symbol, 'reverse', True
@@ -228,11 +230,11 @@ class PositionManager:
               else:
                 logger.warning(f"Не удалось развернуть позицию {symbol}, выполняем обычное закрытие")
                 # Fallback к обычному закрытию + новый вход
-                await self._execute_standard_exit_and_reentry(symbol, position_data, reverse_signal,
+                await self._execute_standard_exit_and_reentry(symbol, reverse_signal,
                                                               account_balance)
             else:
               # Стандартный путь: закрытие + новый вход
-              await self._execute_standard_exit_and_reentry(symbol, position_data, reverse_signal,
+              await self._execute_standard_exit_and_reentry(symbol, reverse_signal,
                                                             account_balance)
 
         if exit_reason:
@@ -943,7 +945,7 @@ class PositionManager:
     # --- ИСПРАВЛЕННАЯ ПРОВЕРКА НА БЕЗУБЫТОЧНОСТЬ ---
     # Комиссии: открытие + закрытие
     commission_rate = 0.00075  # Taker fee 0.075%
-    total_commission_rate = commission_rate * 2  # За вход и выход
+    total_commission_rate = commission_rate * 3  # За вход и выход
 
     # Добавляем небольшой буфер для гарантии прибыльности
     min_profit_buffer = 0.001  # 0.1% дополнительно
@@ -994,6 +996,11 @@ class PositionManager:
     if 'atr' not in data.columns or data['atr'].isnull().all():
       logger.warning(f"ATR не найден в данных для {position['symbol']}")
       return None
+
+    if 'atr' not in data.columns and len(data) >= 14:
+      atr = ta.atr(data['high'], data['low'], data['close'], length=14)
+      if atr is not None:
+        data['atr'] = atr
 
     side = position.get('side')
     current_price = data['close'].iloc[-1]

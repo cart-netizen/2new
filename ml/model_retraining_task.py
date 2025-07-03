@@ -136,34 +136,34 @@ def train_worker_function(features: pd.DataFrame, labels: pd.Series, model_save_
 
     # --- ИЗМЕНЕНИЕ ЗДЕСЬ: ПЕРЕДАЕМ ВЕСА В МОДЕЛЬ ---
     # Мы вернулись к LorentzianClassifier, как вы и просили
-    def optimize_k_neighbors(features, labels):
-      best_k = 14
-      best_score = 0
-
-      for k in [5, 8, 10, 12, 14, 16, 20]:
-        model = LorentzianClassifier(k_neighbors=k)
-        # Простая кросс-валидация
-        split_idx = int(len(features) * 0.8)
-        X_train, X_val = features[:split_idx], features[split_idx:]
-        y_train, y_val = labels[:split_idx], labels[split_idx:]
-
-        model.fit(X_train, y_train)
-        predictions = model.predict(X_val)
-        if predictions is not None:
-          score = accuracy_score(y_val, predictions)
-
-          if score > best_score:
-            best_score = score
-            best_k = k
-
-      logger.info(f"Оптимальное k={best_k} с точностью {best_score:.3f}")
-      return best_k
+    # def optimize_k_neighbors(features, labels):
+    #   best_k = 14
+    #   best_score = 0
+    #
+    #   for k in [5, 8, 10, 12, 14, 16, 20]:
+    #     model = LorentzianClassifier(k_neighbors=k)
+    #     # Простая кросс-валидация
+    #     split_idx = int(len(features) * 0.8)
+    #     X_train, X_val = features[:split_idx], features[split_idx:]
+    #     y_train, y_val = labels[:split_idx], labels[split_idx:]
+    #
+    #     model.fit(X_train, y_train)
+    #     predictions = model.predict(X_val)
+    #     if predictions is not None:
+    #       score = accuracy_score(y_val, predictions)
+    #
+    #       if score > best_score:
+    #         best_score = score
+    #         best_k = k
+    #
+    #   logger.info(f"Оптимальное k={best_k} с точностью {best_score:.3f}")
+    #   return best_k
 
     # Оптимизируем k_neighbors
-    optimal_k = optimize_k_neighbors(features, labels)
+    # optimal_k = optimize_k_neighbors(features, labels)
 
     new_model = LorentzianClassifier(
-      k_neighbors=optimal_k,
+      k_neighbors=10,
       feature_weights=feature_weights  # <--- ПЕРЕДАЕМ ВЕСА
     )
     new_model.fit(features, labels)

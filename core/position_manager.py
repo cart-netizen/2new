@@ -155,21 +155,69 @@ class PositionManager:
 
     for symbol, position_data in list(self.open_positions.items()):
       try:
-        # --- ИСПРАВЛЕНИЕ: ЗАГРУЖАЕМ ДАННЫЕ ЗАРАНЕЕ ---
-        # 1. Загружаем данные основного таймфрейма (1H) для анализа SL/TP и PSAR
-        htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=100)
+        # Загружаем данные разных таймфреймов для комплексного анализа
+        timeframes_data = {}
+
+        # Основные таймфреймы для анализа
+        analysis_timeframes = {
+          '1m': Timeframe.ONE_MINUTE,
+          '5m': Timeframe.FIVE_MINUTES,
+          '15m': Timeframe.FIFTEEN_MINUTES,
+          '30m': Timeframe.THIRTY_MINUTES,
+          '1h': Timeframe.ONE_HOUR
+        }
+
+        # Загружаем все необходимые данные
+        for tf_name, tf_enum in analysis_timeframes.items():
+          tf_data = await self.data_fetcher.get_historical_candles(
+            symbol, tf_enum, limit=100
+          )
+          if not tf_data.empty:
+            # Добавляем технические индикаторы
+            tf_data['atr'] = ta.atr(tf_data['high'], tf_data['low'], tf_data['close'])
+
+            # PSAR для основных таймфреймов
+            if tf_name in ['1m', '5m', '15m', '1h']:
+              psar_df = ta.psar(tf_data['high'], tf_data['low'], tf_data['close'])
+              if psar_df is not None:
+                psar_col = next(
+                  (col for col in psar_df.columns if 'PSAR' in col and 'PSARl' not in col and 'PSARs' not in col),
+                  None
+                )
+                if psar_col:
+                  tf_data['psar'] = psar_df[psar_col]
+
+            # Aroon для 5-минутного таймфрейма
+            if tf_name == '5m':
+              aroon = ta.aroon(tf_data['high'], tf_data['low'])
+              if aroon is not None and not aroon.empty:
+                tf_data['aroon_up'] = aroon.iloc[:, 0]
+                tf_data['aroon_down'] = aroon.iloc[:, 1]
+                tf_data['aroon_osc'] = tf_data['aroon_up'] - tf_data['aroon_down']
+
+            timeframes_data[tf_name] = tf_data
+
+        # Используем 1h как основной таймфрейм для обратной совместимости
+        htf_data = timeframes_data.get('1h', pd.DataFrame())
         if htf_data.empty:
           continue
-        # add_atr(htf_data)
-        current_price = htf_data['close'].iloc[-1]
 
-        # 2. Загружаем данные малого таймфрейма (1m) для анализа разворота
+        current_price = htf_data['close'].iloc[-1]
+        # # --- ИСПРАВЛЕНИЕ: ЗАГРУЖАЕМ ДАННЫЕ ЗАРАНЕЕ ---
+        # # 1. Загружаем данные основного таймфрейма (1H) для анализа SL/TP и PSAR
+        # htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=100)
+        # if htf_data.empty:
+        #   continue
+        # # add_atr(htf_data)
+        # current_price = htf_data['close'].iloc[-1]
+        #
+        # # 2. Загружаем данные малого таймфрейма (1m) для анализа разворота
         strategy_settings = self.config.get('strategy_settings', {})
         ltf_str = strategy_settings.get('ltf_entry_timeframe', '15m')
         timeframe_map = {"1m": Timeframe.ONE_MINUTE, "5m": Timeframe.FIVE_MINUTES, "15m": Timeframe.FIFTEEN_MINUTES}
         ltf_timeframe = timeframe_map.get(ltf_str, Timeframe.ONE_MINUTE)
         ltf_data = await self.data_fetcher.get_historical_candles(symbol, ltf_timeframe, limit=100)
-        # --- КОНЕЦ БЛОКА ЗАГРУЗКИ ---
+        # # --- КОНЕЦ БЛОКА ЗАГРУЗКИ ---
 
         # --- ПРИОРИТЕТ 1: ЖЕСТКИЙ SL/TP ---
         exit_reason = self._check_sl_tp(position_data, current_price)
@@ -178,28 +226,59 @@ class PositionManager:
           await self.trade_executor.close_position(symbol=symbol)
           continue
 
+        # --- ПРОВЕРКА STOP AND REVERSE ---
+        if not exit_reason and self.sar_strategy and strategy_settings.get('use_sar_reversal', True):
+          # Проверяем сигнал от SAR стратегии
+          sar_signal = await self.sar_strategy.check_exit_conditions(
+            symbol, position_data, htf_data
+          )
+
+          if sar_signal and sar_signal.is_reversal:
+            # Проверяем направление сигнала
+            current_side = position_data.get('side')
+            new_direction = 'BUY' if sar_signal.signal_type == SignalType.BUY else 'SELL'
+
+            # Если сигнал в том же направлении - пропускаем
+            if current_side == new_direction:
+              logger.debug(f"SAR сигнал для {symbol} в том же направлении, пропускаем")
+            else:
+              # Проверяем качество сигнала для разворота
+              if sar_signal.confidence >= 0.7:
+                logger.info(f"🔄 SAR разворот для {symbol}: {current_side} -> {new_direction}")
+
+                # Выполняем разворот позиции
+                reversal_success = await self.trade_executor.reverse_position(
+                  symbol=symbol,
+                  current_position=position_data,
+                  new_signal=sar_signal
+                )
+
+                if reversal_success:
+                  logger.info(f"✅ Разворот позиции {symbol} выполнен успешно")
+                  continue
+                else:
+                  # Если разворот не удался, закрываем позицию
+                  exit_reason = f"SAR сигнал на разворот (не удался автоматический разворот)"
+
         # --- ПРИОРИТЕТ 2: ТРЕЙЛИНГ-СТОП ПО ATR (на HTF)---
         if not exit_reason:
-          # Убедимся, что ATR рассчитан для htf_data
-          if 'atr' not in htf_data.columns:
-            htf_data.ta.atr(append=True)
-          exit_reason = self._check_atr_trailing_stop(position_data, htf_data)
+          exit_reason = self._check_atr_trailing_stop(
+            position_data, htf_data, timeframes_data
+          )
+          if exit_reason:
+            logger.info(f"ВЫХОД для {symbol}: {exit_reason}")
+            await self.trade_executor.close_position(symbol=symbol)
+            continue
 
         # --- ПРИОРИТЕТ 3: ТРЕЙЛИНГ-СТОП ПО PSAR ---
         if not exit_reason and strategy_settings.get('use_psar_exit', True):
-          # Важно: для PSAR используем данные ОСНОВНОГО таймфрейма (1H)
-          # Рассчитываем PSAR для htf_data
-          psar_df = ta.psar(htf_data['high'], htf_data['low'], htf_data['close'])
-          if psar_df is not None:
-            psar_col = next(
-              (col for col in psar_df.columns if 'PSAR' in col and 'PSARl' not in col and 'PSARs' not in col), None)
-            if psar_col:
-              htf_data['psar'] = psar_df[psar_col]
-              exit_reason = self._check_psar_exit(position_data, htf_data)
-              if exit_reason:
-                logger.info(f"ВЫХОД для {symbol}: Сработал трейлинг-стоп. Причина: {exit_reason}")
-                await self.trade_executor.close_position(symbol=symbol)
-                continue
+          exit_reason = self._check_psar_exit(
+            position_data, htf_data, timeframes_data
+          )
+          if exit_reason:
+            logger.info(f"ВЫХОД для {symbol}: {exit_reason}")
+            await self.trade_executor.close_position(symbol=symbol)
+            continue
 
         # --- ПРИОРИТЕТ 4: STOP AND REVERSE ---
         if not exit_reason:
@@ -916,7 +995,84 @@ class PositionManager:
     else:
       logger.error(f"Попытка добавить в кэш невалидную сделку: {trade}")
 
-  def _check_psar_exit(self, position: Dict, data: pd.DataFrame) -> Optional[str]:
+  def _check_psar_exit(self, position: Dict, data: pd.DataFrame,
+                       timeframes_data: Dict[str, pd.DataFrame] = None) -> Optional[str]:
+    """
+    Проверка выхода по PSAR с мультитаймфреймовым анализом и Aroon подтверждением
+    """
+    if 'psar' not in data.columns or data['psar'].isnull().all():
+      return None
+
+    side = position.get('side')
+    current_price = data['close'].iloc[-1]
+    open_price = float(position.get('open_price', 0))
+
+    if open_price == 0:
+      return None
+
+    # Базовая проверка прибыльности
+    commission_rate = 0.00075
+    total_commission_rate = commission_rate * 4
+    min_profit_buffer = 0.001
+    total_required_move = total_commission_rate + min_profit_buffer
+
+    # Мультитаймфреймовый анализ PSAR
+    if timeframes_data:
+      psar_confirmations = 0
+      checked_psar_timeframes = 0
+      aroon_confirmation = False
+
+      # Проверяем PSAR на разных таймфреймах
+      for tf_name in ['1m', '5m', '15m', '1h']:
+        if tf_name not in timeframes_data:
+          continue
+
+        tf_data = timeframes_data[tf_name]
+        if 'psar' not in tf_data.columns or tf_data['psar'].isnull().all():
+          continue
+
+        checked_psar_timeframes += 1
+        tf_price = tf_data['close'].iloc[-1]
+        tf_psar = tf_data['psar'].iloc[-1]
+
+        # Проверяем сигнал PSAR
+        if side == 'BUY' and tf_price < tf_psar:
+          psar_confirmations += 1
+        elif side == 'SELL' and tf_price > tf_psar:
+          psar_confirmations += 1
+
+        # Проверяем Aroon на 5-минутном таймфрейме
+        if tf_name == '5m' and 'aroon_osc' in tf_data.columns:
+          aroon_osc = tf_data['aroon_osc'].iloc[-1]
+
+          # Для выхода из лонга Aroon должен быть отрицательным
+          if side == 'BUY' and aroon_osc < -20:
+            aroon_confirmation = True
+          # Для выхода из шорта Aroon должен быть положительным
+          elif side == 'SELL' and aroon_osc > 20:
+            aroon_confirmation = True
+
+      # Проверяем условия выхода
+      if checked_psar_timeframes >= 2 and psar_confirmations >= 2 and aroon_confirmation:
+        # Проверяем прибыльность
+        if side == 'BUY':
+          actual_profit_pct = ((current_price - open_price) / open_price)
+          if actual_profit_pct > total_required_move:
+            net_profit_pct = (actual_profit_pct - total_commission_rate) * 100
+            return (f"Мультитаймфреймовый PSAR выход с Aroon подтверждением "
+                    f"({psar_confirmations}/{checked_psar_timeframes} PSAR, Aroon OK, прибыль: {net_profit_pct:.3f}%)")
+
+        elif side == 'SELL':
+          actual_profit_pct = ((open_price - current_price) / open_price)
+          if actual_profit_pct > total_required_move:
+            net_profit_pct = (actual_profit_pct - total_commission_rate) * 100
+            return (f"Мультитаймфреймовый PSAR выход с Aroon подтверждением "
+                    f"({psar_confirmations}/{checked_psar_timeframes} PSAR, Aroon OK, прибыль: {net_profit_pct:.3f}%)")
+
+    # Fallback на стандартную проверку если мультитаймфреймовый анализ не сработал
+    return self._check_psar_exit_single_tf(position, data)
+
+  def _check_psar_exit_single_tf(self, position: Dict, data: pd.DataFrame) -> Optional[str]:
     """
     Проверяет, нужно ли выходить из сделки по сигналу Parabolic SAR,
     с ПРАВИЛЬНОЙ проверкой на безубыточность включая ВСЕ комиссии.
@@ -985,7 +1141,84 @@ class PositionManager:
     )
     return None
 
-  def _check_atr_trailing_stop(self, position: Dict, data: pd.DataFrame) -> Optional[str]:
+  def _check_atr_trailing_stop(self, position: Dict, data: pd.DataFrame,
+                               timeframes_data: Dict[str, pd.DataFrame] = None) -> Optional[str]:
+    """
+    Улучшенная версия трейлинг-стопа на основе ATR с мультитаймфреймовым анализом
+    """
+    strategy_settings = self.config.get('strategy_settings', {})
+    if not strategy_settings.get('use_atr_trailing_stop', True):
+      return None
+
+    # Проверяем ATR на основном таймфрейме (1H)
+    if 'atr' not in data.columns or data['atr'].isnull().all():
+      logger.warning(f"ATR не найден в данных для {position['symbol']}")
+      return None
+
+    side = position.get('side')
+    current_price = data['close'].iloc[-1]
+    open_price = float(position.get('open_price', 0))
+
+    if open_price == 0:
+      return None
+
+    # Параметры для расчета
+    atr_multiplier = strategy_settings.get('atr_ts_multiplier', 2.5)
+    commission_rate = 0.00075
+    min_profit_buffer = (commission_rate * 3) * 2.5
+
+    # Мультитаймфреймовый анализ если доступен
+    if timeframes_data:
+      confirmations = 0
+      checked_timeframes = 0
+
+      # Проверяем ATR trailing на разных таймфреймах
+      for tf_name in ['1m', '5m', '15m', '1h']:
+        if tf_name not in timeframes_data:
+          continue
+
+        tf_data = timeframes_data[tf_name]
+        if 'atr' not in tf_data.columns or tf_data['atr'].isnull().all():
+          continue
+
+        checked_timeframes += 1
+        tf_atr = tf_data['atr'].iloc[-1]
+        tf_price = tf_data['close'].iloc[-1]
+
+        # Chandelier Exit для каждого таймфрейма
+        lookback = min(20, len(tf_data))
+        recent_data = tf_data.tail(lookback)
+
+        if side == 'BUY':
+          highest_high = recent_data['high'].max()
+          chandelier_stop = highest_high - (tf_atr * atr_multiplier)
+          minimum_stop = open_price * (1 + min_profit_buffer)
+          effective_stop = max(chandelier_stop, minimum_stop)
+
+          if tf_price < effective_stop:
+            confirmations += 1
+
+        elif side == 'SELL':
+          lowest_low = recent_data['low'].min()
+          chandelier_stop = lowest_low + (tf_atr * atr_multiplier)
+          minimum_stop = open_price * (1 - min_profit_buffer)
+          effective_stop = min(chandelier_stop, minimum_stop)
+
+          if tf_price > effective_stop:
+            confirmations += 1
+
+      # Требуем подтверждение минимум на 2 из 4 таймфреймов
+      if checked_timeframes >= 2 and confirmations >= 2:
+        profit_pct = ((current_price - open_price) / open_price * 100) if side == 'BUY' else (
+              (open_price - current_price) / open_price * 100)
+        return (f"Мультитаймфреймовый ATR trailing stop сработал "
+                f"({confirmations}/{checked_timeframes} подтверждений, прибыль: {profit_pct:.2f}%)")
+
+    # Если мультитаймфреймовый анализ не дал результата, используем стандартную проверку
+    return self._check_atr_trailing_stop_single_tf(position, data)
+
+
+  def _check_atr_trailing_stop_single_tf(self, position: Dict, data: pd.DataFrame) -> Optional[str]:
     """
     Улучшенная версия трейлинг-стопа на основе ATR с поддержкой Chandelier Exit.
     """

@@ -52,6 +52,15 @@ class AdvancedFeatureEngineer:
         self.scaler = RobustScaler(quantile_range=(25.0, 75.0)) if use_robust_scaling else StandardScaler()
         self.is_fitted = False
 
+    def reset_scaler(self):
+        """Сброс scaler для переобучения с нуля"""
+        self.scaler = StandardScaler()
+        self.is_fitted = False
+        if hasattr(self, 'feature_names_in_'):
+            delattr(self, 'feature_names_in_')
+
+        logger.info("Scaler сброшен для нового обучения")
+
     @staticmethod
     def calculate_mfi_manual(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd.Series,
                              length: int = 14) -> pd.Series:
@@ -293,11 +302,12 @@ class AdvancedFeatureEngineer:
 
                     # Дополнительные признаки на основе MACD
                     macd_values = data['MACD_12_26_9']
-                    if not macd_values.isnull().all():
-                        # Статистики по скользящему окну
+                    if len(macd_values) > 20:  # Изменяем с 0 на 20
+                        # Статистические характеристики MACD
                         data['MACD_12_26_9_rolling_mean_20'] = macd_values.rolling(20, min_periods=5).mean()
                         data['MACD_12_26_9_rolling_max_20'] = macd_values.rolling(20, min_periods=5).max()
                         data['MACD_12_26_9_rolling_min_20'] = macd_values.rolling(20, min_periods=5).min()
+                        data['MACD_12_26_9_rolling_std_20'] = data['MACD_12_26_9'].rolling(20, min_periods=5).std()
 
                         # Позиция в диапазоне
                         rolling_max = data['MACD_12_26_9_rolling_max_20']
@@ -305,11 +315,31 @@ class AdvancedFeatureEngineer:
                         data['MACD_12_26_9_position_in_range_20'] = (
                             (macd_values - rolling_min) / (rolling_max - rolling_min + 1e-9)
                         )
+                    else:
+                        # Создаем признаки с нейтральными значениями для консистентности
+                        data['MACD_12_26_9_rolling_mean_20'] = 0.0
+                        data['MACD_12_26_9_rolling_max_20'] = 0.0
+                        data['MACD_12_26_9_rolling_min_20'] = 0.0
+                        data['MACD_12_26_9_position_in_range_20'] = 0.5
+                        data['MACD_12_26_9_rolling_std_20'] = 0.0
 
                     logger.debug("MACD и дополнительные признаки рассчитаны")
 
             except Exception as e:
                 logger.warning(f"Ошибка при расчете MACD: {e}")
+
+
+                # === НОВЫЕ ПРИЗНАКИ ИЗ RSITrend ===
+            try:
+                # Hull Moving Average
+                hma_fast = ta.hma(data['close'], length=30)
+                if hma_fast is not None and not hma_fast.isnull().all():
+                    data['rsi_of_hma'] = ta.rsi(hma_fast, length=14)
+                else:
+                    data['rsi_of_hma'] = 50.0  # Нейтральное значение
+            except Exception as e:
+                logger.warning(f"Ошибка при расчете rsi_of_hma: {e}")
+                data['rsi_of_hma'] = 50.0
 
             # Bollinger Bands
             try:
@@ -668,62 +698,110 @@ class AdvancedFeatureEngineer:
 
         return result
 
+    # def create_labels(self, data: pd.DataFrame) -> pd.Series:
+    #     """
+    #     Создает метки для классификации с использованием "Метода трех барьеров".
+    #     Это золотой стандарт в финансовом ML.
+    #
+    #     Returns:
+    #         Метки: 0 = SELL (касание стоп-лосса), 1 = HOLD (касание временного барьера), 2 = BUY (касание тейк-профита)
+    #     """
+    #     if 'close' not in data.columns:
+    #         raise ValueError("Колонка 'close' не найдена в данных")
+    #
+    #     logger.info("Создание меток с помощью метода трех барьеров...")
+    #
+    #     # 1. Настройка барьеров
+    #     # Рассчитываем волатильность (через ATR) для установки динамических барьеров
+    #     if 'atr' not in data.columns or data['atr'].isnull().all():
+    #         data['atr'] = ta.atr(data['high'], data['low'], data['close'], length=14)
+    #
+    #     # Заполняем возможные пропуски в ATR
+    #     data['atr'] = data['atr'].ffill().bfill()
+    #
+    #     # Динамические барьеры: тейк-профит будет в 2 раза дальше стоп-лосса
+    #     tp_multiplier = 2.0
+    #     sl_multiplier = 1.0
+    #
+    #     take_profit_level = data['atr'] / data['close'] * tp_multiplier
+    #     stop_loss_level = data['atr'] / data['close'] * sl_multiplier
+    #
+    #     # Вертикальный барьер (максимальное время удержания сделки)
+    #     time_barrier_periods = self.prediction_horizon * 2  # Например, 10 свечей
+    #
+    #     # 2. Основной цикл для вычисления меток
+    #     labels = pd.Series(1, index=data.index)  # По умолчанию 1 (HOLD)
+    #
+    #     for i in range(len(data) - time_barrier_periods):
+    #         entry_price = data['close'].iloc[i]
+    #
+    #         # Итерируемся по будущим свечам внутри временного окна
+    #         for j in range(1, time_barrier_periods + 1):
+    #             future_price = data['close'].iloc[i + j]
+    #
+    #             # Проверяем касание верхнего барьера (Take Profit)
+    #             if (future_price - entry_price) / entry_price >= take_profit_level.iloc[i]:
+    #                 labels.iloc[i] = 2  # BUY
+    #                 break  # Выходим из внутреннего цикла, барьер найден
+    #
+    #             # Проверяем касание нижнего барьера (Stop Loss)
+    #             elif (entry_price - future_price) / entry_price >= stop_loss_level.iloc[i]:
+    #                 labels.iloc[i] = 0  # SELL
+    #                 break  # Выходим из внутреннего цикла, барьер найден
+    #
+    #         # Если ни один из боковых барьеров не был коснут, метка остается 1 (HOLD)
+    #
+    #     logger.info(f"Распределение меток (Triple Barrier): {labels.value_counts().to_dict()}")
+    #     return labels
     def create_labels(self, data: pd.DataFrame) -> pd.Series:
         """
-        Создает метки для классификации с использованием "Метода трех барьеров".
-        Это золотой стандарт в финансовом ML.
-
-        Returns:
-            Метки: 0 = SELL (касание стоп-лосса), 1 = HOLD (касание временного барьера), 2 = BUY (касание тейк-профита)
+        Улучшенное создание меток с более агрессивными порогами
         """
         if 'close' not in data.columns:
             raise ValueError("Колонка 'close' не найдена в данных")
 
-        logger.info("Создание меток с помощью метода трех барьеров...")
+        logger.info("Создание меток с улучшенными параметрами...")
 
-        # 1. Настройка барьеров
-        # Рассчитываем волатильность (через ATR) для установки динамических барьеров
-        if 'atr' not in data.columns or data['atr'].isnull().all():
+        # Используем более короткий горизонт для лучшей предсказуемости
+        prediction_horizon = 5  # вместо 10
+
+        # Рассчитываем будущую доходность
+        future_returns = data['close'].shift(-prediction_horizon) / data['close'] - 1
+
+        # Используем ATR для адаптивных порогов
+        if 'atr' not in data.columns:
             data['atr'] = ta.atr(data['high'], data['low'], data['close'], length=14)
 
-        # Заполняем возможные пропуски в ATR
-        data['atr'] = data['atr'].ffill().bfill()
+        # Нормализованный ATR
+        atr_pct = data['atr'] / data['close']
 
-        # Динамические барьеры: тейк-профит будет в 2 раза дальше стоп-лосса
-        tp_multiplier = 2.0
-        sl_multiplier = 1.0
+        # Адаптивные пороги на основе волатильности
+        # Делаем пороги более агрессивными для лучшего баланса классов
+        buy_threshold = atr_pct * 0.5  # Снижено с 2.0
+        sell_threshold = -atr_pct * 0.5  # Снижено с 1.0
 
-        take_profit_level = data['atr'] / data['close'] * tp_multiplier
-        stop_loss_level = data['atr'] / data['close'] * sl_multiplier
+        # Создаем метки
+        labels = pd.Series(1, index=data.index)  # По умолчанию HOLD
 
-        # Вертикальный барьер (максимальное время удержания сделки)
-        time_barrier_periods = self.prediction_horizon * 2  # Например, 10 свечей
+        # Более агрессивная классификация
+        labels[future_returns > buy_threshold] = 2  # BUY
+        labels[future_returns < sell_threshold] = 0  # SELL
 
-        # 2. Основной цикл для вычисления меток
-        labels = pd.Series(1, index=data.index)  # По умолчанию 1 (HOLD)
+        # Дополнительная балансировка через квантили
+        if labels.value_counts().min() / len(labels) < 0.15:
+            # Используем квантили для лучшего баланса
+            upper_quantile = future_returns.quantile(0.7)
+            lower_quantile = future_returns.quantile(0.3)
 
-        for i in range(len(data) - time_barrier_periods):
-            entry_price = data['close'].iloc[i]
+            labels = pd.Series(1, index=data.index)
+            labels[future_returns >= upper_quantile] = 2
+            labels[future_returns <= lower_quantile] = 0
 
-            # Итерируемся по будущим свечам внутри временного окна
-            for j in range(1, time_barrier_periods + 1):
-                future_price = data['close'].iloc[i + j]
+        class_distribution = labels.value_counts()
+        logger.info(f"Распределение меток: {class_distribution.to_dict()}")
+        logger.info(f"Баланс классов: {(class_distribution / len(labels) * 100).round(1).to_dict()}%")
 
-                # Проверяем касание верхнего барьера (Take Profit)
-                if (future_price - entry_price) / entry_price >= take_profit_level.iloc[i]:
-                    labels.iloc[i] = 2  # BUY
-                    break  # Выходим из внутреннего цикла, барьер найден
-
-                # Проверяем касание нижнего барьера (Stop Loss)
-                elif (entry_price - future_price) / entry_price >= stop_loss_level.iloc[i]:
-                    labels.iloc[i] = 0  # SELL
-                    break  # Выходим из внутреннего цикла, барьер найден
-
-            # Если ни один из боковых барьеров не был коснут, метка остается 1 (HOLD)
-
-        logger.info(f"Распределение меток (Triple Barrier): {labels.value_counts().to_dict()}")
         return labels
-
     # def create_labels(self, data: pd.DataFrame) -> pd.Series:
     #     """
     #     Создание меток для классификации с улучшенной балансировкой
@@ -949,17 +1027,52 @@ class AdvancedFeatureEngineer:
             logger.info("Нормализация признаков...")
             try:
                 if not self.is_fitted:
+                    # При первом обучении запоминаем имена признаков
+                    self.feature_names_in_ = features_aligned.columns.tolist()
                     features_scaled = pd.DataFrame(
                         self.scaler.fit_transform(features_aligned),
                         columns=features_aligned.columns,
-                        index=features_aligned.index  # <--- Важно: сохраняем индекс
+                        index=features_aligned.index
                     )
                     self.is_fitted = True
+                    logger.info(f"Scaler обучен на {len(self.feature_names_in_)} признаках")
                 else:
+                    # При последующих вызовах приводим признаки к эталонному набору
+                    current_columns = set(features_aligned.columns)
+                    expected_columns = set(self.feature_names_in_)
+
+                    # Находим различия
+                    missing_cols = expected_columns - current_columns
+                    extra_cols = current_columns - expected_columns
+
+                    if missing_cols or extra_cols:
+                        logger.warning(f"Обнаружены различия в признаках:")
+                        if missing_cols:
+                            logger.warning(f"  Недостающие: {list(missing_cols)}")
+                            # Добавляем недостающие признаки с нейтральными значениями
+                            for col in missing_cols:
+                                if 'EMA_200' in col or 'ema' in col.lower():
+                                    features_aligned[col] = features_aligned.get('close', 0.0)
+                                elif 'ratio' in col:
+                                    features_aligned[col] = 1.0
+                                elif 'rsi' in col.lower():
+                                    features_aligned[col] = 50.0
+                                elif 'adx' in col.lower():
+                                    features_aligned[col] = 20.0
+                                else:
+                                    features_aligned[col] = 0.0
+
+                        if extra_cols:
+                            logger.warning(f"  Лишние: {list(extra_cols)}")
+
+                    # Приводим к правильному порядку колонок
+                    features_aligned = features_aligned.reindex(columns=self.feature_names_in_, fill_value=0.0)
+
+                    # Теперь нормализуем
                     features_scaled = pd.DataFrame(
-                        self.scaler.transform(features_df),
-                        columns=features_df.columns,
-                        index=features_df.index
+                        self.scaler.transform(features_aligned),
+                        columns=self.feature_names_in_,
+                        index=features_aligned.index
                     )
             except Exception as e:
                 logger.error(f"Ошибка при нормализации признаков: {e}")

@@ -27,7 +27,7 @@ class LorentzianClassifier(BaseEstimator, ClassifierMixin):
   Использует Lorentzian distance для классификации.
   """
 
-  def __init__(self, k_neighbors=14, max_lookback=120000, feature_weights=None):
+  def __init__(self, k_neighbors=8, max_lookback=120000, feature_weights=None):
     self.k_neighbors = k_neighbors
     self.max_lookback = max_lookback
     self.feature_weights = feature_weights or {}
@@ -105,6 +105,18 @@ class LorentzianClassifier(BaseEstimator, ClassifierMixin):
           # Применяем вес из конфига
           self.weights_[i] = feature_weights[feature]
 
+    self.y_train_ = y.values
+
+    # Вычисляем веса классов для балансировки
+    unique_classes, counts = np.unique(self.y_train_, return_counts=True)
+    total_samples = len(self.y_train_)
+    self.class_weights_ = {}
+
+    for cls, count in zip(unique_classes, counts):
+      self.class_weights_[cls] = total_samples / (len(unique_classes) * count)
+
+    logger.info(f"Распределение классов: {dict(zip(unique_classes, counts))}")
+    logger.info(f"Веса классов для балансировки: {self.class_weights_}")
 
 
     # self.feature_names_in_ = X.columns.tolist()
@@ -197,25 +209,64 @@ class LorentzianClassifier(BaseEstimator, ClassifierMixin):
     logger.info(f"Подготовлено {len(available_features)} признаков: {available_features}")
     return features_df.values, available_features
 
+  # def predict(self, X: pd.DataFrame) -> Optional[np.ndarray]:
+  #   if not self.is_fitted:
+  #     logger.error("Модель не обучена. Вызовите fit() перед predict()")
+  #     return None
+  #
+  #   # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+  #   X_aligned = self._align_features(X)
+  #   X_values = X_aligned.values
+  #
+  #   predictions = []
+  #   for x_new in X_values:
+  #     distances = [(self._lorentzian_distance(x_new, x_train), self.y_train_[i]) for i, x_train in
+  #                  enumerate(self.X_train_)]
+  #     distances.sort(key=lambda x: x[0])
+  #     k_nearest = distances[:self.k_neighbors]
+  #
+  #     class_votes = {cls: 0 for cls in np.unique(self.y_train_)}
+  #     for dist, label in k_nearest:
+  #       weight = 1.0 / (1.0 + dist)
+  #       class_votes[label] += weight
+  #
+  #     if class_votes:
+  #       predicted_class = max(class_votes, key=class_votes.get)
+  #     else:
+  #       predicted_class = 1  # HOLD по умолчанию
+  #     predictions.append(predicted_class)
+  #
+  #   return np.array(predictions)
   def predict(self, X: pd.DataFrame) -> Optional[np.ndarray]:
     if not self.is_fitted:
       logger.error("Модель не обучена. Вызовите fit() перед predict()")
       return None
 
-    # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ---
     X_aligned = self._align_features(X)
     X_values = X_aligned.values
 
+    # Вычисляем веса классов для балансировки (если еще не вычислены)
+    if not hasattr(self, 'class_weights_'):
+      unique_classes, counts = np.unique(self.y_train_, return_counts=True)
+      total_samples = len(self.y_train_)
+      self.class_weights_ = {}
+      for cls, count in zip(unique_classes, counts):
+        self.class_weights_[cls] = total_samples / (len(unique_classes) * count)
+      logger.info(f"Веса классов для балансировки: {self.class_weights_}")
+
     predictions = []
     for x_new in X_values:
-      distances = [(self._lorentzian_distance(x_new, x_train), self.y_train_[i]) for i, x_train in
-                   enumerate(self.X_train_)]
+      distances = [(self._lorentzian_distance(x_new, x_train), self.y_train_[i])
+                   for i, x_train in enumerate(self.X_train_)]
       distances.sort(key=lambda x: x[0])
       k_nearest = distances[:self.k_neighbors]
 
       class_votes = {cls: 0 for cls in np.unique(self.y_train_)}
       for dist, label in k_nearest:
         weight = 1.0 / (1.0 + dist)
+        # Применяем веса классов для балансировки
+        if hasattr(self, 'class_weights_'):
+          weight *= self.class_weights_.get(label, 1.0)
         class_votes[label] += weight
 
       if class_votes:
@@ -403,7 +454,7 @@ if __name__ == '__main__':
   y_test = y_labels[split_idx:]
 
   # Обучаем модель
-  model = LorentzianClassifier(k_neighbors=14)
+  model = LorentzianClassifier(k_neighbors=8)
   model.fit(X_train, y_train)
 
   # Делаем предсказания

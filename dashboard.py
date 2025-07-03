@@ -3144,7 +3144,7 @@ with st.expander("🎯 Stop-and-Reverse Strategy Settings", expanded=False):
         chop_threshold = st.slider(
           "Choppiness Index порог",
           min_value=20,
-          max_value=60,
+          max_value=95,
           value=sar_config.get('chop_threshold', 40),
           help="Рынки с CHOP > этого значения будут избегаться"
         )
@@ -3160,7 +3160,7 @@ with st.expander("🎯 Stop-and-Reverse Strategy Settings", expanded=False):
         atr_multiplier = st.slider(
           "ATR множитель волатильности",
           min_value=1.0,
-          max_value=2.0,
+          max_value=3.0,
           value=sar_config.get('atr_multiplier', 1.25),
           step=0.05,
           help="Текущая волатильность должна быть выше среднего в X раз"

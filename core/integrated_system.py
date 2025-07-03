@@ -12,7 +12,7 @@ from core.adaptive_strategy_selector import AdaptiveStrategySelector
 from core.indicators import crossover_series, crossunder_series
 from core.market_regime_detector import MarketRegimeDetector, RegimeCharacteristics, MarketRegime
 from core.signal_processor import SignalProcessor
-from ml.feature_engineering import unified_feature_engineer
+from ml.feature_engineering import unified_feature_engineer, feature_engineer
 from ml.volatility_system import VolatilityPredictor, VolatilityPredictionSystem
 import joblib
 from config.config_manager import ConfigManager
@@ -580,7 +580,7 @@ class IntegratedTradingSystem:
           signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
           if signal and signal.signal_type != SignalType.HOLD:
             # ИСПРАВЛЕНИЕ: Снижен порог уверенности кандидатов с 0.5 до 0.3
-            if signal.confidence >= 0.3:
+            if signal.confidence >= 0.5:
               weight = 1.0
               if hasattr(self, 'adaptive_selector'):
                 weight = self.adaptive_selector.get_strategy_weight(
@@ -3694,6 +3694,9 @@ class IntegratedTradingSystem:
 
           # Запускаем переобучение в фоне
           if self.retraining_manager:
+            if hasattr(feature_engineer, 'reset_scaler'):
+              feature_engineer.reset_scaler()
+              logger.info("Сброшен feature_engineer перед периодическим переобучением")
             asyncio.create_task(
               self.retraining_manager.check_and_retrain_if_needed(
                 self.active_symbols[:10]  # Топ 10 символов

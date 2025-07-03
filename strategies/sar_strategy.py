@@ -101,7 +101,7 @@ class StopAndReverseStrategy(BaseStrategy):
         
         # Защита от быстрых разворотов
         self.commission_rate = 0.00085  # 0.075%
-        self.min_profit_protection = self.commission_rate * 2 * 3  # 3 комиссии
+        self.min_profit_protection = self.commission_rate * 2 * 4  # 3 комиссии
         
         # Shadow system интеграция
         self.use_shadow_system = self.sar_config.get('use_shadow_system', True)
@@ -1388,7 +1388,8 @@ class StopAndReverseStrategy(BaseStrategy):
             # ML модели (если включены)
             if self.use_ml_confirmation:
                 # TODO: Интегрировать с ML моделями
-                ml_boost = 0.0  # await self._get_ml_confirmation_boost(symbol, signal_type)
+                ml_boost = 0.0
+                # await self._get_ml_confirmation_boost(symbol, signal_type)
                 confidence += ml_boost * self.ml_weight
             
             return min(max(confidence, 0.1), 0.95)  # Ограничиваем в разумных пределах

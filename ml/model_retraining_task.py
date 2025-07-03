@@ -136,25 +136,42 @@ def train_worker_function(features: pd.DataFrame, labels: pd.Series, model_save_
 
     # --- ИЗМЕНЕНИЕ ЗДЕСЬ: ПЕРЕДАЕМ ВЕСА В МОДЕЛЬ ---
     # Мы вернулись к LorentzianClassifier, как вы и просили
+    def optimize_k_neighbors(features, labels):
+      best_k = 14
+      best_score = 0
+
+      for k in [5, 8, 10, 12, 14, 16, 20]:
+        model = LorentzianClassifier(k_neighbors=k)
+        # Простая кросс-валидация
+        split_idx = int(len(features) * 0.8)
+        X_train, X_val = features[:split_idx], features[split_idx:]
+        y_train, y_val = labels[:split_idx], labels[split_idx:]
+
+        model.fit(X_train, y_train)
+        predictions = model.predict(X_val)
+        if predictions is not None:
+          score = accuracy_score(y_val, predictions)
+
+          if score > best_score:
+            best_score = score
+            best_k = k
+
+      logger.info(f"Оптимальное k={best_k} с точностью {best_score:.3f}")
+      return best_k
+
+    # Оптимизируем k_neighbors
+    optimal_k = optimize_k_neighbors(features, labels)
+
     new_model = LorentzianClassifier(
-      k_neighbors=14,
+      k_neighbors=optimal_k,
       feature_weights=feature_weights  # <--- ПЕРЕДАЕМ ВЕСА
     )
-
-    new_model.fit(features, labels)
-    # ВАЖНО: Синхронизируем имена признаков между feature_engineer и моделью
-    # Это гарантирует, что оба компонента используют одинаковые имена
-    if hasattr(new_model, 'feature_names_in_'):
-      logger.info(f"Модель уже имеет эталонные признаки: {new_model.feature_names_in_}")
-    else:
-      logger.info(f"Устанавливаем эталонные признаки для модели: {features.columns.tolist()}")
-
     new_model.fit(features, labels)
 
     logger.info("WORKER: Расчет точности на выборке...")
     # Используем iloc[:2000] для гарантированной выборки первых 2000 строк
-    sample_features = features.iloc[:2000]
-    sample_labels = labels.iloc[:2000]  # <--- ИСПРАВЛЕНО
+    sample_features = features.iloc[:12000]
+    sample_labels = labels.iloc[:12000]  # <--- ИСПРАВЛЕНО
 
     predictions = new_model.predict(sample_features)
 
@@ -170,6 +187,14 @@ def train_worker_function(features: pd.DataFrame, labels: pd.Series, model_save_
     logger.info(f"WORKER: Новая модель сохранена в: {model_path_full}")
 
     return True, f"Модель успешно переобучена с точностью {accuracy:.2f}"
+
+    from .feature_engineering import analyze_feature_importance
+
+    importance_df = analyze_feature_importance(features, labels)
+    if not importance_df.empty:
+      top_features = importance_df.head(100)['feature'].tolist()  # Берем топ-100 признаков
+      features = features[top_features]
+      logger.info(f"WORKER: Отобрано {len(top_features)} наиболее важных признаков из исходных {len(features.columns)}")
 
   except Exception as e:
     # Логирование из дочернего процесса может быть проблематичным,
@@ -335,7 +360,7 @@ class ModelRetrainingManager:
 
   async def retrain_model(self, symbols: List[str],
                           timeframe: Timeframe = Timeframe.ONE_HOUR,
-                          limit: int = 1000) -> Tuple[bool, str]:
+                          limit: int = 3000) -> Tuple[bool, str]:
     """
     Основная АСИНХРОННАЯ функция, которая управляет всем процессом переобучения.
     """
@@ -395,7 +420,7 @@ class ModelRetrainingManager:
 
       # --- ЭТАП 3: Обучение и оценка (выполняется в основном процессе) ---
       logger.info("Обучение основной модели...")
-      model = LorentzianClassifier(k_neighbors=14)
+      model = LorentzianClassifier(k_neighbors=8)
       # fit() для k-NN - это быстрая операция, ее можно оставить в основном потоке
       model.fit(combined_features, combined_labels)
 
@@ -952,7 +977,7 @@ class ModelRetrainingManager:
 
   async def schedule_retraining(self, symbols: List[str],
                                   timeframe: Timeframe = Timeframe.ONE_HOUR,
-                                  limit: int = 1000):
+                                  limit: int = 3000):
     """
     Планирует периодическое переобучение модели
 
@@ -996,7 +1021,7 @@ class ModelRetrainingManager:
 
   def start_scheduled_retraining(self, symbols: List[str],
                                    timeframe: Timeframe = Timeframe.ONE_HOUR,
-                                   limit: int = 1000) -> asyncio.Task:
+                                   limit: int = 3000) -> asyncio.Task:
       """
       Запускает планировщик переобучения в фоне
 
@@ -1124,7 +1149,7 @@ class ModelRetrainingManager:
 
   async def check_and_trigger_emergency_retraining(self, symbols: List[str],
                                                      timeframe:Timeframe = Timeframe.ONE_HOUR,
-                                                     limit: int = 1000) -> Tuple[bool, str]:
+                                                     limit: int = 3000) -> Tuple[bool, str]:
       """
       Проверяет и при необходимости запускает экстренное переобучение
 
@@ -1319,11 +1344,11 @@ class ModelRetrainingManager:
     """
     try:
       logger.info("Worker Process: Начало обучения новой модели LorentzianClassifier...")
-      new_model = LorentzianClassifier(k_neighbors=14)
+      new_model = LorentzianClassifier(k_neighbors=8)
       new_model.fit(features, labels)
 
       logger.info("Worker Process: Расчет точности на выборке...")
-      sample_features = features.head(12000)  # Используем небольшую выборку для быстрой оценки
+      sample_features = features.head(2000)  # Используем небольшую выборку для быстрой оценки
       sample_labels = labels.loc[sample_features.index]
       predictions = new_model.predict(sample_features)
 

@@ -1689,6 +1689,13 @@ class EnhancedEnsembleModel:
         self.meta_model = None  # Отключаем мета-модель
 
       self.is_fitted = True
+      self.training_feature_info = {
+        'feature_names': list(X.columns),
+        'feature_count': len(X.columns),
+        'training_timestamp': datetime.now().isoformat(),
+        'data_shape': X.shape
+      }
+      logger.info(f"Сохранена информация о {len(X.columns)} признаках обучения")
       logger.info(f"Обучение завершено успешно. Использовано {len(self.selected_features)} признаков.")
 
       # ======================= ИЗМЕНЕНИЕ 2: ВЫВОД ФИНАЛЬНЫХ МЕТРИК =======================

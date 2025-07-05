@@ -347,138 +347,147 @@ class IntegratedTradingSystem:
 
     return mfi
 
-  async def _monitor_symbol_for_entry(self, symbol: str):
-    """
-    ОБНОВЛЕННАЯ ВЕРСИЯ: Использует MarketRegimeDetector
-    """
-    logger.debug(f"Поиск сигнала для символа: {symbol}")
-
-    try:
-      # 1. Получаем рыночный режим
-      regime_characteristics = await self.get_market_regime(symbol)
-      if not regime_characteristics:
-        logger.warning(f"Не удалось определить режим для {symbol}")
-        return
-
-      # Проверяем необходимость адаптации стратегий
-      await self.check_strategy_adaptation(symbol)
-
-      # 2. Получаем оптимальные параметры для режима
-      regime_params = self.market_regime_detector.get_regime_parameters(symbol)
-
-      # 3. Получаем данные для стратегий
-      htf_data = await self.data_fetcher.get_historical_candles(
-        symbol, Timeframe.ONE_HOUR, limit=300
-      )
-
-      unified_features = await unified_feature_engineer.get_unified_features(
-        symbol, htf_data, self.data_fetcher, include_multiframe=True
-      )
-
-      if htf_data.empty or len(htf_data) < 52:
-        return
-
-      # 4. Проверяем, стоит ли вообще торговать в этом режиме
-      if regime_characteristics.confidence < regime_params.min_signal_quality:
-        logger.info(f"Пропускаем {symbol}: низкая уверенность режима "
-                    f"({regime_characteristics.confidence:.2f} < {regime_params.min_signal_quality})")
-        return
-
-
-
-      # 5. Собираем сигналы от рекомендованных стратегий
-      signals = []
-
-      for strategy_name in regime_params.recommended_strategies:
-        # Проверяем флаги для ML стратегий
-        if strategy_name == "Live_ML_Strategy" and not self.use_base_ml:
-          continue
-
-        # # Проверяем адаптивную активность стратегии
-        # if not self.adaptive_selector.should_activate_strategy(
-        #     strategy_name, regime_characteristics.primary_regime.value
-        # ):
-        #   logger.debug(f"Стратегия {strategy_name} отключена адаптивным селектором")
-        #   continue
-
-        adaptive_active = True  # Принудительная активация
-        if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
-          try:
-            adaptive_active = self.adaptive_selector.should_activate_strategy(
-              strategy_name, regime_characteristics.primary_regime.value
-            )
-            if not adaptive_active:
-              logger.warning(
-                f"🚨 ДИАГНОСТИКА: Стратегия {strategy_name} отключена адаптивным селектором, но принудительно активируем")
-              adaptive_active = True  # Принудительная активация для диагностики
-          except Exception as e:
-            logger.error(f"Ошибка адаптивного селектора для {strategy_name}: {e}")
-            adaptive_active = True  # Активируем при ошибке
-
-        # Логируем статус каждой стратегии
-        logger.info(f"🔍 ДИАГНОСТИКА: Проверяем стратегию {strategy_name} для {symbol}")
-
-        # Пропускаем стратегии из avoided_strategies
-        if strategy_name in regime_params.avoided_strategies:
-          continue
-
-        try:
-          # ДИАГНОСТИКА: Детальное логирование процесса получения сигналов
-          logger.info(f"🔍 ДИАГНОСТИКА: Запрашиваем сигнал от {strategy_name} для {symbol}")
-
-          # Проверяем наличие стратегии в менеджере
-          if not hasattr(self, 'strategy_manager') or not self.strategy_manager:
-            logger.error(f"❌ Strategy manager не инициализирован для {strategy_name}")
-            continue
-
-          if strategy_name not in self.strategy_manager.strategies:
-            logger.error(f"❌ Стратегия {strategy_name} НЕ ЗАРЕГИСТРИРОВАНА в strategy_manager")
-            logger.info(f"📋 Доступные стратегии: {list(self.strategy_manager.strategies.keys())}")
-            continue
-
-          # Получаем сигнал
-          signal = None
-          if "ML" in strategy_name:
-            logger.debug(f"Используем unified_features для {strategy_name}")
-            signal = await self.strategy_manager.get_signal(symbol, unified_features, strategy_name)
-          else:
-            logger.debug(f"Используем htf_data для {strategy_name}")
-            signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
-
-          # Анализируем результат
-          if signal is None:
-            logger.warning(f"⚠️ Стратегия {strategy_name} вернула None для {symbol}")
-            continue
-          elif signal.signal_type == SignalType.HOLD:
-            logger.debug(f"📊 Стратегия {strategy_name} вернула HOLD для {symbol}")
-            continue
-          else:
-            # Есть торговый сигнал!
-            logger.info(
-              f"✅ Стратегия {strategy_name} вернула {signal.signal_type.value} для {symbol} (уверенность: {signal.confidence:.3f})")
-
-            # Применяем адаптивный вес
-            weight = 1.0
-            if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
-              try:
-                weight = self.adaptive_selector.get_strategy_weight(
-                  strategy_name, regime_characteristics.primary_regime.value
-                )
-              except Exception as weight_error:
-                logger.error(f"Ошибка получения веса для {strategy_name}: {weight_error}")
-                weight = 1.0
-
-            # Корректируем уверенность
-            original_confidence = signal.confidence
-            signal.confidence *= weight
-
-            signals.append((strategy_name, signal))
-            signal_logger.info(
-              f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, Уверенность: {original_confidence:.2f} -> {signal.confidence:.2f}, Вес: {weight:.2f}")
-
-        except Exception as e:
-          logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА получения сигнала от {strategy_name} для {symbol}: {e}", exc_info=True)
-          continue
+  # async def _monitor_symbol_for_entry(self, symbol: str):
+  #   """
+  #   ОБНОВЛЕННАЯ ВЕРСИЯ: Использует MarketRegimeDetector
+  #   """
+  #   logger.debug(f"Поиск сигнала для символа: {symbol}")
+  #   if hasattr(self, 'strategy_manager') and self.strategy_manager:
+  #     available_strategies = list(self.strategy_manager.strategies.keys())
+  #     logger.info(f"🔍 ДИАГНОСТИКА для {symbol}: Доступные стратегии: {available_strategies}")
+  #   else:
+  #     logger.error(f"❌ КРИТИЧНО: Strategy manager отсутствует для {symbol}")
+  #     return
+  #
+  #   try:
+  #     # 1. Получаем рыночный режим
+  #     regime_characteristics = await self.get_market_regime(symbol)
+  #     if not regime_characteristics:
+  #       logger.warning(f"Не удалось определить режим для {symbol}")
+  #       return
+  #
+  #     # Проверяем необходимость адаптации стратегий
+  #     await self.check_strategy_adaptation(symbol)
+  #
+  #     # 2. Получаем оптимальные параметры для режима
+  #     regime_params = self.market_regime_detector.get_regime_parameters(symbol)
+  #
+  #     # 3. Получаем данные для стратегий
+  #     htf_data = await self.data_fetcher.get_historical_candles(
+  #       symbol, Timeframe.ONE_HOUR, limit=300
+  #     )
+  #
+  #     unified_features = await unified_feature_engineer.get_unified_features(
+  #       symbol, htf_data, self.data_fetcher, include_multiframe=True
+  #     )
+  #
+  #     if htf_data.empty or len(htf_data) < 52:
+  #       return
+  #
+  #     # 4. Проверяем, стоит ли вообще торговать в этом режиме
+  #     if regime_characteristics.confidence < regime_params.min_signal_quality:
+  #       logger.info(f"Пропускаем {symbol}: низкая уверенность режима "
+  #                   f"({regime_characteristics.confidence:.2f} < {regime_params.min_signal_quality})")
+  #       return
+  #
+  #
+  #
+  #     # 5. Собираем сигналы от рекомендованных стратегий
+  #     signals = []
+  #
+  #     for strategy_name in regime_params.recommended_strategies:
+  #       # Проверяем флаги для ML стратегий
+  #       if strategy_name == "Live_ML_Strategy" and not self.use_base_ml:
+  #         continue
+  #       # ВРЕМЕННАЯ ДИАГНОСТИКА
+  #       logger.info(f"🔍 ПРОВЕРЯЕМ стратегию {strategy_name} для {symbol}")
+  #       logger.info(f"📋 Рекомендованные: {regime_params.recommended_strategies}")
+  #       logger.info(f"📋 Избегаемые: {regime_params.avoided_strategies}")
+  #       # # Проверяем адаптивную активность стратегии
+  #       # if not self.adaptive_selector.should_activate_strategy(
+  #       #     strategy_name, regime_characteristics.primary_regime.value
+  #       # ):
+  #       #   logger.debug(f"Стратегия {strategy_name} отключена адаптивным селектором")
+  #       #   continue
+  #
+  #       adaptive_active = True  # Принудительная активация
+  #       if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
+  #         try:
+  #           adaptive_active = self.adaptive_selector.should_activate_strategy(
+  #             strategy_name, regime_characteristics.primary_regime.value
+  #           )
+  #           if not adaptive_active:
+  #             logger.warning(
+  #               f"🚨 ДИАГНОСТИКА: Стратегия {strategy_name} отключена адаптивным селектором, но принудительно активируем")
+  #             adaptive_active = True  # Принудительная активация для диагностики
+  #         except Exception as e:
+  #           logger.error(f"Ошибка адаптивного селектора для {strategy_name}: {e}")
+  #           adaptive_active = True  # Активируем при ошибке
+  #
+  #       # Логируем статус каждой стратегии
+  #       logger.info(f"🔍 ДИАГНОСТИКА: Проверяем стратегию {strategy_name} для {symbol}")
+  #
+  #       # Пропускаем стратегии из avoided_strategies
+  #       if strategy_name in regime_params.avoided_strategies:
+  #         continue
+  #
+  #       try:
+  #         # ДИАГНОСТИКА: Детальное логирование процесса получения сигналов
+  #         logger.info(f"🔍 ДИАГНОСТИКА: Запрашиваем сигнал от {strategy_name} для {symbol}")
+  #
+  #         # Проверяем наличие стратегии в менеджере
+  #         if not hasattr(self, 'strategy_manager') or not self.strategy_manager:
+  #           logger.error(f"❌ Strategy manager не инициализирован для {strategy_name}")
+  #           continue
+  #
+  #         if strategy_name not in self.strategy_manager.strategies:
+  #           logger.error(f"❌ Стратегия {strategy_name} НЕ ЗАРЕГИСТРИРОВАНА в strategy_manager")
+  #           logger.info(f"📋 Доступные стратегии: {list(self.strategy_manager.strategies.keys())}")
+  #           continue
+  #
+  #         # Получаем сигнал
+  #         signal = None
+  #         if "ML" in strategy_name:
+  #           logger.debug(f"Используем unified_features для {strategy_name}")
+  #           signal = await self.strategy_manager.get_signal(symbol, unified_features, strategy_name)
+  #         else:
+  #           logger.debug(f"Используем htf_data для {strategy_name}")
+  #           signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
+  #
+  #         # Анализируем результат
+  #         if signal is None:
+  #           logger.warning(f"⚠️ Стратегия {strategy_name} вернула None для {symbol}")
+  #           continue
+  #         elif signal.signal_type == SignalType.HOLD:
+  #           logger.debug(f"📊 Стратегия {strategy_name} вернула HOLD для {symbol}")
+  #           continue
+  #         else:
+  #           # Есть торговый сигнал!
+  #           logger.info(
+  #             f"✅ Стратегия {strategy_name} вернула {signal.signal_type.value} для {symbol} (уверенность: {signal.confidence:.3f})")
+  #
+  #           # Применяем адаптивный вес
+  #           weight = 1.0
+  #           if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
+  #             try:
+  #               weight = self.adaptive_selector.get_strategy_weight(
+  #                 strategy_name, regime_characteristics.primary_regime.value
+  #               )
+  #             except Exception as weight_error:
+  #               logger.error(f"Ошибка получения веса для {strategy_name}: {weight_error}")
+  #               weight = 1.0
+  #
+  #           # Корректируем уверенность
+  #           original_confidence = signal.confidence
+  #           signal.confidence *= weight
+  #
+  #           signals.append((strategy_name, signal))
+  #           signal_logger.info(
+  #             f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, Уверенность: {original_confidence:.2f} -> {signal.confidence:.2f}, Вес: {weight:.2f}")
+  #
+  #       except Exception as e:
+  #         logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА получения сигнала от {strategy_name} для {symbol}: {e}", exc_info=True)
+  #         continue
 
         # try:
         #   # Используем унифицированные признаки для ML стратегий
@@ -501,165 +510,165 @@ class IntegratedTradingSystem:
         #   logger.error(f"Ошибка получения сигнала от {strategy_name}: {e}")
 
       # 6. Используем Enhanced ML для финального решения (если включена)
-      final_signal = None
-
-      if self.use_enhanced_ml and self.enhanced_ml_model and signals:
-        try:
-          # Подготавливаем данные для enhanced модели
-          enhanced_prediction = self.enhanced_ml_model.predict_proba(htf_data)
-
-          if enhanced_prediction:
-            proba, ml_prediction = enhanced_prediction
-
-            # Фильтруем сигналы на основе enhanced модели
-            for strategy_name, signal in signals:
-              if ml_prediction.signal_type == signal.signal_type:
-                final_signal = signal
-                # Корректируем уверенность
-                final_signal.confidence = min(0.95,
-                                              (signal.confidence + ml_prediction.probability) / 2)
-                logger.info(f"✅ Enhanced ML подтвердила сигнал {strategy_name} для {symbol}")
-                break
-        except Exception as e:
-          logger.error(f"Ошибка Enhanced ML для {symbol}: {e}")
-
-      # 7. Если Enhanced ML не используется или не дала результат
-      if not final_signal and signals:
-        logger.info(f"Анализ {len(signals)} кандидатов сигналов для {symbol}")
-
-        # Группируем сигналы по типу (BUY/SELL)
-        buy_signals = [(name, sig) for name, sig in signals if sig.signal_type == SignalType.BUY]
-        sell_signals = [(name, sig) for name, sig in signals if sig.signal_type == SignalType.SELL]
-
-        signal_logger.info(f"КАНДИДАТЫ для {symbol}: {len(buy_signals)} BUY, {len(sell_signals)} SELL")
-
-        # Анализируем консенсус
-        final_signal = None
-
-        if len(buy_signals) > len(sell_signals) and buy_signals:
-          # Консенсус на покупку
-          if len(buy_signals) >= 2:  # Множественное подтверждение
-            # Взвешенное усреднение уверенности
-            total_weight = sum(sig.confidence for _, sig in buy_signals)
-            weighted_confidence = total_weight / len(buy_signals)
-
-            # Выбираем сигнал с лучшей уверенностью как базу
-            best_buy = max(buy_signals, key=lambda x: x[1].confidence)
-            final_signal = best_buy[1]
-
-            # Повышаем уверенность за счет консенсуса (максимум до 0.95)
-            consensus_boost = min(0.2, (len(buy_signals) - 1) * 0.05)
-            final_signal.confidence = min(0.95, weighted_confidence + consensus_boost)
-
-            # Обновляем метаданные
-            confirming_strategies = [name for name, _ in buy_signals]
-            final_signal.metadata = final_signal.metadata or {}
-            final_signal.metadata.update({
-              'consensus_type': 'multiple_buy',
-              'confirming_strategies': confirming_strategies,
-              'original_confidence': best_buy[1].confidence,
-              'consensus_boost': consensus_boost,
-              'weighted_confidence': weighted_confidence
-            })
-
-            signal_logger.info(
-              f"КОНСЕНСУС BUY для {symbol}: {confirming_strategies}, итоговая уверенность: {final_signal.confidence:.3f}")
-
-          else:
-            # Одиночный BUY сигнал
-            final_signal = buy_signals[0][1]
-            signal_logger.info(
-              f"ОДИНОЧНЫЙ BUY для {symbol} от {buy_signals[0][0]}, уверенность: {final_signal.confidence:.3f}")
-
-        elif len(sell_signals) > len(buy_signals) and sell_signals:
-          # Консенсус на продажу (аналогичная логика)
-          if len(sell_signals) >= 2:
-            total_weight = sum(sig.confidence for _, sig in sell_signals)
-            weighted_confidence = total_weight / len(sell_signals)
-
-            best_sell = max(sell_signals, key=lambda x: x[1].confidence)
-            final_signal = best_sell[1]
-
-            consensus_boost = min(0.2, (len(sell_signals) - 1) * 0.05)
-            final_signal.confidence = min(0.95, weighted_confidence + consensus_boost)
-
-            confirming_strategies = [name for name, _ in sell_signals]
-            final_signal.metadata = final_signal.metadata or {}
-            final_signal.metadata.update({
-              'consensus_type': 'multiple_sell',
-              'confirming_strategies': confirming_strategies,
-              'original_confidence': best_sell[1].confidence,
-              'consensus_boost': consensus_boost,
-              'weighted_confidence': weighted_confidence
-            })
-
-            signal_logger.info(
-              f"КОНСЕНСУС SELL для {symbol}: {confirming_strategies}, итоговая уверенность: {final_signal.confidence:.3f}")
-          else:
-            final_signal = sell_signals[0][1]
-            signal_logger.info(
-              f"ОДИНОЧНЫЙ SELL для {symbol} от {sell_signals[0][0]}, уверенность: {final_signal.confidence:.3f}")
-
-        elif len(buy_signals) == len(sell_signals) and buy_signals and sell_signals:
-          # Конфликт сигналов - выбираем по наивысшей уверенности
-          all_signals = buy_signals + sell_signals
-          best_signal = max(all_signals, key=lambda x: x[1].confidence)
-
-          # Снижаем уверенность из-за конфликта
-          final_signal = best_signal[1]
-          final_signal.confidence *= 0.8  # Штраф за конфликт
-
-          final_signal.metadata = final_signal.metadata or {}
-          final_signal.metadata.update({
-            'consensus_type': 'conflict_resolved',
-            'conflicting_strategies': [name for name, _ in all_signals],
-            'conflict_penalty': 0.2
-          })
-
-          signal_logger.warning(
-            f"КОНФЛИКТ СИГНАЛОВ для {symbol}: выбран {best_signal[0]} с пониженной уверенностью {final_signal.confidence:.3f}")
-
-        # Финальная проверка минимального порога
-        if final_signal and final_signal.confidence < regime_params.min_signal_quality:
-          signal_logger.warning(
-            f"Финальный сигнал отклонен: уверенность {final_signal.confidence:.3f} < {regime_params.min_signal_quality}")
-          final_signal = None
-
-        if final_signal:
-          logger.info(
-            f"✅ Финальный выбор для {symbol}: {final_signal.strategy_name} {final_signal.signal_type.value}, уверенность: {final_signal.confidence:.3f}")
-        else:
-          logger.info(f"❌ Нет подходящих сигналов для {symbol}")
-
-      # 8. Применяем параметры режима к сигналу
-      if final_signal:
-        # Корректируем на основе режима
-        original_confidence = final_signal.confidence
-        final_signal.confidence *= regime_params.position_size_multiplier
-
-        # Добавляем метаданные о режиме
-        final_signal.metadata = {
-          'regime': regime_characteristics.primary_regime.value,
-          'regime_confidence': regime_characteristics.confidence,
-          'regime_strength': self.market_regime_detector.get_regime_strength_score(regime_characteristics),
-          'use_limit_orders': regime_params.use_limit_orders,
-          'sl_multiplier': regime_params.stop_loss_multiplier,
-          'tp_multiplier': regime_params.take_profit_multiplier
-        }
-
-        logger.info(f"Финальный сигнал для {symbol}: {final_signal.signal_type.value}, "
-                    f"уверенность: {original_confidence:.2f} -> {final_signal.confidence:.2f} "
-                    f"(режим: {regime_characteristics.primary_regime.value})")
-
-        # Проверяем минимальную уверенность после корректировок
-        if final_signal.confidence >= regime_params.min_signal_quality:
-          await self._process_trading_signal(final_signal,symbol, htf_data)
-        else:
-          logger.info(f"Сигнал отклонен: уверенность {final_signal.confidence:.2f} "
-                      f"< минимум {regime_params.min_signal_quality}")
-
-    except Exception as e:
-      logger.error(f"Ошибка мониторинга {symbol}: {e}", exc_info=True)
+    #   final_signal = None
+    #
+    #   if self.use_enhanced_ml and self.enhanced_ml_model and signals:
+    #     try:
+    #       # Подготавливаем данные для enhanced модели
+    #       enhanced_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+    #
+    #       if enhanced_prediction:
+    #         proba, ml_prediction = enhanced_prediction
+    #
+    #         # Фильтруем сигналы на основе enhanced модели
+    #         for strategy_name, signal in signals:
+    #           if ml_prediction.signal_type == signal.signal_type:
+    #             final_signal = signal
+    #             # Корректируем уверенность
+    #             final_signal.confidence = min(0.95,
+    #                                           (signal.confidence + ml_prediction.probability) / 2)
+    #             logger.info(f"✅ Enhanced ML подтвердила сигнал {strategy_name} для {symbol}")
+    #             break
+    #     except Exception as e:
+    #       logger.error(f"Ошибка Enhanced ML для {symbol}: {e}")
+    #
+    #   # 7. Если Enhanced ML не используется или не дала результат
+    #   if not final_signal and signals:
+    #     logger.info(f"Анализ {len(signals)} кандидатов сигналов для {symbol}")
+    #
+    #     # Группируем сигналы по типу (BUY/SELL)
+    #     buy_signals = [(name, sig) for name, sig in signals if sig.signal_type == SignalType.BUY]
+    #     sell_signals = [(name, sig) for name, sig in signals if sig.signal_type == SignalType.SELL]
+    #
+    #     signal_logger.info(f"КАНДИДАТЫ для {symbol}: {len(buy_signals)} BUY, {len(sell_signals)} SELL")
+    #
+    #     # Анализируем консенсус
+    #     final_signal = None
+    #
+    #     if len(buy_signals) > len(sell_signals) and buy_signals:
+    #       # Консенсус на покупку
+    #       if len(buy_signals) >= 2:  # Множественное подтверждение
+    #         # Взвешенное усреднение уверенности
+    #         total_weight = sum(sig.confidence for _, sig in buy_signals)
+    #         weighted_confidence = total_weight / len(buy_signals)
+    #
+    #         # Выбираем сигнал с лучшей уверенностью как базу
+    #         best_buy = max(buy_signals, key=lambda x: x[1].confidence)
+    #         final_signal = best_buy[1]
+    #
+    #         # Повышаем уверенность за счет консенсуса (максимум до 0.95)
+    #         consensus_boost = min(0.2, (len(buy_signals) - 1) * 0.05)
+    #         final_signal.confidence = min(0.95, weighted_confidence + consensus_boost)
+    #
+    #         # Обновляем метаданные
+    #         confirming_strategies = [name for name, _ in buy_signals]
+    #         final_signal.metadata = final_signal.metadata or {}
+    #         final_signal.metadata.update({
+    #           'consensus_type': 'multiple_buy',
+    #           'confirming_strategies': confirming_strategies,
+    #           'original_confidence': best_buy[1].confidence,
+    #           'consensus_boost': consensus_boost,
+    #           'weighted_confidence': weighted_confidence
+    #         })
+    #
+    #         signal_logger.info(
+    #           f"КОНСЕНСУС BUY для {symbol}: {confirming_strategies}, итоговая уверенность: {final_signal.confidence:.3f}")
+    #
+    #       else:
+    #         # Одиночный BUY сигнал
+    #         final_signal = buy_signals[0][1]
+    #         signal_logger.info(
+    #           f"ОДИНОЧНЫЙ BUY для {symbol} от {buy_signals[0][0]}, уверенность: {final_signal.confidence:.3f}")
+    #
+    #     elif len(sell_signals) > len(buy_signals) and sell_signals:
+    #       # Консенсус на продажу (аналогичная логика)
+    #       if len(sell_signals) >= 2:
+    #         total_weight = sum(sig.confidence for _, sig in sell_signals)
+    #         weighted_confidence = total_weight / len(sell_signals)
+    #
+    #         best_sell = max(sell_signals, key=lambda x: x[1].confidence)
+    #         final_signal = best_sell[1]
+    #
+    #         consensus_boost = min(0.2, (len(sell_signals) - 1) * 0.05)
+    #         final_signal.confidence = min(0.95, weighted_confidence + consensus_boost)
+    #
+    #         confirming_strategies = [name for name, _ in sell_signals]
+    #         final_signal.metadata = final_signal.metadata or {}
+    #         final_signal.metadata.update({
+    #           'consensus_type': 'multiple_sell',
+    #           'confirming_strategies': confirming_strategies,
+    #           'original_confidence': best_sell[1].confidence,
+    #           'consensus_boost': consensus_boost,
+    #           'weighted_confidence': weighted_confidence
+    #         })
+    #
+    #         signal_logger.info(
+    #           f"КОНСЕНСУС SELL для {symbol}: {confirming_strategies}, итоговая уверенность: {final_signal.confidence:.3f}")
+    #       else:
+    #         final_signal = sell_signals[0][1]
+    #         signal_logger.info(
+    #           f"ОДИНОЧНЫЙ SELL для {symbol} от {sell_signals[0][0]}, уверенность: {final_signal.confidence:.3f}")
+    #
+    #     elif len(buy_signals) == len(sell_signals) and buy_signals and sell_signals:
+    #       # Конфликт сигналов - выбираем по наивысшей уверенности
+    #       all_signals = buy_signals + sell_signals
+    #       best_signal = max(all_signals, key=lambda x: x[1].confidence)
+    #
+    #       # Снижаем уверенность из-за конфликта
+    #       final_signal = best_signal[1]
+    #       final_signal.confidence *= 0.8  # Штраф за конфликт
+    #
+    #       final_signal.metadata = final_signal.metadata or {}
+    #       final_signal.metadata.update({
+    #         'consensus_type': 'conflict_resolved',
+    #         'conflicting_strategies': [name for name, _ in all_signals],
+    #         'conflict_penalty': 0.2
+    #       })
+    #
+    #       signal_logger.warning(
+    #         f"КОНФЛИКТ СИГНАЛОВ для {symbol}: выбран {best_signal[0]} с пониженной уверенностью {final_signal.confidence:.3f}")
+    #
+    #     # Финальная проверка минимального порога
+    #     if final_signal and final_signal.confidence < regime_params.min_signal_quality:
+    #       signal_logger.warning(
+    #         f"Финальный сигнал отклонен: уверенность {final_signal.confidence:.3f} < {regime_params.min_signal_quality}")
+    #       final_signal = None
+    #
+    #     if final_signal:
+    #       logger.info(
+    #         f"✅ Финальный выбор для {symbol}: {final_signal.strategy_name} {final_signal.signal_type.value}, уверенность: {final_signal.confidence:.3f}")
+    #     else:
+    #       logger.info(f"❌ Нет подходящих сигналов для {symbol}")
+    #
+    #   # 8. Применяем параметры режима к сигналу
+    #   if final_signal:
+    #     # Корректируем на основе режима
+    #     original_confidence = final_signal.confidence
+    #     final_signal.confidence *= regime_params.position_size_multiplier
+    #
+    #     # Добавляем метаданные о режиме
+    #     final_signal.metadata = {
+    #       'regime': regime_characteristics.primary_regime.value,
+    #       'regime_confidence': regime_characteristics.confidence,
+    #       'regime_strength': self.market_regime_detector.get_regime_strength_score(regime_characteristics),
+    #       'use_limit_orders': regime_params.use_limit_orders,
+    #       'sl_multiplier': regime_params.stop_loss_multiplier,
+    #       'tp_multiplier': regime_params.take_profit_multiplier
+    #     }
+    #
+    #     logger.info(f"Финальный сигнал для {symbol}: {final_signal.signal_type.value}, "
+    #                 f"уверенность: {original_confidence:.2f} -> {final_signal.confidence:.2f} "
+    #                 f"(режим: {regime_characteristics.primary_regime.value})")
+    #
+    #     # Проверяем минимальную уверенность после корректировок
+    #     if final_signal.confidence >= regime_params.min_signal_quality:
+    #       await self._process_trading_signal(final_signal,symbol, htf_data)
+    #     else:
+    #       logger.info(f"Сигнал отклонен: уверенность {final_signal.confidence:.2f} "
+    #                   f"< минимум {regime_params.min_signal_quality}")
+    #
+    # except Exception as e:
+    #   logger.error(f"Ошибка мониторинга {symbol}: {e}", exc_info=True)
 
   def get_regime_statistics_for_dashboard(self) -> Dict[str, Any]:
     """Получает статистику режимов для отображения в дашборде"""
@@ -680,13 +689,13 @@ class IntegratedTradingSystem:
 
   async def _monitor_symbol_for_entry_enhanced(self, symbol: str):
     """
-    ИСПРАВЛЕННАЯ ВЕРСИЯ с полной интеграцией Shadow Trading и диагностикой мета-модели
+    УЛУЧШЕННАЯ ВЕРСИЯ с мультистратегийным консенсусом и полной интеграцией
     """
     logger.info(f"🔍 Поиск сигнала для {symbol}...")
     signal_logger.info(f"====== НАЧАЛО ЦИКЛА ДЛЯ {symbol} ======")
 
     try:
-      # --- УРОВЕНЬ 1: ДЕТЕКЦИЯ РЕЖИМА РЫНКА ---
+      # --- УРОВЕНЬ 1: ДЕТЕКЦИЯ РЕЖИМА РЫНКА И ВАЛИДАЦИЯ ---
       htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=300)
       if htf_data.empty or len(htf_data) < 100:
         logger.debug(f"Недостаточно данных для анализа {symbol}")
@@ -702,6 +711,7 @@ class IntegratedTradingSystem:
       signal_logger.info(
         f"РЕЖИМ: {regime_characteristics.primary_regime.value} (Уверенность: {regime_characteristics.confidence:.2f})")
 
+      # Проверка аномалий
       anomalies = await self._check_market_anomalies(symbol, htf_data)
       if any(a.severity > self.config.get('strategy_settings', {}).get('anomaly_severity_threshold', 0.8) for a in
              anomalies):
@@ -709,21 +719,25 @@ class IntegratedTradingSystem:
         signal_logger.critical(f"АНОМАЛИЯ: Торговля заблокирована.")
         return
 
-      # --- УРОВЕНЬ 2: ВЫБОР И ГЕНЕРАЦИЯ СИГНАЛОВ ОТ СТРАТЕГИЙ ---
-      await self.check_strategy_adaptation(symbol)
-
+      # Проверка минимального качества режима
       regime_params = self.market_regime_detector.get_regime_parameters(symbol)
+      if regime_characteristics.confidence < regime_params.min_signal_quality:
+        logger.info(
+          f"Пропускаем {symbol}: низкая уверенность режима ({regime_characteristics.confidence:.2f} < {regime_params.min_signal_quality})")
+        return
+
       if not regime_params.recommended_strategies or 'ALL' in regime_params.avoided_strategies:
         logger.info(f"Торговля в режиме '{regime_characteristics.primary_regime.value}' не рекомендуется для {symbol}.")
         signal_logger.info(f"РЕЖИМ: Торговля не рекомендуется.")
         return
 
+      await self.check_strategy_adaptation(symbol)
       active_strategies_from_dashboard = self.state_manager.get_custom_data('active_strategies') or {}
 
-      # ИСПРАВЛЕНИЕ: Единое объявление candidate_signals
+      # --- УРОВЕНЬ 2: СБОР СИГНАЛОВ ОТ ВСЕХ СТРАТЕГИЙ ---
       candidate_signals: Dict[str, TradingSignal] = {}
 
-      # Проверяем Grid Trading первым (приоритет)
+      # Специальная обработка Grid Trading (приоритет)
       if "Grid_Trading" in regime_params.recommended_strategies and active_strategies_from_dashboard.get("Grid_Trading",
                                                                                                          True):
         logger.info(
@@ -734,597 +748,256 @@ class IntegratedTradingSystem:
           logger.info(f"Получен сеточный сигнал для {symbol}. Отправка на исполнение...")
           await self.trade_executor.execute_grid_trade(grid_signal)
           return
-        else:
-          logger.info("GridStrategy не сгенерировала сигнал. Переход к стандартной логике.")
 
-      # Проверяем SAR стратегию отдельно
-      if "Stop_and_Reverse" in regime_params.recommended_strategies and active_strategies_from_dashboard.get(
-          "Stop_and_Reverse", True):
-        if self.sar_strategy and symbol in self.sar_strategy.monitored_symbols:
-          try:
-            self.sar_strategy._clear_old_cache()
-            sar_signal = await self.sar_strategy.generate_signal(symbol, htf_data)
-
-            if sar_signal and sar_signal.signal_type != SignalType.HOLD:
-              current_position = self.position_manager.open_positions.get(symbol)
-              await self.sar_strategy.update_position_status(symbol, current_position)
-
-              weight = self.adaptive_selector.get_strategy_weight("Stop_and_Reverse",
-                                                                  regime_characteristics.primary_regime.value)
-              sar_signal.confidence *= weight
-
-              # Интеграция с Shadow Trading
-              if self.shadow_trading:
-                signal_id = await self.shadow_trading.process_signal(
-                  signal=sar_signal,
-                  metadata={
-                    'source': 'sar_strategy',
-                    'strategy_name': 'Stop_and_Reverse',
-                    'signal_score': sar_signal.metadata.get('signal_score', 0),
-                    'sar_components': sar_signal.metadata.get('sar_components', {}),
-                    'filter_reason': sar_signal.metadata.get('filter_reason', ''),
-                    'market_regime': regime_characteristics.primary_regime.value,
-                    'volatility_level': 'normal',
-                    'confidence_score': sar_signal.confidence
-                  },
-                  was_filtered=False
-                )
-                sar_signal.metadata['shadow_tracking_id'] = signal_id
-
-              candidate_signals["Stop_and_Reverse"] = sar_signal
-              logger.info(
-                f"SAR сигнал для {symbol}: {sar_signal.signal_type.value}, confidence={sar_signal.confidence:.3f}, вес={weight:.2f}")
-          except Exception as e:
-            logger.error(f"Ошибка получения SAR сигнала для {symbol}: {e}")
-
-      # Проверяем остальные стратегии
-      # ИСПРАВЛЕНИЕ: Расширяем список проверяемых стратегий
-      all_possible_strategies = [
+      # Сбор сигналов от всех рекомендованных стратегий
+      all_strategies_to_check = list(set(regime_params.recommended_strategies + [
         "Live_ML_Strategy", "Ichimoku_Cloud", "Dual_Thrust",
-        "Mean_Reversion_BB", "Momentum_Spike"
-      ]
+        "Mean_Reversion_BB", "Momentum_Spike", "Stop_and_Reverse"
+      ]))
 
-      # Объединяем рекомендованные и все возможные стратегии
-      strategies_to_check = list(set(regime_params.recommended_strategies + all_possible_strategies))
+      signal_logger.info(f"🔍 Сбор сигналов от {len(all_strategies_to_check)} стратегий для {symbol}")
 
-      for strategy_name in strategies_to_check:
-        if strategy_name in ["Grid_Trading", "Stop_and_Reverse"]:
-          continue  # Уже обработаны выше
+      for strategy_name in all_strategies_to_check:
+        if strategy_name == "Grid_Trading":
+          continue  # Уже обработана выше
 
-        # ИСПРАВЛЕНИЕ: Более мягкая проверка активности
-        is_dashboard_active = active_strategies_from_dashboard.get(strategy_name, True)
-        is_avoided = strategy_name in regime_params.avoided_strategies
-
-        # Разрешаем стратегию если она не явно отключена И не в списке избегаемых для критичных режимов
-        if not is_dashboard_active:
-          logger.debug(f"Стратегия {strategy_name} отключена в дашборде, пропускаем.")
+        # Проверки активности и допустимости
+        if strategy_name == "Live_ML_Strategy" and not self.use_base_ml:
           continue
 
-        # Для avoided стратегий - даем шанс если режим не критичный
-        if is_avoided and regime_characteristics.confidence > 0.8:
+        if not active_strategies_from_dashboard.get(strategy_name, True):
+          logger.debug(f"Стратегия {strategy_name} отключена в дашборде")
+          continue
+
+        if strategy_name in regime_params.avoided_strategies and regime_characteristics.confidence > 0.8:
           logger.debug(f"Стратегия {strategy_name} избегается в режиме {regime_characteristics.primary_regime.value}")
           continue
 
-        # Проверяем адаптивную активность с более мягким условием
+        # Проверка адаптивной активности
         if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
-          should_activate = self.adaptive_selector.should_activate_strategy(
-            strategy_name, regime_characteristics.primary_regime.value
-          )
-          # ИСПРАВЛЕНИЕ: Даем шанс даже отключенным стратегиям если их вес > 0.2
-          strategy_weight = self.adaptive_selector.get_strategy_weight(
-            strategy_name, regime_characteristics.primary_regime.value
-          )
-          if not should_activate and strategy_weight < 0.2:
-            logger.debug(f"Стратегия {strategy_name} неактивна для {symbol} (вес={strategy_weight:.2f})")
-            continue
+          try:
+            should_activate = self.adaptive_selector.should_activate_strategy(strategy_name,
+                                                                              regime_characteristics.primary_regime.value)
+            strategy_weight = self.adaptive_selector.get_strategy_weight(strategy_name,
+                                                                         regime_characteristics.primary_regime.value)
+
+            if not should_activate and strategy_weight < 0.2:
+              logger.debug(f"Стратегия {strategy_name} неактивна для {symbol} (вес={strategy_weight:.2f})")
+              continue
+          except Exception as e:
+            logger.warning(f"Ошибка адаптивного селектора для {strategy_name}: {e}")
 
         try:
-          signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
-          if signal and signal.signal_type != SignalType.HOLD:
-            # ИСПРАВЛЕНИЕ: Снижен порог уверенности кандидатов с 0.5 до 0.3
-            if signal.confidence >= 0.5:
-              weight = 1.0
-              if hasattr(self, 'adaptive_selector'):
-                weight = self.adaptive_selector.get_strategy_weight(
-                  strategy_name, regime_characteristics.primary_regime.value
+          # Получение сигнала от стратегии
+          if strategy_name == "Stop_and_Reverse" and self.sar_strategy and symbol in self.sar_strategy.monitored_symbols:
+            # Специальная обработка SAR стратегии
+            self.sar_strategy._clear_old_cache()
+            signal = await self.sar_strategy.generate_signal(symbol, htf_data)
+
+            if signal and signal.signal_type != SignalType.HOLD:
+              current_position = self.position_manager.open_positions.get(symbol)
+              await self.sar_strategy.update_position_status(symbol, current_position)
+
+              # Интеграция с Shadow Trading для SAR
+              if self.shadow_trading:
+                signal_id = await self.shadow_trading.process_signal(
+                  signal=signal,
+                  metadata={
+                    'source': 'sar_strategy',
+                    'strategy_name': 'Stop_and_Reverse',
+                    'signal_score': signal.metadata.get('signal_score', 0),
+                    'sar_components': signal.metadata.get('sar_components', {}),
+                    'market_regime': regime_characteristics.primary_regime.value,
+                    'confidence_score': signal.confidence
+                  },
+                  was_filtered=False
                 )
-              signal.confidence *= weight
-              candidate_signals[strategy_name] = signal
-              signal_logger.info(
-                f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, "
-                f"Уверенность: {signal.confidence:.2f}, Вес: {weight:.2f}"
-              )
+                signal.metadata['shadow_tracking_id'] = signal_id
+          else:
+            # Обычные стратегии
+            signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
+
+          # Обработка полученного сигнала
+          if signal and signal.signal_type != SignalType.HOLD and signal.confidence >= 0.3:
+            # Применение адаптивного веса
+            weight = 1.0
+            if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
+              try:
+                weight = self.adaptive_selector.get_strategy_weight(strategy_name,
+                                                                    regime_characteristics.primary_regime.value)
+                signal.confidence *= weight
+              except Exception:
+                pass
+
+            candidate_signals[strategy_name] = signal
+            signal_logger.info(
+              f"✅ {strategy_name}: {signal.signal_type.value}, уверенность: {signal.confidence:.3f}, вес: {weight:.2f}")
+          else:
+            signal_logger.debug(f"➖ {strategy_name}: нет сигнала или низкая уверенность")
+
         except Exception as e:
-          logger.error(f"Ошибка получения сигнала от {strategy_name} для {symbol}: {e}")
+          logger.error(f"Ошибка получения сигнала от {strategy_name}: {e}")
+          continue
 
-      # # Проверяем остальные стратегии
-      # for strategy_name in regime_params.recommended_strategies:
-      #   if strategy_name in ["Grid_Trading", "Stop_and_Reverse"]:
-      #     continue  # Уже обработаны выше
-      #
-      #   if not active_strategies_from_dashboard.get(strategy_name, True):
-      #     logger.debug(f"Стратегия {strategy_name} отключена в дашборде, пропускаем.")
-      #     continue
-      #
-      #   if not self.adaptive_selector.should_activate_strategy(strategy_name,
-      #                                                          regime_characteristics.primary_regime.value):
-      #     logger.debug(f"Стратегия {strategy_name} неактивна для {symbol}")
-      #     continue
-      #
-      #   signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
-      #   if signal and signal.signal_type != SignalType.HOLD:
-      #     weight = self.adaptive_selector.get_strategy_weight(strategy_name,
-      #                                                         regime_characteristics.primary_regime.value)
-      #     signal.confidence *= weight
-      #     candidate_signals[strategy_name] = signal
-      #     signal_logger.info(
-      #       f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, Уверенность: {signal.confidence:.2f}")
+      signal_logger.info(
+        f"📈 Собрано {len(candidate_signals)} кандидатов сигналов для {symbol}: {list(candidate_signals.keys())}")
 
-      # --- УРОВЕНЬ 3: МЕТА-МОДЕЛЬ С ДИАГНОСТИКОЙ И ВРЕМЕННОЙ ВАЛИДАЦИЕЙ ---
-      final_signal: Optional[TradingSignal] = None
-      ml_prediction = None  # Инициализируем переменную
+      # --- УРОВЕНЬ 3: ML МЕТА-АНАЛИЗ ---
+      ml_prediction = None
+      data_is_fresh = True
 
       if self.enhanced_ml_model and self.use_enhanced_ml:
-        # === БЛОК ВАЛИДАЦИИ СВЕЖЕСТИ ДАННЫХ ===
-        data_is_fresh = True
-        data_age_info = "N/A"
-
+        # Валидация свежести данных
         if hasattr(self.enhanced_ml_model, 'temporal_manager'):
           try:
             data_validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
             data_is_fresh = data_validation['is_fresh']
-            data_age_info = f"{data_validation.get('data_age_minutes', 0):.1f} мин"
 
-            if not data_is_fresh:
-              logger.warning(f"Данные для {symbol} устарели ({data_age_info})")
-
-              # Если данные ОЧЕНЬ старые (>30 мин), пропускаем ML анализ полностью
-              if data_validation.get('data_age_minutes', 0) > 30:
-                logger.warning(f"Данные для {symbol} слишком старые, пропускаем ML анализ")
-                ml_prediction = None
-                data_is_fresh = False
-              else:
-                logger.debug(f"Продолжаем с предупреждением о свежести данных для {symbol}")
-                data_is_fresh = True  # Разрешаем анализ с предупреждением
-
+            if not data_is_fresh and data_validation.get('data_age_minutes', 0) > 30:
+              logger.warning(f"Данные для {symbol} слишком старые, пропускаем ML анализ")
+              data_is_fresh = False
           except Exception as validation_error:
             logger.warning(f"Ошибка валидации свежести данных для {symbol}: {validation_error}")
-            data_is_fresh = True  # При ошибке продолжаем без валидации
 
-        # === БЛОК ПОЛУЧЕНИЯ ML ПРЕДСКАЗАНИЯ ===
-        if data_is_fresh and ml_prediction is None:  # Получаем предсказание только если данные свежие
+        # Получение ML предсказания
+        if data_is_fresh:
           try:
             logger.debug(f"Получение ML предсказания для {symbol}...")
             _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+
+            if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
+              candidate_signals['ML_Enhanced'] = ml_prediction
+              signal_logger.info(
+                f"🤖 ML_Enhanced: {ml_prediction.signal_type.value}, уверенность: {ml_prediction.confidence:.3f}")
           except Exception as ml_error:
             logger.error(f"Ошибка получения ML предсказания для {symbol}: {ml_error}")
-            ml_prediction = None
 
-        # === ДИАГНОСТИЧЕСКИЙ БЛОК ===
-        current_price = htf_data['close'].iloc[-1]
-        price_change_24h = 0
-        try:
-          if len(htf_data) >= 24:
-            price_change_24h = ((current_price - htf_data['close'].iloc[-24]) / htf_data['close'].iloc[-24]) * 100
-        except Exception:
-          price_change_24h = 0
+      # --- УРОВЕНЬ 4: КОНСЕНСУСНЫЙ АНАЛИЗ И ПРИНЯТИЕ РЕШЕНИЯ ---
+      final_signal: Optional[TradingSignal] = None
+      current_price = htf_data['close'].iloc[-1]
 
-        signal_logger.info(f"🔍 ДИАГНОСТИКА МЕТА-МОДЕЛИ для {symbol}:")
-        signal_logger.info(
-          f"  Режим: {regime_characteristics.primary_regime.value} (уверенность: {regime_characteristics.confidence:.2f})")
-        signal_logger.info(f"  Цена 24ч: {price_change_24h:+.2f}%")
-        signal_logger.info(f"  Данные: {'✅ свежие' if data_is_fresh else f'⚠️ устарели ({data_age_info})'}")
-        signal_logger.info(f"  ML предсказание: {'✅ получено' if ml_prediction else '❌ пропущено'}")
+      if candidate_signals:
+        signal_logger.info(f"🎯 АНАЛИЗ КОНСЕНСУСА для {symbol}: {len(candidate_signals)} кандидатов")
 
-        if candidate_signals:
-          signal_logger.info(f"  Кандидаты: {list(candidate_signals.keys())}")
-          for strategy_name, signal in candidate_signals.items():
-            signal_logger.info(f"    {strategy_name}: {signal.signal_type.value}, уверенность={signal.confidence:.3f}")
-        else:
-          signal_logger.info(f"  Кандидаты: нет")
+        # Группировка сигналов по типу
+        buy_signals = [(name, sig) for name, sig in candidate_signals.items() if sig.signal_type == SignalType.BUY]
+        sell_signals = [(name, sig) for name, sig in candidate_signals.items() if sig.signal_type == SignalType.SELL]
 
-        # === БЛОК АНАЛИЗА ML ПРЕДСКАЗАНИЯ ===
-        if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
-          # === ПРОВЕРКА ПОДТВЕРЖДЕНИЯ ДРУГИМИ СТРАТЕГИЯМИ ===
-          regime_expected_direction = None
-          regime_name = regime_characteristics.primary_regime.value.lower()
+        signal_logger.info(f"  📈 BUY сигналов: {len(buy_signals)} от {[name for name, _ in buy_signals]}")
+        signal_logger.info(f"  📉 SELL сигналов: {len(sell_signals)} от {[name for name, _ in sell_signals]}")
 
-          if 'trend_up' in regime_name or 'uptrend' in regime_name:
-            regime_expected_direction = 'BUY'
-          elif 'trend_down' in regime_name or 'downtrend' in regime_name:
-            regime_expected_direction = 'SELL'
+        # Логика принятия решения на основе консенсуса
+        if len(buy_signals) > len(sell_signals) and buy_signals:
+          # Консенсус на покупку
+          if len(buy_signals) >= 2:
+            # Множественное подтверждение - повышаем уверенность
+            total_weight = sum(sig.confidence for _, sig in buy_signals)
+            weighted_confidence = total_weight / len(buy_signals)
 
-          # Проверяем соответствие направления
-          direction_match = False
-          if regime_expected_direction and ml_prediction:
-            direction_match = ml_prediction.signal_type.value == regime_expected_direction
+            best_buy = max(buy_signals, key=lambda x: x[1].confidence)
+            final_signal = best_buy[1]
+
+            # Бонус за консенсус
+            consensus_boost = min(0.2, (len(buy_signals) - 1) * 0.05)
+            final_signal.confidence = min(0.95, weighted_confidence + consensus_boost)
+
+            confirming_strategies = [name for name, _ in buy_signals]
+            final_signal.metadata = final_signal.metadata or {}
+            final_signal.metadata.update({
+              'consensus_type': 'multiple_buy',
+              'confirming_strategies': confirming_strategies,
+              'original_confidence': best_buy[1].confidence,
+              'consensus_boost': consensus_boost,
+              'weighted_confidence': weighted_confidence
+            })
+            final_signal.strategy_name = f"Consensus_BUY"
+
             signal_logger.info(
-              f"  Соответствие режиму: {'✅' if direction_match else '❌'} "
-              f"(режим {regime_name} → ожидается {regime_expected_direction})"
-            )
-
-          confirming_strategies = []
-          for strategy_name, signal in candidate_signals.items():
-            if signal.signal_type == ml_prediction.signal_type:
-              confirming_strategies.append(strategy_name)
-
-          if confirming_strategies:
-            logger.info(f"Мета-модель подтверждена стратегиями: {confirming_strategies} для {symbol}")
-
-
-            # Выбираем стратегию с наибольшей уверенностью для подтверждения
-            best_confirming_signal = max(
-              [candidate_signals[name] for name in confirming_strategies],
-              key=lambda x: x.confidence
-            )
-
-            # Создаем финальный сигнал с комбинированной уверенностью
-            final_signal = TradingSignal(
-              signal_type=ml_prediction.signal_type,
-              symbol=symbol,
-              price=current_price,
-              confidence=min(0.95, (best_confirming_signal.confidence + ml_prediction.confidence) / 2),
-              strategy_name="Ensemble_ML_Confirmed",
-              timestamp=datetime.now(),
-              metadata={
-                'ml_prediction': ml_prediction.metadata if hasattr(ml_prediction, 'metadata') else {},
-                'confirming_strategies': confirming_strategies,
-                'best_confirming_strategy':
-                  [name for name, sig in candidate_signals.items() if sig == best_confirming_signal][0],
-                'data_freshness': {'is_fresh': data_is_fresh, 'age_info': data_age_info},
-                'regime_match': direction_match if regime_expected_direction else None
-              }
-            )
-            signal_logger.info(f"РЕШЕНИЕ: Сигнал мета-модели ПРИНЯТ с подтверждением")
-
+              f"✅ КОНСЕНСУС BUY для {symbol}: {confirming_strategies}, итоговая уверенность: {final_signal.confidence:.3f}")
           else:
-            # === СМЯГЧЕННАЯ ЛОГИКА БЕЗ ПОДТВЕРЖДЕНИЯ ===
-            signal_logger.warning(f"Мета-модель НЕ подтверждена другими стратегиями для {symbol}")
+            # Одиночный BUY сигнал
+            final_signal = buy_signals[0][1]
+            signal_logger.info(
+              f"✅ ОДИНОЧНЫЙ BUY для {symbol} от {buy_signals[0][0]}, уверенность: {final_signal.confidence:.3f}")
 
-            # ИСПРАВЛЕНИЕ 1: Снижен порог с 0.7 до 0.55
-            # ИСПРАВЛЕНИЕ 2: Добавлены дополнительные условия для принятия сигнала
-            ml_confidence_threshold = 0.55  # Снижен с 0.7
+        elif len(sell_signals) > len(buy_signals) and sell_signals:
+          # Консенсус на продажу
+          if len(sell_signals) >= 2:
+            total_weight = sum(sig.confidence for _, sig in sell_signals)
+            weighted_confidence = total_weight / len(sell_signals)
 
-            # Дополнительные факторы для принятия решения
-            regime_support = False
-            price_momentum_support = False
+            best_sell = max(sell_signals, key=lambda x: x[1].confidence)
+            final_signal = best_sell[1]
 
-            # Проверяем поддержку режима
-            if regime_expected_direction:
-              regime_support = (ml_prediction.signal_type.value == regime_expected_direction and
-                                regime_characteristics.confidence > 0.6)
+            consensus_boost = min(0.2, (len(sell_signals) - 1) * 0.05)
+            final_signal.confidence = min(0.95, weighted_confidence + consensus_boost)
 
-            # Проверяем momentum цены (24ч движение в направлении сигнала)
-            if ((ml_prediction.signal_type == SignalType.BUY and price_change_24h > 1.0) or
-                (ml_prediction.signal_type == SignalType.SELL and price_change_24h < -1.0)):
-              price_momentum_support = True
+            confirming_strategies = [name for name, _ in sell_signals]
+            final_signal.metadata = final_signal.metadata or {}
+            final_signal.metadata.update({
+              'consensus_type': 'multiple_sell',
+              'confirming_strategies': confirming_strategies,
+              'original_confidence': best_sell[1].confidence,
+              'consensus_boost': consensus_boost,
+              'weighted_confidence': weighted_confidence
+            })
+            final_signal.strategy_name = f"Consensus_SELL"
 
-            # Анализ движения цены за 24 часа
-            price_change_24h = 0
-            if len(htf_data) >= 24:
-              price_24h_ago = htf_data['close'].iloc[-24]
-              price_change_24h = ((current_price - price_24h_ago) / price_24h_ago) * 100
-              signal_logger.info(f"  Движение цены за 24ч: {price_change_24h:+.2f}%")
-
-            # ПРИНИМАЕМ СИГНАЛ если выполнено ЛЮБОЕ из условий:
-            accept_signal = (
-                ml_prediction.confidence >= ml_confidence_threshold or  # Высокая уверенность ML
-                (ml_prediction.confidence >= 0.45 and regime_support) or  # Средняя уверенность + поддержка режима
-                (ml_prediction.confidence >= 0.40 and price_momentum_support) or  # Средняя уверенность + momentum
-                (ml_prediction.confidence >= 0.35 and regime_support and price_momentum_support)  # Все факторы вместе
-            )
-
-            if accept_signal:
-              # Корректируем уверенность в зависимости от поддерживающих факторов
-              adjusted_confidence = ml_prediction.confidence
-              if regime_support:
-                adjusted_confidence *= 1.1  # Бонус за поддержку режима
-              if price_momentum_support:
-                adjusted_confidence *= 1.05  # Бонус за momentum
-
-              adjusted_confidence = min(0.85, adjusted_confidence)  # Максимум 0.85 для solo сигналов
-
-              logger.info(f"ML модель принята ({ml_prediction.confidence:.3f} -> {adjusted_confidence:.3f}), "
-                          f"режим: {'✅' if regime_support else '❌'}, "
-                          f"momentum: {'✅' if price_momentum_support else '❌'}")
-
-              final_signal = TradingSignal(
-                signal_type=ml_prediction.signal_type,
-                symbol=symbol,
-                price=current_price,
-                confidence=adjusted_confidence,
-                strategy_name="Ensemble_ML_Solo",
-                timestamp=datetime.now(),
-                metadata={
-                  'ml_prediction': ml_prediction.metadata if hasattr(ml_prediction, 'metadata') else {},
-                  'solo_decision': True,
-                  'regime_support': regime_support,
-                  'price_momentum_support': price_momentum_support,
-                  'original_confidence': ml_prediction.confidence,
-                  'adjusted_confidence': adjusted_confidence,
-                  'data_freshness': {'is_fresh': data_is_fresh, 'age_info': data_age_info}
-                }
-              )
-              signal_logger.info(f"РЕШЕНИЕ: Сигнал мета-модели принят БЕЗ подтверждения (смягченная логика)")
-            else:
-              signal_logger.info(f"ML модель отклонена: уверенность {ml_prediction.confidence:.3f}, "
-                                 f"режим: {'✅' if regime_support else '❌'}, "
-                                 f"momentum: {'✅' if price_momentum_support else '❌'}")
-              final_signal = None
-
-        else:
-          # ML модель предсказала HOLD или произошла ошибка
-          if ml_prediction:
-            signal_logger.info(f"МЕТА-МОДЕЛЬ: Предсказание HOLD для {symbol}")
+            signal_logger.info(
+              f"✅ КОНСЕНСУС SELL для {symbol}: {confirming_strategies}, итоговая уверенность: {final_signal.confidence:.3f}")
           else:
-            signal_logger.warning(f"МЕТА-МОДЕЛЬ: Предсказание не получено для {symbol}")
-        # if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
-        #   # РАСШИРЕННАЯ ДИАГНОСТИКА ПРЕДСКАЗАНИЯ
-        #   signal_logger.info(f"МЕТА-МОДЕЛЬ ДЕТАЛЬНО:")
-        #   signal_logger.info(f"  Предсказание: {ml_prediction.signal_type.value}")
-        #   signal_logger.info(f"  Уверенность: {ml_prediction.confidence:.3f}")
-        #   signal_logger.info(f"  Согласованность моделей: {ml_prediction.model_agreement:.3f}")
-        #
-        #   # Проверяем наличие информации о фильтрах
-        #   if hasattr(ml_prediction, 'metadata') and isinstance(ml_prediction.metadata, dict):
-        #     market_filters = ml_prediction.metadata.get('market_filters', {})
-        #     if market_filters:
-        #       signal_logger.info(f"  Фильтры: {len(market_filters.get('filters_applied', []))} применено")
-        #       if market_filters.get('adjustments_made'):
-        #         signal_logger.info(f"  Корректировки: {market_filters['adjustments_made']}")
-        #
-        #     # Информация о свежести данных из ML модели
-        #     if 'data_freshness_warning' in ml_prediction.metadata:
-        #       signal_logger.info(f"  ⚠️ Предупреждение: данные не свежие")
-        #
-        #   # Анализ соответствия режиму
-        #   regime_expected_direction = None
-        #   if 'trend_up' in regime_characteristics.primary_regime.value.lower():
-        #     regime_expected_direction = 'BUY'
-        #   elif 'trend_down' in regime_characteristics.primary_regime.value.lower():
-        #     regime_expected_direction = 'SELL'
-        #
-        #   if regime_expected_direction:
-        #     direction_match = ml_prediction.signal_type.value == regime_expected_direction
-        #     signal_logger.info(
-        #       f"  Соответствие режиму: {'✅' if direction_match else '❌'} (ожидался {regime_expected_direction})")
-        #
-        #     # КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ при несоответствии
-        #     if not direction_match and regime_characteristics.confidence > 0.8:
-        #       signal_logger.warning(
-        #         f"🚨 КРИТИЧЕСКОЕ НЕСООТВЕТСТВИЕ: ML предсказывает {ml_prediction.signal_type.value}, но режим указывает на {regime_expected_direction}")
-        #       signal_logger.warning(f"🚨 Уверенность режима: {regime_characteristics.confidence:.2f}")
-        #
-        #       # Снижаем уверенность ML предсказания при сильном несоответствии
-        #       if hasattr(ml_prediction, 'confidence'):
-        #         original_confidence = ml_prediction.confidence
-        #         ml_prediction.confidence *= 0.5  # Снижаем уверенность вдвое
-        #         signal_logger.warning(
-        #           f"🚨 Уверенность ML снижена: {original_confidence:.3f} -> {ml_prediction.confidence:.3f}")
-        #
-        #   # === ПРОВЕРКА ПОДТВЕРЖДЕНИЯ ДРУГИМИ СТРАТЕГИЯМИ ===
-        #   confirming_strategies = []
-        #   for strategy_name, signal in candidate_signals.items():
-        #     if signal.signal_type == ml_prediction.signal_type:
-        #       confirming_strategies.append(strategy_name)
-        #
-        #   if confirming_strategies:
-        #     logger.info(f"Мета-модель подтверждена стратегиями: {confirming_strategies} для {symbol}")
-        #
-        #     # Выбираем стратегию с наибольшей уверенностью для подтверждения
-        #     best_confirming_signal = max(
-        #       [candidate_signals[name] for name in confirming_strategies],
-        #       key=lambda x: x.confidence
-        #     )
-        #
-        #     # Создаем финальный сигнал с комбинированной уверенностью
-        #     final_signal = TradingSignal(
-        #       signal_type=ml_prediction.signal_type,
-        #       symbol=symbol,
-        #       price=current_price,
-        #       confidence=min(0.95, (best_confirming_signal.confidence + ml_prediction.confidence) / 2),
-        #       strategy_name="Ensemble_ML_Confirmed",
-        #       timestamp=datetime.now(),
-        #       metadata={
-        #         'ml_prediction': ml_prediction.metadata if hasattr(ml_prediction, 'metadata') else {},
-        #         'confirming_strategies': confirming_strategies,
-        #         'best_confirming_strategy':
-        #           [name for name, sig in candidate_signals.items() if sig == best_confirming_signal][0],
-        #         'data_freshness': {'is_fresh': data_is_fresh, 'age_info': data_age_info},
-        #         'regime_match': direction_match if regime_expected_direction else None
-        #       }
-        #     )
-        #     signal_logger.info(f"РЕШЕНИЕ: Сигнал мета-модели ПРИНЯТ с подтверждением")
-        #
-        #   else:
-        #     # ML предсказание без подтверждения
-        #     signal_logger.warning(f"Мета-модель НЕ подтверждена другими стратегиями для {symbol}")
-        #
-        #     # Проверяем уверенность ML модели
-        #     if ml_prediction.confidence >= 0.7:
-        #       logger.info(f"ML модель очень уверена ({ml_prediction.confidence:.3f}), принимаем без подтверждения")
-        #       final_signal = TradingSignal(
-        #         signal_type=ml_prediction.signal_type,
-        #         symbol=symbol,
-        #         price=current_price,
-        #         confidence=ml_prediction.confidence * 0.8,  # Небольшое снижение за отсутствие подтверждения
-        #         strategy_name="Ensemble_ML_Solo",
-        #         timestamp=datetime.now(),
-        #         metadata={
-        #           'ml_prediction': ml_prediction.metadata if hasattr(ml_prediction, 'metadata') else {},
-        #           'solo_decision': True,
-        #           'data_freshness': {'is_fresh': data_is_fresh, 'age_info': data_age_info},
-        #           'regime_match': direction_match if regime_expected_direction else None
-        #         }
-        #       )
-        #       signal_logger.info(f"РЕШЕНИЕ: Сигнал мета-модели принят БЕЗ подтверждения (высокая уверенность)")
-        #     else:
-        #       signal_logger.info(f"ML модель недостаточно уверена ({ml_prediction.confidence:.3f}), отклоняем")
-        #       final_signal = None
-        #
-        # else:
-        #   # ML модель предсказала HOLD или произошла ошибка
-        #   if ml_prediction:
-        #     signal_logger.info(f"МЕТА-МОДЕЛЬ: Предсказание HOLD для {symbol}")
-        #   else:
-        #     signal_logger.warning(f"МЕТА-МОДЕЛЬ: Предсказание не получено для {symbol}")
+            final_signal = sell_signals[0][1]
+            signal_logger.info(
+              f"✅ ОДИНОЧНЫЙ SELL для {symbol} от {sell_signals[0][0]}, уверенность: {final_signal.confidence:.3f}")
 
-      # === ФОЛБЭК НА ОБЫЧНЫЕ СТРАТЕГИИ ===
+        elif len(buy_signals) == len(sell_signals) and buy_signals and sell_signals:
+          # Конфликт сигналов - выбираем по наивысшей уверенности
+          all_signals = buy_signals + sell_signals
+          best_signal = max(all_signals, key=lambda x: x[1].confidence)
 
-      if not final_signal and candidate_signals:
-        # ИСПРАВЛЕНИЕ 3: Снижен порог для фолбэка с 0.65 до 0.55
-        best_strategy, best_signal = max(candidate_signals.items(), key=lambda x: x[1].confidence)
+          # Снижаем уверенность из-за конфликта
+          final_signal = best_signal[1]
+          final_signal.confidence *= 0.7  # Штраф за конфликт
 
-        # Снижаем порог для принятия фолбэк сигнала
-        fallback_threshold = 0.55  # Снижен с предыдущего значения
+          final_signal.metadata = final_signal.metadata or {}
+          final_signal.metadata.update({
+            'consensus_type': 'conflict_resolved',
+            'conflicting_strategies': [name for name, _ in all_signals],
+            'conflict_penalty': 0.3
+          })
+          final_signal.strategy_name = f"Conflict_Resolved_{final_signal.signal_type.value}"
 
-        if best_signal.confidence >= fallback_threshold:
-          final_signal = best_signal
-          logger.info(
-            f"Фолбэк: выбран сигнал от {best_strategy} для {symbol} (уверенность: {best_signal.confidence:.3f})")
-          signal_logger.info(f"РЕШЕНИЕ: Использован фолбэк на стратегию {best_strategy}")
-        else:
-          logger.info(f"Фолбэк отклонен: уверенность {best_signal.confidence:.3f} < {fallback_threshold}")
-          signal_logger.info(f"РЕШЕНИЕ: Фолбэк отклонен - низкая уверенность")
+          signal_logger.warning(
+            f"⚠️ КОНФЛИКТ СИГНАЛОВ для {symbol}: выбран {best_signal[0]} с пониженной уверенностью {final_signal.confidence:.3f}")
 
-      # # --- УРОВЕНЬ 3: МЕТА-МОДЕЛЬ С ДИАГНОСТИКОЙ ---
-      # final_signal: Optional[TradingSignal] = None
-      #
-      # if self.enhanced_ml_model and self.use_enhanced_ml:
-      #   # === ДИАГНОСТИЧЕСКИЙ БЛОК ===
-      #   # Проверяем свежесть данных
-      #   if hasattr(self.enhanced_ml_model, 'temporal_manager'):
-      #     data_validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
-      #
-      #     if not data_validation['is_fresh']:
-      #       logger.warning(f"Данные для {symbol} устарели ({data_validation.get('data_age_minutes', 'N/A')} мин)")
-      #
-      #       # Если данные очень старые, пропускаем ML анализ
-      #       if data_validation.get('data_age_minutes', 0) > 30:  # 30 минут
-      #         logger.warning(f"Данные для {symbol} слишком старые, пропускаем ML анализ")
-      #         ml_prediction = None
-      #       else:
-      #         logger.debug(f"Продолжаем с предупреждением о свежести данных для {symbol}")
-      #         _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
-      #     else:
-      #       _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
-      #   else:
-      #     _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
-      #   current_price = htf_data['close'].iloc[-1]
-      #   price_change_24h = ((current_price - htf_data['close'].iloc[-24]) / htf_data['close'].iloc[-24]) * 100 if len(
-      #     htf_data) >= 24 else 0
-      #
-      #   signal_logger.info(f"🔍 ДИАГНОСТИКА МЕТА-МОДЕЛИ для {symbol}:")
-      #   signal_logger.info(
-      #     f"  Режим: {regime_characteristics.primary_regime.value} (уверенность: {regime_characteristics.confidence:.2f})")
-      #   signal_logger.info(f"  Цена 24ч: {price_change_24h:+.2f}%")
-      #   signal_logger.info(f"  Кандидаты: {list(candidate_signals.keys())}")
-      #
-      #   for strategy_name, signal in candidate_signals.items():
-      #     signal_logger.info(f"  {strategy_name}: {signal.signal_type.value}, уверенность={signal.confidence:.3f}")
-      #
-      #   # Получаем предсказание мета-модели
-      #   _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
-      #
-      #   if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
-      #     # === РАСШИРЕННАЯ ДИАГНОСТИКА ПРЕДСКАЗАНИЯ ===
-      #     signal_logger.info(f"МЕТА-МОДЕЛЬ ДЕТАЛЬНО:")
-      #     signal_logger.info(f"  Предсказание: {ml_prediction.signal_type.value}")
-      #     signal_logger.info(f"  Уверенность: {ml_prediction.confidence:.3f}")
-      #     signal_logger.info(f"  Метаданные: {ml_prediction.metadata}")
-      #
-      #     # Анализ соответствия режиму
-      #     regime_expected_direction = None
-      #     if 'trend_up' in regime_characteristics.primary_regime.value.lower():
-      #       regime_expected_direction = 'BUY'
-      #     elif 'trend_down' in regime_characteristics.primary_regime.value.lower():
-      #       regime_expected_direction = 'SELL'
-      #
-      #     if regime_expected_direction:
-      #       direction_match = ml_prediction.signal_type.value == regime_expected_direction
-      #       signal_logger.info(
-      #         f"  Соответствие режиму: {'✅' if direction_match else '❌'} (ожидался {regime_expected_direction})")
-      #
-      #       # КРИТИЧЕСКОЕ ПРЕДУПРЕЖДЕНИЕ при несоответствии
-      #       if not direction_match and regime_characteristics.confidence > 0.8:
-      #         signal_logger.warning(
-      #           f"⚠️ КОНФЛИКТ: Мета-модель предсказывает {ml_prediction.signal_type.value}, но режим {regime_characteristics.primary_regime.value}")
-      #         signal_logger.warning(
-      #           f"⚠️ Цена движется {'вверх' if price_change_24h > 0 else 'вниз'} ({price_change_24h:+.2f}%)")
-      #
-      #     # === НОВАЯ ЛОГИКА ВАЛИДАЦИИ ===
-      #     # Используем существующий метод валидации согласованности (если есть)
-      #     is_consistent = True
-      #     consistency_reason = "Базовая проверка пройдена"
-      #
-      #     if hasattr(self, '_validate_signal_consistency'):
-      #       is_consistent, consistency_reason = await self._validate_signal_consistency(
-      #         symbol, ml_prediction, regime_characteristics, htf_data
-      #       )
-      #       signal_logger.info(f"СОГЛАСОВАННОСТЬ: {consistency_reason}")
-      #
-      #     # Проверяем подтверждение от стратегий
-      #     has_confirmation = any(s.signal_type == ml_prediction.signal_type for s in candidate_signals.values())
-      #
-      #     if is_consistent and has_confirmation:
-      #       final_signal = TradingSignal(
-      #         signal_type=ml_prediction.signal_type,
-      #         symbol=symbol,
-      #         price=htf_data['close'].iloc[-1],
-      #         confidence=ml_prediction.confidence,
-      #         strategy_name="Ensemble_Validated",
-      #         timestamp=datetime.now(),
-      #         metadata={'ml_prediction': ml_prediction.metadata, 'consistency_check': consistency_reason}
-      #       )
-      #       signal_logger.info(f"✅ РЕШЕНИЕ: Сигнал мета-модели принят после валидации.")
-      #     elif not is_consistent:
-      #       signal_logger.warning(f"❌ МЕТА-МОДЕЛЬ ОТКЛОНЕНА: {consistency_reason}")
-      #     else:
-      #       signal_logger.warning(f"РЕШЕНИЕ: Сигнал мета-модели отклонен - нет подтверждения.")
-      #   else:
-      #     signal_logger.info(f"РЕШЕНИЕ: Мета-модель предсказывает HOLD, сигнал не генерируется.")
-      #
-      # # === FALLBACK: Приоритет режима при отклонении мета-модели ===
-      # if not final_signal and candidate_signals and regime_characteristics.confidence > 0.8:
-      #   regime_expected = None
-      #   if 'trend_up' in regime_characteristics.primary_regime.value.lower():
-      #     regime_expected = SignalType.BUY
-      #   elif 'trend_down' in regime_characteristics.primary_regime.value.lower():
-      #     regime_expected = SignalType.SELL
-      #
-      #   if regime_expected:
-      #     regime_aligned_signals = [
-      #       signal for signal in candidate_signals.values()
-      #       if signal.signal_type == regime_expected and signal.confidence > 0.6
-      #     ]
-      #
-      #     if regime_aligned_signals:
-      #       best_regime_signal = max(regime_aligned_signals, key=lambda s: s.confidence)
-      #       final_signal = best_regime_signal
-      #       signal_logger.info(f"🎯 FALLBACK: Принят сигнал {best_regime_signal.strategy_name} по направлению режима")
-      #
-      # # Если ничего не сработало, выбираем лучший кандидат
-      # if not final_signal and candidate_signals:
-      #   best_signal = max(candidate_signals.values(), key=lambda s: s.confidence)
-      #   if best_signal.confidence > regime_params.min_signal_quality:
-      #     final_signal = best_signal
-      #     signal_logger.info(f"РЕШЕНИЕ: Принят лучший сигнал от стратегии {best_signal.strategy_name}.")
-      #   else:
-      #     signal_logger.warning(f"РЕШЕНИЕ: Лучший сигнал ({best_signal.strategy_name}) отклонен - низкая уверенность.")
+        # Финальная проверка минимального порога
+        if final_signal and final_signal.confidence < regime_params.min_signal_quality:
+          signal_logger.warning(
+            f"❌ Финальный сигнал отклонен: уверенность {final_signal.confidence:.3f} < {regime_params.min_signal_quality}")
+          final_signal = None
 
-      # === ОБРАБОТКА ФИНАЛЬНОГО СИГНАЛА ===
+        # Fallback на лучший сигнал если консенсус не сработал
+        if not final_signal:
+          best_signal = max(candidate_signals.values(), key=lambda s: s.confidence)
+          if best_signal.confidence >= 0.55:  # Снижен порог для fallback
+            final_signal = best_signal
+            signal_logger.info(
+              f"🔄 FALLBACK: выбран сигнал от {best_signal.strategy_name}, уверенность: {final_signal.confidence:.3f}")
+
+      else:
+        signal_logger.info(f"📭 Нет кандидатов сигналов для {symbol}")
+
+      # --- УРОВЕНЬ 5: ОБРАБОТКА ФИНАЛЬНОГО СИГНАЛА ---
       if final_signal and final_signal.signal_type != SignalType.HOLD:
+        logger.info(
+          f"🎯 ФИНАЛЬНОЕ РЕШЕНИЕ для {symbol}: {final_signal.strategy_name} {final_signal.signal_type.value}, уверенность: {final_signal.confidence:.3f}")
         signal_logger.info(f"🎯 НОВЫЙ СИГНАЛ {symbol}: {final_signal.signal_type.value} @ {final_signal.price}")
 
-        # === ИНТЕГРИРОВАННАЯ ОБРАБОТКА СИГНАЛА ===
-        # Объединяем логику корреляций и качества в основной метод обработки
-
         try:
-          # 1. Добавляем информацию о качестве в метаданные сигнала
+          # Добавляем ROI информацию в метаданные
           if not hasattr(final_signal, 'metadata') or final_signal.metadata is None:
             final_signal.metadata = {}
 
-          # 2. Добавляем ROI информацию для логирования
           try:
             roi_targets = self.risk_manager.convert_roi_to_price_targets(
               entry_price=final_signal.price,
@@ -1337,21 +1010,18 @@ class IntegratedTradingSystem:
               signal_logger.info(
                 f"  TP: {roi_targets['take_profit']['price']:.6f} (ROI: {roi_targets['take_profit']['roi_pct']:.1f}%)")
               signal_logger.info(f"  Risk/Reward: 1:{roi_targets['risk_reward_ratio']:.2f}")
-
-              # Сохраняем ROI в метаданные
               final_signal.metadata['roi_targets'] = roi_targets
           except Exception as roi_error:
             logger.debug(f"Ошибка получения ROI для {symbol}: {roi_error}")
 
-          # 3. Проверяем корреляции с открытыми позициями
+          # Проверка корреляций с открытыми позициями
           open_symbols = list(self.position_manager.open_positions.keys())
           correlation_blocked = False
 
           if open_symbols and hasattr(self, 'correlation_manager'):
             try:
-              should_block, block_reason = self.correlation_manager.should_block_signal_due_to_correlation(
-                symbol, open_symbols
-              )
+              should_block, block_reason = self.correlation_manager.should_block_signal_due_to_correlation(symbol,
+                                                                                                           open_symbols)
               if should_block:
                 logger.warning(f"Сигнал для {symbol} заблокирован корреляциями: {block_reason}")
                 signal_logger.warning(f"КОРРЕЛЯЦИЯ: Сигнал {symbol} отклонен - {block_reason}")
@@ -1359,9 +1029,8 @@ class IntegratedTradingSystem:
             except Exception as corr_error:
               logger.debug(f"Ошибка проверки корреляций для {symbol}: {corr_error}")
 
-          # 4. Если корреляции не блокируют - обрабатываем сигнал
+          # Обработка сигнала если не заблокирован
           if not correlation_blocked:
-            # Используем существующий метод обработки
             await self._process_trading_signal(final_signal, symbol, htf_data)
 
         except Exception as processing_error:
@@ -1371,18 +1040,6 @@ class IntegratedTradingSystem:
       else:
         logger.info(f"Для {symbol} не найдено подходящего сигнала в текущем режиме.")
         signal_logger.info(f"ИТОГ: Сигнал не сформирован.")
-      # if final_signal and final_signal.signal_type != SignalType.HOLD:
-      #   signal_logger.info(f"🎯 НОВЫЙ СИГНАЛ {symbol}: {final_signal.signal_type.value} @ {final_signal.price}")
-      #
-      #   # ИСПОЛЬЗУЕМ СУЩЕСТВУЮЩИЙ ПРОДВИНУТЫЙ МЕТОД ОБРАБОТКИ
-      #   if hasattr(self, '_process_trading_signal_with_correlation_and_quality'):
-      #     await self._process_trading_signal_with_correlation_and_quality(final_signal, symbol, htf_data)
-      #   else:
-      #     # Fallback к старому методу если новый не найден
-      #     await self._process_trading_signal(final_signal, symbol, htf_data)
-      # else:
-      #   logger.info(f"Для {symbol} не найдено подходящего сигнала в текущем режиме.")
-      #   signal_logger.info(f"ИТОГ: Сигнал не сформирован.")
 
     except Exception as e:
       logger.error(f"Критическая ошибка в _monitor_symbol_for_entry_enhanced для {symbol}: {e}", exc_info=True)
@@ -4964,169 +4621,6 @@ class IntegratedTradingSystem:
           logger.error(f"Ошибка при обновлении корреляций: {e}")
           await asyncio.sleep(300)  # Retry через 5 минут
 
-  async def _process_trading_signal_with_correlation_and_quality(self, signal: TradingSignal, symbol: str,
-                                                     market_data: pd.DataFrame):
-    """
-    Обработка торгового сигнала с учетом аномалий, корреляций и качества
-    """
-    # --- НОВЫЙ БЛОК: ИНФОРМАЦИОННОЕ ЛОГИРОВАНИЕ ROI ЦЕЛЕЙ ---
-    try:
-      signal_logger.info(f"====== СИГНАЛ ДЛЯ {symbol} ПОЛУЧЕН ({signal.strategy_name}) ======")
-      signal_logger.info(f"Тип: {signal.signal_type.value}, Уверенность: {signal.confidence:.2f}, Цена: {signal.price}")
-
-      roi_targets = self.risk_manager.convert_roi_to_price_targets(
-        entry_price=signal.price,
-        signal_type=signal.signal_type
-      )
-      if roi_targets:
-        signal_logger.info(f"ROI ЦЕЛИ для {symbol}:")
-        signal_logger.info(
-          f"  SL: {roi_targets['stop_loss']['price']:.6f} (ROI: {roi_targets['stop_loss']['roi_pct']:.1f}%)")
-        signal_logger.info(
-          f"  TP: {roi_targets['take_profit']['price']:.6f} (ROI: {roi_targets['take_profit']['roi_pct']:.1f}%)")
-        signal_logger.info(f"  Risk/Reward: 1:{roi_targets['risk_reward_ratio']:.2f}")
-
-    except Exception as roi_error:
-      logger.warning(f"Ошибка получения ROI информации для {symbol}: {roi_error}")
-    # --- КОНЕЦ НОВОГО БЛОКА ---
-
-
-    # 1. Оценка качества сигнала
-    logger.info(f"Оценка качества сигнала для {symbol}...")
-    signal_logger.info(f"КАЧЕСТВО: Начата оценка сигнала {symbol}")
-
-    # Загружаем дополнительные таймфреймы для анализа
-    additional_timeframes = {}
-    for tf in [Timeframe.FIFTEEN_MINUTES, Timeframe.FOUR_HOURS]:
-      try:
-        tf_data = await self.data_fetcher.get_historical_candles(symbol, tf, limit=100)
-        if not tf_data.empty:
-          additional_timeframes[tf] = tf_data
-      except Exception as e:
-        logger.debug(f"Не удалось загрузить {tf} для {symbol}: {e}")
-
-    quality_metrics = await self.signal_quality_analyzer.rate_signal_quality(
-      signal, market_data, additional_timeframes
-    )
-
-    # Логируем результаты оценки
-    logger.info(
-      f"Качество сигнала {symbol}: {quality_metrics.overall_score:.2f} ({quality_metrics.quality_category.value})")
-    signal_logger.info(
-      f"КАЧЕСТВО: Оценка {quality_metrics.overall_score:.2f} - {quality_metrics.quality_category.value}")
-
-    if quality_metrics.strengths:
-      logger.info(f"Сильные стороны: {', '.join(quality_metrics.strengths[:3])}")
-    if quality_metrics.weaknesses:
-      logger.warning(f"Слабые стороны: {', '.join(quality_metrics.weaknesses[:3])}")
-    if quality_metrics.recommendations:
-      for rec in quality_metrics.recommendations[:2]:
-        signal_logger.info(f"РЕКОМЕНДАЦИЯ: {rec}")
-
-    # Проверяем минимальное качество
-    if quality_metrics.overall_score < self.min_quality_score:
-      logger.warning(
-        f"Сигнал {symbol} отклонен из-за низкого качества: "
-        f"{quality_metrics.overall_score:.2f} < {self.min_quality_score}"
-      )
-      signal_logger.warning(f"КАЧЕСТВО: Сигнал отклонен - низкий балл {quality_metrics.overall_score:.2f}")
-      return
-
-    # 2. Стандартная фильтрация
-    is_approved, reason = await self.signal_filter.filter_signal(signal, market_data)
-    if not is_approved:
-      logger.info(f"Сигнал для {symbol} отклонен фильтром: {reason}")
-      return
-
-    # 3. Проверка корреляций
-    open_symbols = list(self.position_manager.open_positions.keys())
-    if open_symbols:
-      should_block, block_reason = self.correlation_manager.should_block_signal_due_to_correlation(
-        symbol, open_symbols
-      )
-      if should_block:
-        logger.warning(f"Сигнал для {symbol} заблокирован: {block_reason}")
-        signal_logger.warning(f"КОРРЕЛЯЦИЯ: Сигнал {symbol} отклонен - {block_reason}")
-        return
-
-    # 4. Проверка рисков
-    await self.update_account_balance()
-    if not self.account_balance or self.account_balance.available_balance_usdt <= 0:
-      return
-
-    # 5. Валидация риск-менеджером
-    risk_decision = await self.risk_manager.validate_signal(
-      signal=signal,
-      symbol=symbol,
-      account_balance=self.account_balance.available_balance_usdt,
-      market_data=market_data
-    )
-
-    if not risk_decision.get('approved'):
-      logger.info(f"Сигнал для {symbol} отклонен риск-менеджером: {risk_decision.get('reasons')}")
-      return
-
-    # 6. Корректировка размера позиции на основе качества
-    base_size = risk_decision.get('recommended_size', 0)
-
-    # Масштабируем размер в зависимости от качества
-    quality_multiplier = 1.0
-    if quality_metrics.quality_category == QualityScore.EXCELLENT:
-      quality_multiplier = 1.2  # Увеличиваем на 20% для отличных сигналов
-    elif quality_metrics.quality_category == QualityScore.GOOD:
-      quality_multiplier = 1.0  # Стандартный размер
-    elif quality_metrics.quality_category == QualityScore.FAIR:
-      quality_multiplier = 0.7  # Уменьшаем на 30%
-    else:
-      quality_multiplier = 0.5  # Минимальный размер для слабых сигналов
-
-    quality_adjusted_size = base_size * quality_multiplier
-
-    # 7. Корректировка с учетом корреляций
-    signals_dict = {symbol: {'size': quality_adjusted_size}}
-    current_positions = {
-      sym: pos.get('quantity', 0)
-      for sym, pos in self.position_manager.open_positions.items()
-    }
-
-    adjusted_sizes = await self.correlation_manager.adjust_position_sizes_by_correlation(
-      signals_dict, current_positions
-    )
-
-    final_size = adjusted_sizes.get(symbol, quality_adjusted_size)
-
-    logger.info(
-      f"Размер позиции {symbol}: база={base_size:.4f}, "
-      f"качество={quality_adjusted_size:.4f}, финал={final_size:.4f}"
-    )
-
-    # 8. Обогащаем сигнал информацией о качестве
-    signal_dict = signal.to_dict()
-    signal_dict['metadata'].update({
-      'approved_size': final_size,
-      'quality_score': quality_metrics.overall_score,
-      'quality_category': quality_metrics.quality_category.value,
-      'risk_reward_ratio': quality_metrics.risk_reward_ratio,
-      'expected_win_rate': quality_metrics.expected_win_rate,
-      'signal_percentile': quality_metrics.signal_strength_percentile,
-      'quality_adjusted': True,
-      'correlation_adjusted': final_size != quality_adjusted_size,
-      'signal_time': datetime.now().isoformat()
-    })
-
-    # 9. Ставим в очередь
-    pending_signals = self.state_manager.get_pending_signals()
-    pending_signals[symbol] = signal_dict
-    self.state_manager.update_pending_signals(pending_signals)
-
-    logger.info(
-      f"✅ Сигнал {symbol} одобрен: Качество={quality_metrics.overall_score:.2f}, "
-      f"Категория={quality_metrics.quality_category.value}, Размер={final_size:.4f}"
-    )
-    signal_logger.info(
-      f"ОДОБРЕНО: {symbol} - Качество {quality_metrics.overall_score:.2f}, "
-      f"Размер {final_size:.4f}"
-    )
 
   def _generate_quality_recommendation(self, results: Dict[str, Any]) -> str:
     """Генерирует рекомендации на основе анализа качества"""

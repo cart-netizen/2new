@@ -153,6 +153,34 @@ class IntegratedTradingSystem:
       logger.error(f"Ошибка инициализации SAR стратегии: {e}")
       self.sar_strategy = None
 
+    missing_strategy_names = []
+    expected_strategies = {
+      'Live_ML_Strategy': ml_strategy,
+      'Ichimoku_Cloud': ichimoku_strategy,
+      'Dual_Thrust': dual_thrust_strategy,
+      'Mean_Reversion_BB': mean_reversion_strategy,
+      'Grid_Trading': grid_strategy,
+      'Momentum_Spike': momentum_strategy,
+      'Stop_and_Reverse': self.sar_strategy
+    }
+
+    for name, strategy_obj in expected_strategies.items():
+      if strategy_obj is None:
+        missing_strategy_names.append(name)
+        logger.error(f"❌ Стратегия {name} равна None - не была создана!")
+        continue
+
+      if name not in self.strategy_manager.strategies:
+        try:
+          self.strategy_manager.add_strategy(strategy_obj)
+          logger.warning(f"🔧 ПРИНУДИТЕЛЬНО зарегистрирована стратегия {name}")
+        except Exception as e:
+          logger.error(f"❌ Ошибка принудительной регистрации {name}: {e}")
+          missing_strategy_names.append(name)
+
+    if missing_strategy_names:
+      logger.error(f"🚨 КРИТИЧНО: Не удалось зарегистрировать стратегии: {missing_strategy_names}")
+
     self.volatility_predictor: Optional[VolatilityPredictor] = None
     # --- НОВЫЙ БЛОК: ЗАГРУЗКА СИСТЕМЫ ВОЛАТИЛЬНОСТИ ---
     self.volatility_system: Optional[VolatilityPredictionSystem] = None
@@ -261,6 +289,32 @@ class IntegratedTradingSystem:
     self._health_check_interval = 1800  # 30 минут
     self._last_health_check = 0
 
+    # ДИАГНОСТИКА: Проверяем регистрацию всех стратегий
+    logger.info("🔍 ДИАГНОСТИКА: Проверка зарегистрированных стратегий:")
+    if hasattr(self, 'strategy_manager') and self.strategy_manager:
+      registered_strategies = list(self.strategy_manager.strategies.keys())
+      logger.info(f"📋 Зарегистрированные стратегии ({len(registered_strategies)}): {registered_strategies}")
+
+      # Проверяем каждую стратегию
+      expected_strategies = ['Live_ML_Strategy', 'Ichimoku_Cloud', 'Dual_Thrust', 'Mean_Reversion_BB', 'Grid_Trading',
+                             'Momentum_Spike', 'Stop_and_Reverse']
+
+      missing_strategies = []
+      for strategy_name in expected_strategies:
+        if strategy_name in registered_strategies:
+          strategy_obj = self.strategy_manager.strategies[strategy_name]
+          logger.info(f"✅ {strategy_name}: {type(strategy_obj).__name__}")
+        else:
+          missing_strategies.append(strategy_name)
+          logger.error(f"❌ {strategy_name}: НЕ ЗАРЕГИСТРИРОВАНА")
+
+      if missing_strategies:
+        logger.error(f"🚨 ОТСУТСТВУЮТ СТРАТЕГИИ: {missing_strategies}")
+      else:
+        logger.info("✅ Все ожидаемые стратегии зарегистрированы")
+    else:
+      logger.error("❌ Strategy manager не инициализирован!")
+
     logger.info("IntegratedTradingSystem полностью инициализирован.")
 
   @staticmethod
@@ -330,6 +384,8 @@ class IntegratedTradingSystem:
                     f"({regime_characteristics.confidence:.2f} < {regime_params.min_signal_quality})")
         return
 
+
+
       # 5. Собираем сигналы от рекомендованных стратегий
       signals = []
 
@@ -338,36 +394,111 @@ class IntegratedTradingSystem:
         if strategy_name == "Live_ML_Strategy" and not self.use_base_ml:
           continue
 
-        # Проверяем адаптивную активность стратегии
-        if not self.adaptive_selector.should_activate_strategy(
-            strategy_name, regime_characteristics.primary_regime.value
-        ):
-          logger.debug(f"Стратегия {strategy_name} отключена адаптивным селектором")
-          continue
+        # # Проверяем адаптивную активность стратегии
+        # if not self.adaptive_selector.should_activate_strategy(
+        #     strategy_name, regime_characteristics.primary_regime.value
+        # ):
+        #   logger.debug(f"Стратегия {strategy_name} отключена адаптивным селектором")
+        #   continue
+
+        adaptive_active = True  # Принудительная активация
+        if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
+          try:
+            adaptive_active = self.adaptive_selector.should_activate_strategy(
+              strategy_name, regime_characteristics.primary_regime.value
+            )
+            if not adaptive_active:
+              logger.warning(
+                f"🚨 ДИАГНОСТИКА: Стратегия {strategy_name} отключена адаптивным селектором, но принудительно активируем")
+              adaptive_active = True  # Принудительная активация для диагностики
+          except Exception as e:
+            logger.error(f"Ошибка адаптивного селектора для {strategy_name}: {e}")
+            adaptive_active = True  # Активируем при ошибке
+
+        # Логируем статус каждой стратегии
+        logger.info(f"🔍 ДИАГНОСТИКА: Проверяем стратегию {strategy_name} для {symbol}")
 
         # Пропускаем стратегии из avoided_strategies
         if strategy_name in regime_params.avoided_strategies:
           continue
 
         try:
-          # Используем унифицированные признаки для ML стратегий
+          # ДИАГНОСТИКА: Детальное логирование процесса получения сигналов
+          logger.info(f"🔍 ДИАГНОСТИКА: Запрашиваем сигнал от {strategy_name} для {symbol}")
+
+          # Проверяем наличие стратегии в менеджере
+          if not hasattr(self, 'strategy_manager') or not self.strategy_manager:
+            logger.error(f"❌ Strategy manager не инициализирован для {strategy_name}")
+            continue
+
+          if strategy_name not in self.strategy_manager.strategies:
+            logger.error(f"❌ Стратегия {strategy_name} НЕ ЗАРЕГИСТРИРОВАНА в strategy_manager")
+            logger.info(f"📋 Доступные стратегии: {list(self.strategy_manager.strategies.keys())}")
+            continue
+
+          # Получаем сигнал
+          signal = None
           if "ML" in strategy_name:
+            logger.debug(f"Используем unified_features для {strategy_name}")
             signal = await self.strategy_manager.get_signal(symbol, unified_features, strategy_name)
           else:
+            logger.debug(f"Используем htf_data для {strategy_name}")
             signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
 
-          if signal and signal.signal_type != SignalType.HOLD:
+          # Анализируем результат
+          if signal is None:
+            logger.warning(f"⚠️ Стратегия {strategy_name} вернула None для {symbol}")
+            continue
+          elif signal.signal_type == SignalType.HOLD:
+            logger.debug(f"📊 Стратегия {strategy_name} вернула HOLD для {symbol}")
+            continue
+          else:
+            # Есть торговый сигнал!
+            logger.info(
+              f"✅ Стратегия {strategy_name} вернула {signal.signal_type.value} для {symbol} (уверенность: {signal.confidence:.3f})")
+
             # Применяем адаптивный вес
-            weight = self.adaptive_selector.get_strategy_weight(
-              strategy_name, regime_characteristics.primary_regime.value
-            )
+            weight = 1.0
+            if hasattr(self, 'adaptive_selector') and self.adaptive_selector:
+              try:
+                weight = self.adaptive_selector.get_strategy_weight(
+                  strategy_name, regime_characteristics.primary_regime.value
+                )
+              except Exception as weight_error:
+                logger.error(f"Ошибка получения веса для {strategy_name}: {weight_error}")
+                weight = 1.0
+
+            # Корректируем уверенность
+            original_confidence = signal.confidence
             signal.confidence *= weight
 
             signals.append((strategy_name, signal))
-            logger.info(f"Сигнал от {strategy_name} для {symbol}: {signal.signal_type.value}, "
-                        f"вес={weight:.2f}")
+            signal_logger.info(
+              f"СТРАТЕГИЯ ({strategy_name}): Сигнал {signal.signal_type.value}, Уверенность: {original_confidence:.2f} -> {signal.confidence:.2f}, Вес: {weight:.2f}")
+
         except Exception as e:
-          logger.error(f"Ошибка получения сигнала от {strategy_name}: {e}")
+          logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА получения сигнала от {strategy_name} для {symbol}: {e}", exc_info=True)
+          continue
+
+        # try:
+        #   # Используем унифицированные признаки для ML стратегий
+        #   if "ML" in strategy_name:
+        #     signal = await self.strategy_manager.get_signal(symbol, unified_features, strategy_name)
+        #   else:
+        #     signal = await self.strategy_manager.get_signal(symbol, htf_data, strategy_name)
+        #
+        #   if signal and signal.signal_type != SignalType.HOLD:
+        #     # Применяем адаптивный вес
+        #     weight = self.adaptive_selector.get_strategy_weight(
+        #       strategy_name, regime_characteristics.primary_regime.value
+        #     )
+        #     signal.confidence *= weight
+        #
+        #     signals.append((strategy_name, signal))
+        #     logger.info(f"Сигнал от {strategy_name} для {symbol}: {signal.signal_type.value}, "
+        #                 f"вес={weight:.2f}")
+        # except Exception as e:
+        #   logger.error(f"Ошибка получения сигнала от {strategy_name}: {e}")
 
       # 6. Используем Enhanced ML для финального решения (если включена)
       final_signal = None

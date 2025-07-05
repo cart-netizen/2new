@@ -40,6 +40,8 @@ class PositionManager:
     self.trading_system = None
     # self.integrated_system: Optional[IntegratedTradingSystem] = None
     self.sar_strategy = sar_strategy
+    self.integrated_system = None
+    self.state_manager = None
   async def load_open_positions(self):
     """
     Синхронизирует состояние открытых позиций.
@@ -643,6 +645,22 @@ class PositionManager:
             }
             await sar_strategy.handle_position_update(symbol, closed_position_data)
             logger.debug(f"✅ SAR стратегия обновлена для {symbol}")
+
+      if hasattr(integrated_system, 'process_trade_feedback'):
+        trade_result = {
+          'symbol': symbol,
+          'strategy_name': strategy_name,
+          'profit_loss': net_pnl,
+          'profit_pct': trade_data['profit_pct'],
+          'close_price': trade_data['close_price'],
+          'close_timestamp': trade_data['close_timestamp'],
+          'is_profitable': is_profitable
+        }
+        await integrated_system.process_trade_feedback(symbol, trade.get('id'), trade_result)
+        logger.debug(f"✅ Trade feedback обработан для {symbol}")
+
+      if hasattr(self, 'integrated_system') and self.integrated_system:
+        await self.integrated_system.position_manager.on_position_closed(symbol, net_pnl)
 
       # 3. SHADOW TRADING - синхронизация
       shadow_manager = getattr(integrated_system, 'shadow_trading', None)

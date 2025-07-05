@@ -34,6 +34,8 @@ class TradeExecutor:
     # self.trading_system = IntegratedTradingSystem(db_manager=db_manager)
     self.pending_orders = {}
     self.shadow_trading = None
+    self.integrated_system = None  # Будет установлено IntegratedTradingSystem
+    self.state_manager = None
 
     # Инициализируем CCXT exchange если его нет
     if not hasattr(self.connector, 'exchange') or self.connector.exchange is None:
@@ -114,7 +116,7 @@ class TradeExecutor:
         current_price = current_data['close'].iloc[-1]
         price_deviation = abs(current_price - signal.price) / signal.price
 
-        # Если цена ушла более чем на 1.5% - отменяем
+        # Если цена ушла более чем на 0.5% - отменяем
         if price_deviation > 0.005:
           logger.warning(f"❌ Цена {symbol} сильно отклонилась от сигнала ({price_deviation:.1%}). Отменяем.")
 
@@ -339,8 +341,8 @@ class TradeExecutor:
           signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
           age_hours = (datetime.now() - signal_time).total_seconds() / 3600
 
-          # Если старше 4 часов - удаляем
-          if age_hours > 4:
+          # Если старше 1 часа - удаляем
+          if age_hours > 1:
             logger.warning(f"❌ Удаляем устаревший сигнал {symbol} (возраст: {age_hours:.1f}ч)")
             del pending_signals[symbol]
             continue
@@ -363,7 +365,7 @@ class TradeExecutor:
           signal_data['metadata']['last_revalidation'] = datetime.now().isoformat()
 
           # Если отклонение слишком большое - помечаем для приоритетной проверки
-          if deviation > 0.02:  # 2%
+          if deviation > 0.01:  # 2%
             signal_data['metadata']['needs_urgent_check'] = True
             logger.warning(f"⚠️ {symbol}: большое отклонение цены ({deviation:.1%})")
 
@@ -471,7 +473,8 @@ class TradeExecutor:
       if order_response and order_response.get('orderId'):
         logger.info(f"✅ Ордер на закрытие {symbol} успешно принят биржей. OrderID: {order_response.get('orderId')}")
 
-
+        # if hasattr(self, 'integrated_system') and self.integrated_system:
+        #     await self.integrated_system.position_manager.on_position_closed(symbol, profit_loss)
 
         # ВАЖНО: На этом этапе мы только отправили ордер.
         # Расчет PnL и обновление статуса в БД на 'CLOSED' должно происходить

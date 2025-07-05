@@ -1,6 +1,6 @@
 # strategies/stop_and_reverse_strategy.py
 
-import asyncio
+# import asyncio
 import json
 
 import numpy as np
@@ -156,6 +156,35 @@ class StopAndReverseStrategy(BaseStrategy):
 
         # Время последнего сигнала
         self.last_signal_time = datetime.min
+        self.performance_stats = {
+            'total_trades': 0,
+            'winning_trades': 0,
+            'losing_trades': 0,
+            'total_pnl': 0.0,
+            'win_rate': 0.0,
+            'profit_factor': 0.0,
+            'component_effectiveness': {
+                'psar_trigger': {'total': 0, 'wins': 0, 'avg_profit': 0.0},
+                'rsi_divergence': {'total': 0, 'wins': 0, 'avg_profit': 0.0},
+                'macd_divergence': {'total': 0, 'wins': 0, 'avg_profit': 0.0},
+                'aroon_confirmation': {'total': 0, 'wins': 0, 'avg_profit': 0.0},
+                'trend_alignment': {'total': 0, 'wins': 0, 'avg_profit': 0.0},
+                'momentum_strength': {'total': 0, 'wins': 0, 'avg_profit': 0.0}
+            },
+            'parameter_adjustments': [],
+            'last_update': datetime.now()
+        }
+
+        # Словарь параметров PSAR для динамической корректировки
+        self.psar_params = {
+            'start': self.psar_start,
+            'step': self.psar_step,
+            'max': self.psar_max,
+            'acceleration_factor': self.psar_start,
+            'sensitivity': self.sensitivity,
+            'confidence_threshold': self.confidence_threshold,
+            'last_modified': datetime.now()
+        }
         
         logger.info(f"✅ Stop-and-Reverse стратегия инициализирована с конфигурацией: {self.sar_config}")
 
@@ -511,22 +540,55 @@ class StopAndReverseStrategy(BaseStrategy):
             logger.error(f"Ошибка проверки MACD дивергенции: {e}")
             return False
 
-    def _find_peaks(self, data: np.ndarray, min_distance: int = 3) -> List[float]:
-        """Находит локальные максимумы в данных"""
+    def _find_peaks(self, data: pd.DataFrame, min_distance: int = 3) -> List[float]:
+        """Находит локальные максимумы в данных, корректно извлекая значения."""
         peaks = []
+        # We use .iloc for integer-location based indexing, which is safer
         for i in range(min_distance, len(data) - min_distance):
-            if all(data[i] >= data[i-j] for j in range(1, min_distance + 1)) and \
-               all(data[i] >= data[i+j] for j in range(1, min_distance + 1)):
-                peaks.append(data[i])
+            # Isolate the 'high' value at the current position
+            current_high_value = data.iloc[i]['high']
+
+            # Compare the current 'high' with the 'high' of surrounding candles
+            is_peak = all(current_high_value >= data.iloc[i - j]['high'] for j in range(1, min_distance + 1)) and \
+                      all(current_high_value >= data.iloc[i + j]['high'] for j in range(1, min_distance + 1))
+
+            if is_peak:
+                # CORRECTED: Append only the float value, not the entire row
+                peaks.append(current_high_value)
+
         return peaks
 
-    def _find_troughs(self, data: np.ndarray, min_distance: int = 3) -> List[float]:
+    # def _find_peaks(self, data: np.ndarray, min_distance: int = 3) -> List[float]:
+    #     """Находит локальные максимумы в данных"""
+    #     peaks = []
+    #     for i in range(min_distance, len(data) - min_distance):
+    #         if all(data[i] >= data[i-j] for j in range(1, min_distance + 1)) and \
+    #            all(data[i] >= data[i+j] for j in range(1, min_distance + 1)):
+    #             peaks.append(data[i])
+    #     return peaks
+
+    # def _find_troughs(self, data: np.ndarray, min_distance: int = 3) -> List[float]:
+    #     """Находит локальные минимумы в данных"""
+    #     troughs = []
+    #     for i in range(min_distance, len(data) - min_distance):
+    #         if all(data[i] <= data[i-j] for j in range(1, min_distance + 1)) and \
+    #            all(data[i] <= data[i+j] for j in range(1, min_distance + 1)):
+    #             troughs.append(data[i])
+    #     return troughs
+
+    def _find_troughs(self, data: pd.DataFrame, min_distance: int = 3) -> List[float]:
         """Находит локальные минимумы в данных"""
         troughs = []
         for i in range(min_distance, len(data) - min_distance):
-            if all(data[i] <= data[i-j] for j in range(1, min_distance + 1)) and \
-               all(data[i] <= data[i+j] for j in range(1, min_distance + 1)):
-                troughs.append(data[i])
+            # Предполагаем, что 'data' это DataFrame, и нас интересует колонка 'low'
+            current_low_value = data.iloc[i]['low']
+
+            # Сравниваем конкретные значения, а не целые строки
+            is_trough = all(current_low_value <= data.iloc[i - j]['low'] for j in range(1, min_distance + 1)) and \
+                        all(current_low_value <= data.iloc[i + j]['low'] for j in range(1, min_distance + 1))
+
+            if is_trough:
+                troughs.append(current_low_value)  # <-- ИСПРАВЛЕНО: добавляется только число
         return troughs
 
     def _check_rsi_extreme_zone(self, data: pd.DataFrame) -> bool:
@@ -1170,6 +1232,29 @@ class StopAndReverseStrategy(BaseStrategy):
             # Сбор статистики винрейта SAR
             pnl_pct = closed_position.get('profit_loss', 0.0)
 
+            component_analysis = {
+                'psar_effectiveness': self._analyze_psar_component(symbol, closed_position),
+                'trend_alignment': self._analyze_trend_component(symbol, closed_position),
+                'momentum_strength': self._analyze_momentum_component(symbol, closed_position)
+            }
+
+            self.performance_stats['component_effectiveness'].update(component_analysis)
+
+            # Корректировка параметров на основе результатов
+            if self.performance_stats['total_trades'] >= 10:  # Минимум для анализа
+                win_rate = self.performance_stats['winning_trades'] / self.performance_stats['total_trades']
+
+                # Автоматическая корректировка параметров
+                if win_rate < 0.4:  # Низкий винрейт
+                    await self._adjust_strategy_parameters('conservative')
+                    logger.info(f"SAR параметры скорректированы в консервативную сторону. Win rate: {win_rate:.2%}")
+                elif win_rate > 0.7:  # Высокий винрейт
+                    await self._adjust_strategy_parameters('aggressive')
+                    logger.info(f"SAR параметры скорректированы в агрессивную сторону. Win rate: {win_rate:.2%}")
+
+            logger.info(
+                f"✅ SAR статистика обновлена для {symbol}. Total trades: {self.performance_stats['total_trades']}")
+
             if not hasattr(self, 'performance_stats'):
                 self.performance_stats = {
                     'total_trades': 0,
@@ -1214,6 +1299,352 @@ class StopAndReverseStrategy(BaseStrategy):
 
         except Exception as e:
             logger.error(f"Ошибка обновления статистики SAR: {e}")
+
+    def _analyze_psar_component(self, symbol: str, position: Dict) -> float:
+        """Анализирует эффективность PSAR компонента на основе реальных данных"""
+        try:
+            profit_loss = position.get('profit_loss', 0)
+            profit_pct = position.get('profit_pct', 0)
+            metadata = position.get('metadata', {})
+
+            # Базовая оценка на основе прибыльности
+            base_score = 0.5  # Нейтральная оценка
+
+            # Анализ компонентов сигнала SAR из метаданных
+            sar_components = metadata.get('sar_components', {})
+            psar_trigger = sar_components.get('psar_trigger', False)
+
+            # Если PSAR был триггером сигнала
+            if psar_trigger:
+                if profit_loss > 0:
+                    # Прибыльная сделка с PSAR триггером - высокая оценка
+                    base_score = min(1.0, 0.7 + (profit_pct / 100) * 0.3)
+                else:
+                    # Убыточная сделка с PSAR триггером - низкая оценка
+                    base_score = max(0.0, 0.3 + (profit_pct / 100) * 0.3)
+            else:
+                # PSAR не был основным триггером
+                if profit_loss > 0:
+                    base_score = 0.6  # Средняя оценка для прибыльных
+                else:
+                    base_score = 0.4  # Ниже средней для убыточных
+
+            # Учитываем силу сигнала (если есть в метаданных)
+            signal_strength = metadata.get('signal_strength', 0.5)
+            volatility_regime = metadata.get('volatility_regime', 'normal')
+
+            # Корректировка на основе режима волатильности
+            if volatility_regime == 'high':
+                base_score *= 0.9  # PSAR менее эффективен в высокой волатильности
+            elif volatility_regime == 'low':
+                base_score *= 1.1  # PSAR более эффективен в низкой волатильности
+
+            # Обновляем статистику компонента
+            if 'psar_trigger' not in self.performance_stats['component_effectiveness']:
+                self.performance_stats['component_effectiveness']['psar_trigger'] = {
+                    'total': 0, 'wins': 0, 'avg_profit': 0.0
+                }
+
+            comp_stats = self.performance_stats['component_effectiveness']['psar_trigger']
+            comp_stats['total'] += 1
+            if profit_loss > 0:
+                comp_stats['wins'] += 1
+
+            # Обновляем среднюю прибыль
+            comp_stats['avg_profit'] = (
+                (comp_stats['avg_profit'] * (comp_stats['total'] - 1) + profit_loss) /
+                comp_stats['total']
+            )
+
+            return min(1.0, max(0.0, base_score))
+
+        except Exception as e:
+            logger.error(f"Ошибка анализа PSAR компонента для {symbol}: {e}")
+            return 0.5  # Нейтральная оценка при ошибке
+
+    def _analyze_trend_component(self, symbol: str, position: Dict) -> float:
+        """Анализирует эффективность трендового компонента"""
+        try:
+            profit_loss = position.get('profit_loss', 0)
+            profit_pct = position.get('profit_pct', 0)
+            metadata = position.get('metadata', {})
+            side = position.get('side', 'BUY')
+
+            # Получаем информацию о тренде из метаданных
+            sar_components = metadata.get('sar_components', {})
+            macro_trend_alignment = sar_components.get('macro_trend_alignment', False)
+
+            # Анализ рыночных данных для определения эффективности тренда
+            trend_score = 0.5  # Базовая оценка
+
+            # Если сделка была в направлении основного тренда
+            if macro_trend_alignment:
+                if profit_loss > 0:
+                    # Прибыльная сделка по тренду - отличная оценка
+                    trend_score = min(1.0, 0.8 + (abs(profit_pct) / 100) * 0.2)
+                else:
+                    # Убыточная сделка по тренду - возможно ложный пробой
+                    trend_score = max(0.2, 0.4 + (profit_pct / 100) * 0.2)
+            else:
+                # Сделка против тренда
+                if profit_loss > 0:
+                    # Прибыльная контртрендовая сделка - хорошая оценка
+                    trend_score = min(0.8, 0.6 + (abs(profit_pct) / 100) * 0.2)
+                else:
+                    # Убыточная контртрендовая сделка - ожидаемо
+                    trend_score = max(0.1, 0.3 + (profit_pct / 100) * 0.2)
+
+            # Дополнительные факторы из метаданных
+            adx_strength = metadata.get('adx_value', 25)  # Сила тренда
+            if adx_strength > 40:
+                trend_score *= 1.1  # Сильный тренд увеличивает эффективность
+            elif adx_strength < 20:
+                trend_score *= 0.9  # Слабый тренд снижает эффективность
+
+            # Учитываем время удержания позиции
+            open_time = position.get('open_timestamp')
+            close_time = position.get('close_timestamp')
+            if open_time and close_time:
+                try:
+                    if isinstance(open_time, str):
+                        open_time = datetime.fromisoformat(open_time.replace('Z', '+00:00'))
+                    if isinstance(close_time, str):
+                        close_time = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+
+                    hold_duration = (close_time - open_time).total_seconds() / 3600  # часы
+
+                    # Оптимальное время удержания для трендовых сделок 4-24 часа
+                    if 4 <= hold_duration <= 24:
+                        trend_score *= 1.05  # Бонус за оптимальное время
+                    elif hold_duration < 1:
+                        trend_score *= 0.9  # Штраф за слишком быстрое закрытие
+                    elif hold_duration > 48:
+                        trend_score *= 0.95  # Небольшой штраф за очень долгое удержание
+                except Exception:
+                    pass  # Игнорируем ошибки парсинга времени
+
+            # Обновляем статистику трендового компонента
+            if 'trend_alignment' not in self.performance_stats['component_effectiveness']:
+                self.performance_stats['component_effectiveness']['trend_alignment'] = {
+                    'total': 0, 'wins': 0, 'avg_profit': 0.0
+                }
+
+            comp_stats = self.performance_stats['component_effectiveness']['trend_alignment']
+            comp_stats['total'] += 1
+            if profit_loss > 0:
+                comp_stats['wins'] += 1
+            comp_stats['avg_profit'] = (
+                (comp_stats['avg_profit'] * (comp_stats['total'] - 1) + profit_loss) /
+                comp_stats['total']
+            )
+
+            return min(1.0, max(0.0, trend_score))
+
+        except Exception as e:
+            logger.error(f"Ошибка анализа трендового компонента для {symbol}: {e}")
+            return 0.5  # Нейтральная оценка при ошибке
+
+    def _analyze_momentum_component(self, symbol: str, position: Dict) -> float:
+        """Анализирует эффективность моментум компонента"""
+        try:
+            profit_loss = position.get('profit_loss', 0)
+            profit_pct = position.get('profit_pct', 0)
+            metadata = position.get('metadata', {})
+
+            # Получаем компоненты моментума из метаданных
+            sar_components = metadata.get('sar_components', {})
+            rsi_divergence = sar_components.get('rsi_divergence', False)
+            macd_divergence = sar_components.get('macd_divergence', False)
+            aroon_confirmation = sar_components.get('aroon_confirmation', False)
+
+            # Базовая оценка моментума
+            momentum_score = 0.5
+            momentum_signals = 0
+
+            # Анализ RSI дивергенции
+            if rsi_divergence:
+                momentum_signals += 1
+                if profit_loss > 0:
+                    momentum_score += 0.15  # RSI дивергенция и прибыль
+                else:
+                    momentum_score -= 0.05  # RSI дивергенция но убыток
+
+            # Анализ MACD дивергенции
+            if macd_divergence:
+                momentum_signals += 1
+                if profit_loss > 0:
+                    momentum_score += 0.15  # MACD дивергенция и прибыль
+                else:
+                    momentum_score -= 0.05  # MACD дивергенция но убыток
+
+            # Анализ подтверждения Aroon
+            if aroon_confirmation:
+                momentum_signals += 1
+                if profit_loss > 0:
+                    momentum_score += 0.1  # Aroon подтверждение и прибыль
+                else:
+                    momentum_score -= 0.03  # Aroon подтверждение но убыток
+
+            # Бонус за множественные сигналы моментума
+            if momentum_signals >= 2:
+                momentum_score += 0.1  # Бонус за конвергенцию сигналов
+            elif momentum_signals == 0:
+                momentum_score -= 0.1  # Штраф за отсутствие моментума
+
+            # Учитываем величину движения цены
+            if abs(profit_pct) > 2.0:
+                # Сильное движение цены
+                if profit_loss > 0:
+                    momentum_score += 0.1  # Бонус за поимку сильного движения
+                else:
+                    momentum_score -= 0.15  # Большой штраф за пропуск движения
+
+            # Анализ скорости достижения цели
+            roi_targets = metadata.get('roi_targets', {})
+            if roi_targets:
+                stop_loss_roi = roi_targets.get('stop_loss', {}).get('roi_pct', -2.0)
+                take_profit_roi = roi_targets.get('take_profit', {}).get('roi_pct', 4.0)
+
+                # Если достигли цели быстро - хороший моментум
+                if profit_pct >= take_profit_roi * 0.8:
+                    momentum_score += 0.1
+                elif profit_pct <= stop_loss_roi * 1.2:
+                    momentum_score -= 0.1
+
+            # Временной анализ моментума
+            signal_strength = metadata.get('signal_strength', 0.5)
+            confidence = metadata.get('confidence', 0.5)
+
+            # Корректировка на основе уверенности в сигнале
+            momentum_score *= (0.8 + confidence * 0.4)  # Диапазон 0.8-1.2
+
+            # Обновляем статистику моментум компонента
+            if 'momentum_strength' not in self.performance_stats['component_effectiveness']:
+                self.performance_stats['component_effectiveness']['momentum_strength'] = {
+                    'total': 0, 'wins': 0, 'avg_profit': 0.0, 'signal_count': 0
+                }
+
+            comp_stats = self.performance_stats['component_effectiveness']['momentum_strength']
+            comp_stats['total'] += 1
+            comp_stats['signal_count'] += momentum_signals
+            if profit_loss > 0:
+                comp_stats['wins'] += 1
+            comp_stats['avg_profit'] = (
+                (comp_stats['avg_profit'] * (comp_stats['total'] - 1) + profit_loss) /
+                comp_stats['total']
+            )
+
+            return min(1.0, max(0.0, momentum_score))
+
+        except Exception as e:
+            logger.error(f"Ошибка анализа моментум компонента для {symbol}: {e}")
+            return 0.5  # Нейтральная оценка при ошибке
+
+    async def _adjust_strategy_parameters(self, mode: str):
+        """Корректирует параметры стратегии на основе производительности"""
+        try:
+            old_params = self.psar_params.copy()
+            adjustment_reason = f"Performance-based adjustment: {mode}"
+
+            if mode == 'conservative':
+                # Делаем стратегию более консервативной
+                self.psar_params['acceleration_factor'] = min(
+                    0.015,
+                    self.psar_params.get('acceleration_factor', 0.02) * 0.8
+                )
+                self.psar_params['sensitivity'] = max(
+                    0.6,
+                    self.psar_params.get('sensitivity', 0.8) * 0.9
+                )
+                self.psar_params['confidence_threshold'] = min(
+                    0.9,
+                    self.psar_params.get('confidence_threshold', 0.7) * 1.1
+                )
+                # Увеличиваем пороги для более строгой фильтрации
+                self.chop_threshold = min(50, self.chop_threshold * 1.1)
+                self.adx_threshold = min(35, self.adx_threshold * 1.1)
+
+            elif mode == 'aggressive':
+                # Делаем стратегию более агрессивной
+                self.psar_params['acceleration_factor'] = min(
+                    0.035,
+                    self.psar_params.get('acceleration_factor', 0.02) * 1.3
+                )
+                self.psar_params['sensitivity'] = min(
+                    1.0,
+                    self.psar_params.get('sensitivity', 0.8) * 1.1
+                )
+                self.psar_params['confidence_threshold'] = max(
+                    0.5,
+                    self.psar_params.get('confidence_threshold', 0.7) * 0.9
+                )
+                # Снижаем пороги для более частых сигналов
+                self.chop_threshold = max(30, self.chop_threshold * 0.9)
+                self.adx_threshold = max(20, self.adx_threshold * 0.9)
+
+            elif mode == 'adaptive':
+                # Адаптивная корректировка на основе статистики компонентов
+                component_stats = self.performance_stats['component_effectiveness']
+
+                # Анализируем эффективность PSAR триггера
+                psar_stats = component_stats.get('psar_trigger', {})
+                psar_winrate = (psar_stats.get('wins', 0) / max(1, psar_stats.get('total', 1)))
+
+                if psar_winrate > 0.7:
+                    # PSAR очень эффективен - увеличиваем чувствительность
+                    self.psar_params['acceleration_factor'] *= 1.1
+                    self.psar_params['sensitivity'] *= 1.05
+                elif psar_winrate < 0.4:
+                    # PSAR неэффективен - уменьшаем чувствительность
+                    self.psar_params['acceleration_factor'] *= 0.9
+                    self.psar_params['sensitivity'] *= 0.95
+
+                # Анализируем эффективность тренда
+                trend_stats = component_stats.get('trend_alignment', {})
+                trend_winrate = (trend_stats.get('wins', 0) / max(1, trend_stats.get('total', 1)))
+
+                if trend_winrate > 0.7:
+                    # Тренд эффективен - снижаем пороги фильтров
+                    self.adx_threshold = max(20, self.adx_threshold * 0.95)
+                elif trend_winrate < 0.4:
+                    # Тренд неэффективен - повышаем пороги фильтров
+                    self.adx_threshold = min(35, self.adx_threshold * 1.05)
+
+                adjustment_reason = f"Adaptive adjustment based on component analysis"
+
+            # Обновляем временные метки
+            self.psar_params['last_modified'] = datetime.now()
+
+            # Записываем изменения в историю
+            parameter_change = {
+                'timestamp': datetime.now().isoformat(),
+                'mode': mode,
+                'reason': adjustment_reason,
+                'old_params': old_params,
+                'new_params': self.psar_params.copy(),
+                'performance_trigger': {
+                    'total_trades': self.performance_stats.get('total_trades', 0),
+                    'win_rate': self.performance_stats.get('win_rate', 0),
+                    'profit_factor': self.performance_stats.get('profit_factor', 0)
+                }
+            }
+
+            self.performance_stats['parameter_adjustments'].append(parameter_change)
+
+            # Ограничиваем размер истории изменений (последние 50 записей)
+            if len(self.performance_stats['parameter_adjustments']) > 50:
+                self.performance_stats['parameter_adjustments'] = \
+                    self.performance_stats['parameter_adjustments'][-50:]
+
+            logger.info(f"SAR параметры скорректированы в режим {mode}")
+            logger.info(
+                f"Acceleration factor: {old_params.get('acceleration_factor', 0)} → {self.psar_params['acceleration_factor']}")
+            logger.info(f"Sensitivity: {old_params.get('sensitivity', 0)} → {self.psar_params['sensitivity']}")
+            logger.info(
+                f"Confidence threshold: {old_params.get('confidence_threshold', 0)} → {self.psar_params['confidence_threshold']}")
+
+        except Exception as e:
+            logger.error(f"Ошибка корректировки параметров SAR: {e}")
 
     async def _adaptive_parameter_adjustment(self):
         """Корректирует параметры SAR на основе результатов"""

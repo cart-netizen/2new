@@ -230,6 +230,7 @@ class IntegratedTradingSystem:
     self.retraining_manager = ModelRetrainingManager(data_fetcher=self.data_fetcher)
     self._retraining_task: Optional[asyncio.Task] = None
     self._time_sync_task: Optional[asyncio.Task] = None
+    self.trade_executor.state_manager = self.state_manager
 
     # --- НОВЫЙ БЛОК: ЗАГРУЗКА ПРЕДИКТОРА ВОЛАТИЛЬНОСТИ ---
 
@@ -250,6 +251,15 @@ class IntegratedTradingSystem:
 
     self.signal_filter = SignalFilter(self.config, self.data_fetcher, self.market_regime_detector, self.correlation_manager)
     self.signal_processor = SignalProcessor(self.risk_manager, self.signal_filter, self.signal_quality_analyzer)
+
+    # Настройка порогов качества по умолчанию
+    if hasattr(self, 'set_quality_thresholds'):
+      self.set_quality_thresholds(min_score=0.6)
+      logger.info("✅ Пороги качества сигналов настроены")
+
+    # Периодическая задача анализа здоровья системы
+    self._health_check_interval = 1800  # 30 минут
+    self._last_health_check = 0
 
     logger.info("IntegratedTradingSystem полностью инициализирован.")
 
@@ -384,9 +394,111 @@ class IntegratedTradingSystem:
 
       # 7. Если Enhanced ML не используется или не дала результат
       if not final_signal and signals:
-        best_signal = max(signals, key=lambda x: x[1].confidence)
-        final_signal = best_signal[1]
-        logger.info(f"Выбран сигнал от {best_signal[0]} для {symbol}")
+        logger.info(f"Анализ {len(signals)} кандидатов сигналов для {symbol}")
+
+        # Группируем сигналы по типу (BUY/SELL)
+        buy_signals = [(name, sig) for name, sig in signals if sig.signal_type == SignalType.BUY]
+        sell_signals = [(name, sig) for name, sig in signals if sig.signal_type == SignalType.SELL]
+
+        signal_logger.info(f"КАНДИДАТЫ для {symbol}: {len(buy_signals)} BUY, {len(sell_signals)} SELL")
+
+        # Анализируем консенсус
+        final_signal = None
+
+        if len(buy_signals) > len(sell_signals) and buy_signals:
+          # Консенсус на покупку
+          if len(buy_signals) >= 2:  # Множественное подтверждение
+            # Взвешенное усреднение уверенности
+            total_weight = sum(sig.confidence for _, sig in buy_signals)
+            weighted_confidence = total_weight / len(buy_signals)
+
+            # Выбираем сигнал с лучшей уверенностью как базу
+            best_buy = max(buy_signals, key=lambda x: x[1].confidence)
+            final_signal = best_buy[1]
+
+            # Повышаем уверенность за счет консенсуса (максимум до 0.95)
+            consensus_boost = min(0.2, (len(buy_signals) - 1) * 0.05)
+            final_signal.confidence = min(0.95, weighted_confidence + consensus_boost)
+
+            # Обновляем метаданные
+            confirming_strategies = [name for name, _ in buy_signals]
+            final_signal.metadata = final_signal.metadata or {}
+            final_signal.metadata.update({
+              'consensus_type': 'multiple_buy',
+              'confirming_strategies': confirming_strategies,
+              'original_confidence': best_buy[1].confidence,
+              'consensus_boost': consensus_boost,
+              'weighted_confidence': weighted_confidence
+            })
+
+            signal_logger.info(
+              f"КОНСЕНСУС BUY для {symbol}: {confirming_strategies}, итоговая уверенность: {final_signal.confidence:.3f}")
+
+          else:
+            # Одиночный BUY сигнал
+            final_signal = buy_signals[0][1]
+            signal_logger.info(
+              f"ОДИНОЧНЫЙ BUY для {symbol} от {buy_signals[0][0]}, уверенность: {final_signal.confidence:.3f}")
+
+        elif len(sell_signals) > len(buy_signals) and sell_signals:
+          # Консенсус на продажу (аналогичная логика)
+          if len(sell_signals) >= 2:
+            total_weight = sum(sig.confidence for _, sig in sell_signals)
+            weighted_confidence = total_weight / len(sell_signals)
+
+            best_sell = max(sell_signals, key=lambda x: x[1].confidence)
+            final_signal = best_sell[1]
+
+            consensus_boost = min(0.2, (len(sell_signals) - 1) * 0.05)
+            final_signal.confidence = min(0.95, weighted_confidence + consensus_boost)
+
+            confirming_strategies = [name for name, _ in sell_signals]
+            final_signal.metadata = final_signal.metadata or {}
+            final_signal.metadata.update({
+              'consensus_type': 'multiple_sell',
+              'confirming_strategies': confirming_strategies,
+              'original_confidence': best_sell[1].confidence,
+              'consensus_boost': consensus_boost,
+              'weighted_confidence': weighted_confidence
+            })
+
+            signal_logger.info(
+              f"КОНСЕНСУС SELL для {symbol}: {confirming_strategies}, итоговая уверенность: {final_signal.confidence:.3f}")
+          else:
+            final_signal = sell_signals[0][1]
+            signal_logger.info(
+              f"ОДИНОЧНЫЙ SELL для {symbol} от {sell_signals[0][0]}, уверенность: {final_signal.confidence:.3f}")
+
+        elif len(buy_signals) == len(sell_signals) and buy_signals and sell_signals:
+          # Конфликт сигналов - выбираем по наивысшей уверенности
+          all_signals = buy_signals + sell_signals
+          best_signal = max(all_signals, key=lambda x: x[1].confidence)
+
+          # Снижаем уверенность из-за конфликта
+          final_signal = best_signal[1]
+          final_signal.confidence *= 0.8  # Штраф за конфликт
+
+          final_signal.metadata = final_signal.metadata or {}
+          final_signal.metadata.update({
+            'consensus_type': 'conflict_resolved',
+            'conflicting_strategies': [name for name, _ in all_signals],
+            'conflict_penalty': 0.2
+          })
+
+          signal_logger.warning(
+            f"КОНФЛИКТ СИГНАЛОВ для {symbol}: выбран {best_signal[0]} с пониженной уверенностью {final_signal.confidence:.3f}")
+
+        # Финальная проверка минимального порога
+        if final_signal and final_signal.confidence < regime_params.min_signal_quality:
+          signal_logger.warning(
+            f"Финальный сигнал отклонен: уверенность {final_signal.confidence:.3f} < {regime_params.min_signal_quality}")
+          final_signal = None
+
+        if final_signal:
+          logger.info(
+            f"✅ Финальный выбор для {symbol}: {final_signal.strategy_name} {final_signal.signal_type.value}, уверенность: {final_signal.confidence:.3f}")
+        else:
+          logger.info(f"❌ Нет подходящих сигналов для {symbol}")
 
       # 8. Применяем параметры режима к сигналу
       if final_signal:
@@ -410,7 +522,7 @@ class IntegratedTradingSystem:
 
         # Проверяем минимальную уверенность после корректировок
         if final_signal.confidence >= regime_params.min_signal_quality:
-          await self._process_trading_signal(symbol, final_signal)
+          await self._process_trading_signal(final_signal,symbol, htf_data)
         else:
           logger.info(f"Сигнал отклонен: уверенность {final_signal.confidence:.2f} "
                       f"< минимум {regime_params.min_signal_quality}")
@@ -2442,7 +2554,7 @@ class IntegratedTradingSystem:
   async def initialize_symbols_if_empty(self):
     if not self.active_symbols:
       logger.info("Список активных символов пуст, попытка повторной инициализации...")
-      self.active_symbols = await self.data_fetcher.get_active_symbols_by_volume()
+      self.active_symbols = await self.data_fetcher.get_active_symbols_by_volume(100)
       if self.active_symbols:
         logger.info(f"Символы успешно реинициализированы: {self.active_symbols}")
       else:
@@ -3547,6 +3659,17 @@ class IntegratedTradingSystem:
     last_activity_time = datetime.now()
 
     await self.position_manager.load_open_positions()
+    # Периодическая проверка здоровья системы
+    current_time = time.time()
+    if (hasattr(self, 'get_system_health') and
+        current_time - self._last_health_check > self._health_check_interval):
+      try:
+        health_status = await self.get_system_health()
+        if health_status.get('status') != 'healthy':
+          logger.warning(f"Проблемы со здоровьем системы: {health_status}")
+        self._last_health_check = current_time
+      except Exception as e:
+        logger.error(f"Ошибка проверки здоровья системы: {e}")
 
     while self.is_running:
       try:
@@ -3596,8 +3719,8 @@ class IntegratedTradingSystem:
               # Используем enhanced версию если модели загружены
               if self.enhanced_ml_model and self.anomaly_detector:
                 tasks.append(self._monitor_symbol_for_entry_enhanced(symbol))
-              else:
-                tasks.append(self._monitor_symbol_for_entry(symbol))
+              # else:
+              #   tasks.append(self._monitor_symbol_for_entry(symbol))
 
 
           # Выполняем все задачи батча параллельно
@@ -5029,7 +5152,7 @@ class IntegratedTradingSystem:
 
         # 1. Обновляем производительность стратегии
         if hasattr(self, 'adaptive_selector'):
-          self.adaptive_selector.update_strategy_performance(strategy_name, trade_result)
+          await self.adaptive_selector.update_strategy_performance(strategy_name, trade_result)
 
         # # 2. Сохраняем данные для переобучения ML
         if self.retraining_manager:

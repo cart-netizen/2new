@@ -26,6 +26,108 @@
         "enable_request_batching": true,
         "enable_cache": true
     },
+    "ltf_entry_settings": {
+        "description": "Настройки для оптимального входа на низких таймфреймах",
+        "timeframes": {
+            "primary_analysis": "1h",
+            "ltf_entry": "5m",
+            "level_analysis": "15m"
+        },
+        "level_detection": {
+            "lookback_periods": 50,
+            "min_touches": 2,
+            "proximity_threshold_pct": 0.3,
+            "cluster_threshold_pct": 0.2,
+            "max_levels_to_track": 5
+        },
+        "entry_patterns": {
+            "enabled_patterns": [
+                "hammer",
+                "bullish_engulfing",
+                "bearish_engulfing",
+                "shooting_star",
+                "doji_reversal"
+            ],
+            "min_pattern_score": 0.7,
+            "require_volume_confirmation": true,
+            "volume_spike_multiplier": 1.5
+        },
+        "entry_conditions": {
+            "ideal_entry": {
+                "require_level": true,
+                "require_pattern": true,
+                "require_indicator_confirmation": true,
+                "min_confidence": 0.8
+            },
+            "good_entry": {
+                "require_level": true,
+                "require_pattern": false,
+                "require_indicator_confirmation": true,
+                "min_confidence": 0.6
+            },
+            "acceptable_entry": {
+                "require_level": true,
+                "require_pattern": false,
+                "require_indicator_confirmation": false,
+                "min_confidence": 0.4
+            }
+        },
+        "signal_aging": {
+            "max_age_hours": 4,
+            "relaxation_schedule": {
+                "0-30_minutes": "ideal_only",
+                "30-60_minutes": "good_or_better",
+                "60-120_minutes": "acceptable_or_better",
+                "120+_minutes": "any_valid"
+            },
+            "size_reduction": {
+                "0-60_minutes": 1.0,
+                "60-120_minutes": 0.8,
+                "120-180_minutes": 0.6,
+                "180+_minutes": 0.5
+            }
+        },
+        "divergence_detection": {
+            "enabled": true,
+            "lookback_swings": 3,
+            "min_swing_distance": 5,
+            "rsi_divergence_threshold": 5,
+            "macd_divergence_enabled": true
+        },
+        "market_structure": {
+            "analyze_structure": true,
+            "swing_detection_bars": 5,
+            "trend_bias_multiplier": {
+                "with_trend": 1.2,
+                "counter_trend": 0.7
+            }
+        },
+        "risk_adjustments": {
+            "adverse_movement_threshold_pct": 2.0,
+            "cancel_if_moved_against": true,
+            "reduce_size_on_late_entry": true,
+            "adjust_stops_on_late_entry": true
+        },
+        "indicator_thresholds": {
+            "rsi": {
+                "oversold": 30,
+                "overbought": 70,
+                "neutral_zone": [
+                    45,
+                    55
+                ]
+            },
+            "stochastic": {
+                "oversold": 20,
+                "overbought": 80,
+                "use_crossovers": true
+            },
+            "volume": {
+                "min_ratio": 0.8,
+                "spike_ratio": 1.5
+            }
+        }
+    },
     "trade_settings": {
         "leverage": 10,
         "order_size_type": "fixed",
@@ -33,10 +135,10 @@
         "min_order_value_usdt": 5.5,
         "grid_total_usdt_allocation": 10.0,
         "roi_stop_loss_pct": 8.0,
-        "roi_take_profit_pct": 60.0
+        "roi_take_profit_pct": 40.0
     },
     "strategy_settings": {
-        "signal_confidence_threshold": 0.5,
+        "signal_confidence_threshold": 0.65,
         "use_trend_filter": true,
         "ema_period": 200,
         "use_adx_filter": true,
@@ -45,18 +147,12 @@
         "max_atr_percentage": 20.0,
         "use_aroon_filter": true,
         "use_psar_exit": true,
-        "use_btc_trend_filter": true,
+        "use_btc_trend_filter": false,
         "use_atr_trailing_stop": true,
-        "atr_ts_multiplier": 1.0,
-        "sl_multiplier": 0.15,
-        "use_reverse_function": true,
-        "tp_multiplier": 2.5,
-        "ltf_entry_timeframe": "1m",
-        "fast_monitoring_interval": 5,
-        "min_profit_for_reverse_pct": 0.225,
-        "use_partial_profit_taking": true,
-        "partial_tp_target_pct": 2.0,
-        "partial_close_percentage": 30
+        "atr_ts_multiplier": 3.0,
+        "sl_multiplier": 1.0,
+        "tp_multiplier": 1.8,
+        "ltf_entry_timeframe": "5m"
     },
     "general_settings": {
         "symbol_selection_mode": "dynamic",
@@ -67,21 +163,21 @@
         "monitoring_interval_seconds": 30
     },
     "feature_weights": {
-    "price_to_ema_200_4h": 1.5,
-    "EMA_200": 1.3,
-    "adx_long_term": 1.2,
-    "price_to_ema_200_ratio": 1.4,
-    "volume_spike_ratio_4h": 1.5,
-    "rsi_14_4h": 1.4,
-    "vpt": 1.3,
-    "price_to_ema_200_1d": 1.2,
-    "rsi_14_1d": 1.1,
-    "volume_spike_ratio_1d": 1.1,
-    "ema_50": 1.1,
-    "volatility_20": 1.1,
-    "AROONOSC_14_1H": 1.2,
-    "rsi_14_15m": 0.5,
-    "price_to_ema_200_30m": 0.6
+        "price_to_ema_200_4h": 1.5,
+        "EMA_200": 1.3,
+        "adx_long_term": 1.2,
+        "price_to_ema_200_ratio": 1.4,
+        "volume_spike_ratio_4h": 1.5,
+        "rsi_14_4h": 1.4,
+        "vpt": 1.3,
+        "price_to_ema_200_1d": 1.2,
+        "rsi_14_1d": 1.1,
+        "volume_spike_ratio_1d": 1.1,
+        "ema_50": 1.1,
+        "volatility_20": 1.1,
+        "AROONOSC_14_1H": 1.2,
+        "rsi_14_15m": 0.5,
+        "price_to_ema_200_30m": 0.6
     },
     "shadow_trading": {
         "enabled": true,
@@ -89,10 +185,11 @@
         "config_file": "config/enhanced_shadow_trading_config.json"
     },
     "filters": {
-    "btc_trend_filter": {
-        "enabled": true,
-        "correlation_threshold": 0.85
-    }},
+        "btc_trend_filter": {
+            "enabled": false,
+            "correlation_threshold": 0.85
+        }
+    },
     "stop_and_reverse_strategy": {
         "enabled": true,
         "description": "Профессиональная SAR стратегия с многоуровневой фильтрацией",
@@ -198,9 +295,9 @@
             "daily_loss_limit_percentage": 3.0,
             "volatility_circuit_breaker": 5.0
         },
-        "chop_threshold": 60,
+        "chop_threshold": 75,
         "adx_threshold": 25,
-        "atr_multiplier": 1.25,
+        "atr_multiplier": 2.5,
         "psar_start": 0.02,
         "psar_step": 0.02,
         "psar_max": 0.2,

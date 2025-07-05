@@ -128,11 +128,15 @@ class SignalFilter:
               correlation = self.correlation_manager.get_correlation_between(signal.symbol, 'BTCUSDT')
 
               # Отклоняем только если корреляция высокая
-              if correlation is not None and correlation >= self.correlation_threshold:
-                trend_direction = "восходящем" if is_sell_vs_up else "нисходящем"
-                reason = f"Отклонено: сигнал {signal.signal_type.value}, но BTC в {trend_direction} тренде и корреляция высока ({correlation:.2f})"
-                logger.warning(f"ФИЛЬТР BTC: {reason}")
-                return False, reason
+              # if correlation is not None and correlation >= self.correlation_threshold:
+              #   trend_direction = "восходящем" if is_sell_vs_up else "нисходящем"
+              #   reason = f"Отклонено: сигнал {signal.signal_type.value}, но BTC в {trend_direction} тренде и корреляция высока ({correlation:.2f})"
+              #   logger.warning(f"ФИЛЬТР BTC: {reason}")
+              #   return False, reason
+              if correlation is not None and correlation >= 0.85:  # Повысили порог с 0.75
+                # И даже тогда, проверяем силу сигнала
+                if signal.confidence < 0.8:  # Только для слабых сигналов
+                  return False, f"Слабый сигнал против тренда BTC (корреляция {correlation:.2f})"
               else:
                 logger.info(
                   f"ФИЛЬТР BTC: Сигнал {signal.symbol} пропущен, т.к. идет против тренда BTC, но корреляция низкая ({correlation if correlation is not None else 'N/A'})")

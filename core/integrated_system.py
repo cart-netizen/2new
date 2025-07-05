@@ -215,7 +215,8 @@ class IntegratedTradingSystem:
       data_fetcher=self.data_fetcher,
       connector=self.connector,
       signal_filter = self.signal_filter,
-      risk_manager=self.risk_manager
+      risk_manager=self.risk_manager,
+      sar_strategy= self.sar_strategy,
     )
     self.position_manager.trading_system = self
     self.active_symbols: List[str] = []
@@ -240,14 +241,11 @@ class IntegratedTradingSystem:
       logger.error(f"Ошибка при загрузке предиктора волатильности: {e}")
     # --- КОНЕЦ НОВОГО БЛОКА ---
 
-
     # Флаги для включения/выключения ML моделей (оставляем как есть)
     self.use_enhanced_ml = True
     self.use_base_ml = True
     self._last_regime_check = {}
     self._regime_check_interval = 300
-
-
 
     self.signal_filter = SignalFilter(self.config, self.data_fetcher, self.market_regime_detector, self.correlation_manager)
     self.signal_processor = SignalProcessor(self.risk_manager, self.signal_filter, self.signal_quality_analyzer)
@@ -2922,202 +2920,545 @@ class IntegratedTradingSystem:
         logger.error(f"Ошибка в цикле синхронизации времени: {e}", exc_info=True)
         # В случае ошибки попробуем снова через 5 минут
         await asyncio.sleep(300)
+  #
+  # def _check_ltf_entry_trigger(self, data: pd.DataFrame, signal_type: SignalType) -> bool:
+  #   """
+  #   УЛУЧШЕННАЯ ВЕРСИЯ: Проверяет триггер для входа на малом таймфрейме (LTF),
+  #   используя комплексную логику "MFI + RSI + EMA Dynamic Signals".
+  #   """
+  #   if data.empty or len(data) < 30:  # Нужно достаточно данных для всех индикаторов
+  #     return False
+  #
+  #   try:
+  #     df = data.copy()
+  #     # --- ШАГ 1: АГРЕССИВНАЯ ОЧИСТКА ДАННЫХ (как мы делали в FeatureEngineer) ---
+  #     required_cols = ['open', 'high', 'low', 'close', 'volume']
+  #     for col in required_cols:
+  #       if col in df.columns:
+  #         df[col] = pd.to_numeric(df[col], errors='coerce')
+  #     df.dropna(subset=required_cols, inplace=True)
+  #     if len(df) < 30: return False
+  #     # --- КОНЕЦ ОЧИСТКИ ---
+  #
+  #
+  #     # --- 1. Рассчитываем все необходимые индикаторы ---
+  #
+  #     # Настройки, взятые из Pine Script индикатора
+  #     mfi_length = 14
+  #     mfi_overbought = 70
+  #     mfi_oversold = 30
+  #     rsi_length = 14
+  #     rsi_buy_threshold = 45
+  #     rsi_sell_threshold = 55
+  #     fast_ema_length = 9
+  #     slow_ema_length = 21
+  #     ema_proximity_pct = 0.5
+  #
+  #     df['mfi'] = self.calculate_mfi_manual(df['high'], df['low'], df['close'], df['volume'], length=mfi_length)
+  #     df['rsi'] = ta.rsi(df['close'], length=rsi_length)
+  #     df['ema_fast'] = ta.ema(df['close'], length=fast_ema_length)
+  #     df['ema_slow'] = ta.ema(df['close'], length=slow_ema_length)
+  #
+  #     if df.isnull().any().any():  # Если есть пропуски после расчетов
+  #       df.ffill(inplace=True)
+  #       df.bfill(inplace=True)
+  #       if df.isnull().any().any():  # Если пропуски остались
+  #         logger.warning(f"Не удалось рассчитать все индикаторы для триггера LTF.")
+  #         return False
+  #
+  #     # --- 2. Определяем логические условия, как в индикаторе ---
+  #
+  #     # Условия импульса
+  #     bullish_momentum = df['rsi'].iloc[-1] > rsi_buy_threshold
+  #     bearish_momentum = df['rsi'].iloc[-1] < rsi_sell_threshold
+  #
+  #     # Условия близости EMA
+  #     ema_diff = abs((df['ema_fast'].iloc[-1] - df['ema_slow'].iloc[-1]) / df['ema_slow'].iloc[-1]) * 100
+  #     ema_near_crossover = ema_diff <= ema_proximity_pct
+  #
+  #     # Условия пересечения (используем [-2], чтобы поймать самое свежее пересечение)
+  #     ema_crossover = crossover_series(df['ema_fast'], df['ema_slow']).iloc[-2]
+  #     ema_crossunder = crossunder_series(df['ema_fast'], df['ema_slow']).iloc[-2]
+  #     mfi_oversold_crossover = crossover_series(df['mfi'], pd.Series(mfi_oversold, index=df.index)).iloc[-2]
+  #     mfi_overbought_crossunder = crossunder_series(df['mfi'], pd.Series(mfi_overbought, index=df.index)).iloc[-2]
+  #
+  #     # Добавляем проверку волатильности для фильтрации шумных сигналов
+  #     atr = ta.atr(df['high'], df['low'], df['close'], length=14)
+  #     if atr is not None and len(atr) > 0:
+  #       current_atr = atr.iloc[-1]
+  #       avg_price = df['close'].mean()
+  #       volatility_pct = (current_atr / avg_price) * 100
+  #
+  #       # Если волатильность слишком низкая, не входим
+  #       if volatility_pct < 0.1:  # менее 0.1%
+  #         logger.debug(f"Волатильность слишком низкая ({volatility_pct:.3f}%), пропускаем вход")
+  #         return False
+  #
+  #     # --- 3. Финальная логика триггера ---
+  #
+  #     # Добавляем дополнительные проверки для более гибкого входа
+  #     price_momentum = False
+  #     volume_confirmation = False
+  #     volatility_ok = True
+  #
+  #     # Проверка импульса цены (последние 5 свечей)
+  #     if len(df) >= 5:
+  #       recent_move = (df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5] * 100
+  #       if signal_type == SignalType.BUY and recent_move > 0.2:  # Рост > 0.2%
+  #         price_momentum = True
+  #       elif signal_type == SignalType.SELL and recent_move < -0.2:  # Падение > 0.2%
+  #         price_momentum = True
+  #
+  #     # Проверка объема (если доступен)
+  #     if 'volume' in df.columns and len(df) >= 20:
+  #       vol_ma = df['volume'].rolling(20).mean().iloc[-1]
+  #       current_vol = df['volume'].iloc[-1]
+  #       if current_vol > vol_ma * 1.1:  # Объем выше среднего на 10%
+  #         volume_confirmation = True
+  #
+  #     # Проверка волатильности
+  #     if 'atr' in locals() and atr is not None and len(atr) > 0:
+  #       current_atr = atr.iloc[-1]
+  #       avg_price = df['close'].mean()
+  #       volatility_pct = (current_atr / avg_price) * 100
+  #
+  #       # Блокируем только при ОЧЕНЬ низкой волатильности
+  #       if volatility_pct < 0.05:  # менее 0.05% (вместо 0.1%)
+  #         volatility_ok = False
+  #         logger.debug(f"Волатильность критически низкая ({volatility_pct:.3f}%)")
+  #
+  #     # СИЛЬНЫЕ триггеры (основные условия из оригинала)
+  #     strong_buy_trigger = False
+  #     strong_sell_trigger = False
+  #
+  #     if signal_type == SignalType.BUY:
+  #       strong_buy_trigger = (mfi_oversold_crossover or ema_crossover) and (bullish_momentum or ema_near_crossover)
+  #     elif signal_type == SignalType.SELL:
+  #       strong_sell_trigger = (mfi_overbought_crossunder or ema_crossunder) and (
+  #             bearish_momentum or ema_near_crossover)
+  #
+  #     # СРЕДНИЕ триггеры (упрощенные условия)
+  #     medium_buy_trigger = False
+  #     medium_sell_trigger = False
+  #
+  #     if signal_type == SignalType.BUY:
+  #       medium_buy_trigger = (
+  #           (df['mfi'].iloc[-1] < 40 and bullish_momentum) or  # MFI низкий + RSI растет
+  #           (ema_crossover and price_momentum) or  # EMA пересечение + импульс цены
+  #           (df['rsi'].iloc[-1] > 50 and df['rsi'].iloc[-1] > df['rsi'].iloc[-2])  # RSI растет выше 50
+  #       )
+  #     elif signal_type == SignalType.SELL:
+  #       medium_sell_trigger = (
+  #           (df['mfi'].iloc[-1] > 60 and bearish_momentum) or  # MFI высокий + RSI падает
+  #           (ema_crossunder and price_momentum) or  # EMA пересечение + импульс цены
+  #           (df['rsi'].iloc[-1] < 50 and df['rsi'].iloc[-1] < df['rsi'].iloc[-2])  # RSI падает ниже 50
+  #       )
+  #
+  #     # СЛАБЫЕ триггеры (для старых сигналов)
+  #     weak_trigger = False
+  #     signal_age_minutes = 0
+  #
+  #     # Проверяем возраст сигнала если есть доступ к pending_signals
+  #     try:
+  #       if hasattr(self, 'state_manager'):
+  #         pending_signals = self.state_manager.get_pending_signals()
+  #         for sym, sig_data in pending_signals.items():
+  #           if 'metadata' in sig_data and 'signal_time' in sig_data['metadata']:
+  #             signal_time = datetime.fromisoformat(sig_data['metadata']['signal_time'])
+  #             signal_age_minutes = (datetime.now() - signal_time).seconds / 60
+  #             break
+  #     except:
+  #       pass
+  #
+  #     # Если сигнал старше 30 минут - смягчаем условия
+  #     if signal_age_minutes > 30:
+  #       if signal_type == SignalType.BUY:
+  #         weak_trigger = df['rsi'].iloc[-1] > 40 and price_momentum
+  #       else:
+  #         weak_trigger = df['rsi'].iloc[-1] < 60 and price_momentum
+  #
+  #     # ФИНАЛЬНОЕ РЕШЕНИЕ
+  #     trigger_fired = False
+  #     trigger_reason = ""
+  #
+  #     if strong_buy_trigger or strong_sell_trigger:
+  #       trigger_fired = True
+  #       trigger_reason = "STRONG"
+  #     elif medium_buy_trigger or medium_sell_trigger:
+  #       trigger_fired = True
+  #       trigger_reason = "MEDIUM"
+  #     elif weak_trigger and signal_age_minutes > 30:
+  #       trigger_fired = True
+  #       trigger_reason = f"WEAK (age: {signal_age_minutes:.0f}m)"
+  #     elif (volume_confirmation and price_momentum and volatility_ok):
+  #       # Экстренный режим - если есть объем и импульс
+  #       trigger_fired = True
+  #       trigger_reason = "EMERGENCY"
+  #
+  #     # Проверка волатильности блокирует все триггеры
+  #     if not volatility_ok:
+  #       trigger_fired = False
+  #       trigger_reason = "BLOCKED_BY_VOLATILITY"
+  #
+  #     # Расширенное логирование
+  #     if trigger_fired:
+  #       logger.info(f"✅ ТРИГГЕР LTF для {signal_type.value} сработал! Причина: {trigger_reason}")
+  #       logger.debug(f"Детали: MFI={df['mfi'].iloc[-1]:.1f}, RSI={df['rsi'].iloc[-1]:.1f}, "
+  #                    f"Momentum={'✓' if price_momentum else '✗'}, "
+  #                    f"Volume={'✓' if volume_confirmation else '✗'}")
+  #     else:
+  #       logger.debug(f"Триггер LTF не сработал. RSI={df['rsi'].iloc[-1]:.1f}, "
+  #                    f"MFI={df['mfi'].iloc[-1]:.1f}, Volatility={'OK' if volatility_ok else 'LOW'}")
+  #
+  #     return trigger_fired
+  #
+  #   except Exception as e:
+  #     logger.error(f"Ошибка в триггере LTF: {e}", exc_info=True)
+  #     return False
+  #
 
   def _check_ltf_entry_trigger(self, data: pd.DataFrame, signal_type: SignalType) -> bool:
-    """
-    УЛУЧШЕННАЯ ВЕРСИЯ: Проверяет триггер для входа на малом таймфрейме (LTF),
-    используя комплексную логику "MFI + RSI + EMA Dynamic Signals".
-    """
-    if data.empty or len(data) < 30:  # Нужно достаточно данных для всех индикаторов
-      return False
+      """
+      УЛУЧШЕННАЯ ВЕРСИЯ: Проверяет триггер для входа на малом таймфрейме,
+      используя анализ уровней поддержки/сопротивления и свечных паттернов
+      согласно документу "Правила входа в сделку"
+      """
+      if data.empty or len(data) < 50:  # Нужно больше данных для анализа уровней
+        return False
 
-    try:
-      df = data.copy()
-      # --- ШАГ 1: АГРЕССИВНАЯ ОЧИСТКА ДАННЫХ (как мы делали в FeatureEngineer) ---
-      required_cols = ['open', 'high', 'low', 'close', 'volume']
-      for col in required_cols:
-        if col in df.columns:
-          df[col] = pd.to_numeric(df[col], errors='coerce')
-      df.dropna(subset=required_cols, inplace=True)
-      if len(df) < 30: return False
-      # --- КОНЕЦ ОЧИСТКИ ---
-
-
-      # --- 1. Рассчитываем все необходимые индикаторы ---
-
-      # Настройки, взятые из Pine Script индикатора
-      mfi_length = 14
-      mfi_overbought = 70
-      mfi_oversold = 30
-      rsi_length = 14
-      rsi_buy_threshold = 45
-      rsi_sell_threshold = 55
-      fast_ema_length = 9
-      slow_ema_length = 21
-      ema_proximity_pct = 0.5
-
-      df['mfi'] = self.calculate_mfi_manual(df['high'], df['low'], df['close'], df['volume'], length=mfi_length)
-      df['rsi'] = ta.rsi(df['close'], length=rsi_length)
-      df['ema_fast'] = ta.ema(df['close'], length=fast_ema_length)
-      df['ema_slow'] = ta.ema(df['close'], length=slow_ema_length)
-
-      if df.isnull().any().any():  # Если есть пропуски после расчетов
-        df.ffill(inplace=True)
-        df.bfill(inplace=True)
-        if df.isnull().any().any():  # Если пропуски остались
-          logger.warning(f"Не удалось рассчитать все индикаторы для триггера LTF.")
-          return False
-
-      # --- 2. Определяем логические условия, как в индикаторе ---
-
-      # Условия импульса
-      bullish_momentum = df['rsi'].iloc[-1] > rsi_buy_threshold
-      bearish_momentum = df['rsi'].iloc[-1] < rsi_sell_threshold
-
-      # Условия близости EMA
-      ema_diff = abs((df['ema_fast'].iloc[-1] - df['ema_slow'].iloc[-1]) / df['ema_slow'].iloc[-1]) * 100
-      ema_near_crossover = ema_diff <= ema_proximity_pct
-
-      # Условия пересечения (используем [-2], чтобы поймать самое свежее пересечение)
-      ema_crossover = crossover_series(df['ema_fast'], df['ema_slow']).iloc[-2]
-      ema_crossunder = crossunder_series(df['ema_fast'], df['ema_slow']).iloc[-2]
-      mfi_oversold_crossover = crossover_series(df['mfi'], pd.Series(mfi_oversold, index=df.index)).iloc[-2]
-      mfi_overbought_crossunder = crossunder_series(df['mfi'], pd.Series(mfi_overbought, index=df.index)).iloc[-2]
-
-      # Добавляем проверку волатильности для фильтрации шумных сигналов
-      atr = ta.atr(df['high'], df['low'], df['close'], length=14)
-      if atr is not None and len(atr) > 0:
-        current_atr = atr.iloc[-1]
-        avg_price = df['close'].mean()
-        volatility_pct = (current_atr / avg_price) * 100
-
-        # Если волатильность слишком низкая, не входим
-        if volatility_pct < 0.1:  # менее 0.1%
-          logger.debug(f"Волатильность слишком низкая ({volatility_pct:.3f}%), пропускаем вход")
-          return False
-
-      # --- 3. Финальная логика триггера ---
-
-      # Добавляем дополнительные проверки для более гибкого входа
-      price_momentum = False
-      volume_confirmation = False
-      volatility_ok = True
-
-      # Проверка импульса цены (последние 5 свечей)
-      if len(df) >= 5:
-        recent_move = (df['close'].iloc[-1] - df['close'].iloc[-5]) / df['close'].iloc[-5] * 100
-        if signal_type == SignalType.BUY and recent_move > 0.2:  # Рост > 0.2%
-          price_momentum = True
-        elif signal_type == SignalType.SELL and recent_move < -0.2:  # Падение > 0.2%
-          price_momentum = True
-
-      # Проверка объема (если доступен)
-      if 'volume' in df.columns and len(df) >= 20:
-        vol_ma = df['volume'].rolling(20).mean().iloc[-1]
-        current_vol = df['volume'].iloc[-1]
-        if current_vol > vol_ma * 1.1:  # Объем выше среднего на 10%
-          volume_confirmation = True
-
-      # Проверка волатильности
-      if 'atr' in locals() and atr is not None and len(atr) > 0:
-        current_atr = atr.iloc[-1]
-        avg_price = df['close'].mean()
-        volatility_pct = (current_atr / avg_price) * 100
-
-        # Блокируем только при ОЧЕНЬ низкой волатильности
-        if volatility_pct < 0.05:  # менее 0.05% (вместо 0.1%)
-          volatility_ok = False
-          logger.debug(f"Волатильность критически низкая ({volatility_pct:.3f}%)")
-
-      # СИЛЬНЫЕ триггеры (основные условия из оригинала)
-      strong_buy_trigger = False
-      strong_sell_trigger = False
-
-      if signal_type == SignalType.BUY:
-        strong_buy_trigger = (mfi_oversold_crossover or ema_crossover) and (bullish_momentum or ema_near_crossover)
-      elif signal_type == SignalType.SELL:
-        strong_sell_trigger = (mfi_overbought_crossunder or ema_crossunder) and (
-              bearish_momentum or ema_near_crossover)
-
-      # СРЕДНИЕ триггеры (упрощенные условия)
-      medium_buy_trigger = False
-      medium_sell_trigger = False
-
-      if signal_type == SignalType.BUY:
-        medium_buy_trigger = (
-            (df['mfi'].iloc[-1] < 40 and bullish_momentum) or  # MFI низкий + RSI растет
-            (ema_crossover and price_momentum) or  # EMA пересечение + импульс цены
-            (df['rsi'].iloc[-1] > 50 and df['rsi'].iloc[-1] > df['rsi'].iloc[-2])  # RSI растет выше 50
-        )
-      elif signal_type == SignalType.SELL:
-        medium_sell_trigger = (
-            (df['mfi'].iloc[-1] > 60 and bearish_momentum) or  # MFI высокий + RSI падает
-            (ema_crossunder and price_momentum) or  # EMA пересечение + импульс цены
-            (df['rsi'].iloc[-1] < 50 and df['rsi'].iloc[-1] < df['rsi'].iloc[-2])  # RSI падает ниже 50
-        )
-
-      # СЛАБЫЕ триггеры (для старых сигналов)
-      weak_trigger = False
-      signal_age_minutes = 0
-
-      # Проверяем возраст сигнала если есть доступ к pending_signals
       try:
-        if hasattr(self, 'state_manager'):
-          pending_signals = self.state_manager.get_pending_signals()
-          for sym, sig_data in pending_signals.items():
-            if 'metadata' in sig_data and 'signal_time' in sig_data['metadata']:
-              signal_time = datetime.fromisoformat(sig_data['metadata']['signal_time'])
-              signal_age_minutes = (datetime.now() - signal_time).seconds / 60
-              break
-      except:
-        pass
+        df = data.copy()
 
-      # Если сигнал старше 30 минут - смягчаем условия
-      if signal_age_minutes > 30:
+        # Очистка данных
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in required_cols:
+          if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        df.dropna(subset=required_cols, inplace=True)
+
+        if len(df) < 50:
+          return False
+
+        # === ШАГ 1: ПОИСК УРОВНЕЙ ПОДДЕРЖКИ И СОПРОТИВЛЕНИЯ ===
+        support_levels, resistance_levels = self._find_support_resistance_levels(df)
+        current_price = df['close'].iloc[-1]
+
+        # Проверяем близость к уровням (в пределах 0.3% для крипто)
+        price_range = df['high'].max() - df['low'].min()
+        proximity_threshold = price_range * 0.003  # 0.3% от диапазона
+
+        near_support = any(abs(current_price - level) < proximity_threshold for level in support_levels)
+        near_resistance = any(abs(current_price - level) < proximity_threshold for level in resistance_levels)
+
+        logger.debug(
+          f"Уровни для {signal_type.value}: Поддержка={support_levels[:3]}, Сопротивление={resistance_levels[:3]}")
+        logger.debug(
+          f"Текущая цена: {current_price}, Близко к поддержке: {near_support}, Близко к сопротивлению: {near_resistance}")
+
+        # === ШАГ 2: ПРОВЕРКА СТРУКТУРЫ РЫНКА (Higher Highs/Lower Lows) ===
+        market_structure = self._analyze_market_structure(df)
+
+        # === ШАГ 3: ПОИСК СВЕЧНЫХ ПАТТЕРНОВ ===
+        reversal_pattern = self._check_reversal_patterns(df, signal_type)
+
+        # === ШАГ 4: РАСЧЕТ ТЕХНИЧЕСКИХ ИНДИКАТОРОВ ===
+        # RSI
+        df['rsi'] = ta.rsi(df['close'], length=14)
+        # MACD
+        macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+        if macd is not None and not macd.empty:
+          df['macd_line'] = macd.iloc[:, 0]
+          df['macd_signal'] = macd.iloc[:, 1]
+          df['macd_hist'] = macd.iloc[:, 2]
+
+        # Stochastic
+        stoch = ta.stoch(df['high'], df['low'], df['close'], k=14, d=3)
+        if stoch is not None and not stoch.empty:
+          df['stoch_k'] = stoch.iloc[:, 0]
+          df['stoch_d'] = stoch.iloc[:, 1]
+
+        # Volume analysis
+        df['volume_sma'] = df['volume'].rolling(20).mean()
+        volume_spike = df['volume'].iloc[-1] > df['volume_sma'].iloc[-1] * 1.5
+
+        # === ШАГ 5: ПРОВЕРКА ДИВЕРГЕНЦИЙ ===
+        divergence = self._check_divergence(df, signal_type)
+
+        # === ШАГ 6: КОМПЛЕКСНАЯ ОЦЕНКА УСЛОВИЙ ДЛЯ ВХОДА ===
+
         if signal_type == SignalType.BUY:
-          weak_trigger = df['rsi'].iloc[-1] > 40 and price_momentum
+          # Условия для покупки согласно документу:
+
+          # 1. ИДЕАЛЬНЫЙ ВХОД: У поддержки + разворотный паттерн + подтверждение индикаторами
+          if near_support and reversal_pattern == 'bullish':
+            if (df['rsi'].iloc[-1] < 40 or  # RSI выходит из перепроданности
+                divergence == 'bullish' or  # Бычья дивергенция
+                (df.get('stoch_k', pd.Series()).iloc[-1] < 30 and
+                 df.get('stoch_k', pd.Series()).iloc[-1] > df.get('stoch_d', pd.Series()).iloc[
+                   -1])):  # Stoch пересечение
+
+              logger.info(f"✅ ИДЕАЛЬНЫЙ вход BUY: поддержка + {reversal_pattern} паттерн + индикаторы")
+              return True
+
+          # 2. ХОРОШИЙ ВХОД: Структура рынка бычья + откат к уровню
+          if market_structure == 'uptrend' and near_support:
+            if df['rsi'].iloc[-1] < 50 and volume_spike:
+              logger.info(f"✅ ХОРОШИЙ вход BUY: восходящий тренд + откат к поддержке")
+              return True
+
+          # 3. ПРИЕМЛЕМЫЙ ВХОД: Сильный импульс от уровня
+          if near_support:
+            # Проверяем импульсное движение от уровня
+            last_3_candles = df.tail(3)
+            price_momentum = (last_3_candles['close'].iloc[-1] - last_3_candles['low'].min()) / last_3_candles[
+              'low'].min()
+
+            if price_momentum > 0.005 and volume_spike:  # 0.5% движение с объемом
+              logger.info(f"✅ ПРИЕМЛЕМЫЙ вход BUY: импульс от поддержки с объемом")
+              return True
+
+        else:  # SignalType.SELL
+          # Условия для продажи (зеркально):
+
+          # 1. ИДЕАЛЬНЫЙ ВХОД: У сопротивления + разворотный паттерн
+          if near_resistance and reversal_pattern == 'bearish':
+            if (df['rsi'].iloc[-1] > 60 or  # RSI выходит из перекупленности
+                divergence == 'bearish' or  # Медвежья дивергенция
+                (df.get('stoch_k', pd.Series()).iloc[-1] > 70 and
+                 df.get('stoch_k', pd.Series()).iloc[-1] < df.get('stoch_d', pd.Series()).iloc[
+                   -1])):  # Stoch пересечение
+
+              logger.info(f"✅ ИДЕАЛЬНЫЙ вход SELL: сопротивление + {reversal_pattern} паттерн + индикаторы")
+              return True
+
+          # 2. ХОРОШИЙ ВХОД: Структура рынка медвежья + откат к уровню
+          if market_structure == 'downtrend' and near_resistance:
+            if df['rsi'].iloc[-1] > 50 and volume_spike:
+              logger.info(f"✅ ХОРОШИЙ вход SELL: нисходящий тренд + откат к сопротивлению")
+              return True
+
+          # 3. ПРИЕМЛЕМЫЙ ВХОД: Сильный импульс от уровня
+          if near_resistance:
+            last_3_candles = df.tail(3)
+            price_momentum = (last_3_candles['high'].max() - last_3_candles['close'].iloc[-1]) / last_3_candles[
+              'high'].max()
+
+            if price_momentum > 0.005 and volume_spike:
+              logger.info(f"✅ ПРИЕМЛЕМЫЙ вход SELL: импульс от сопротивления с объемом")
+              return True
+
+        # Если ни одно условие не выполнено - НЕ ВХОДИМ
+        logger.debug(f"Вход не подтвержден. Ждем лучших условий...")
+        return False
+
+      except Exception as e:
+        logger.error(f"Ошибка в улучшенном триггере LTF: {e}", exc_info=True)
+        return False
+
+  def _find_support_resistance_levels(self, df: pd.DataFrame) -> tuple:
+    """
+    Находит уровни поддержки и сопротивления на основе локальных экстремумов
+    """
+    window = 10  # Окно для поиска локальных экстремумов
+
+    # Поиск локальных максимумов (сопротивления)
+    highs = df['high'].values
+    resistance_levels = []
+
+    for i in range(window, len(highs) - window):
+      if highs[i] == max(highs[i - window:i + window + 1]):
+        resistance_levels.append(highs[i])
+
+    # Поиск локальных минимумов (поддержки)
+    lows = df['low'].values
+    support_levels = []
+
+    for i in range(window, len(lows) - window):
+      if lows[i] == min(lows[i - window:i + window + 1]):
+        support_levels.append(lows[i])
+
+    # Фильтруем близкие уровни (объединяем в кластеры)
+    def cluster_levels(levels, threshold=0.002):  # 0.2% порог
+      if not levels:
+        return []
+
+      clustered = []
+      sorted_levels = sorted(levels)
+      current_cluster = [sorted_levels[0]]
+
+      for level in sorted_levels[1:]:
+        if (level - current_cluster[-1]) / current_cluster[-1] < threshold:
+          current_cluster.append(level)
         else:
-          weak_trigger = df['rsi'].iloc[-1] < 60 and price_momentum
+          clustered.append(sum(current_cluster) / len(current_cluster))
+          current_cluster = [level]
 
-      # ФИНАЛЬНОЕ РЕШЕНИЕ
-      trigger_fired = False
-      trigger_reason = ""
+      clustered.append(sum(current_cluster) / len(current_cluster))
+      return clustered
 
-      if strong_buy_trigger or strong_sell_trigger:
-        trigger_fired = True
-        trigger_reason = "STRONG"
-      elif medium_buy_trigger or medium_sell_trigger:
-        trigger_fired = True
-        trigger_reason = "MEDIUM"
-      elif weak_trigger and signal_age_minutes > 30:
-        trigger_fired = True
-        trigger_reason = f"WEAK (age: {signal_age_minutes:.0f}m)"
-      elif (volume_confirmation and price_momentum and volatility_ok):
-        # Экстренный режим - если есть объем и импульс
-        trigger_fired = True
-        trigger_reason = "EMERGENCY"
+    support_levels = cluster_levels(support_levels)
+    resistance_levels = cluster_levels(resistance_levels)
 
-      # Проверка волатильности блокирует все триггеры
-      if not volatility_ok:
-        trigger_fired = False
-        trigger_reason = "BLOCKED_BY_VOLATILITY"
+    # Сортируем и возвращаем ближайшие к текущей цене
+    current_price = df['close'].iloc[-1]
+    support_levels = sorted([s for s in support_levels if s < current_price], reverse=True)
+    resistance_levels = sorted([r for r in resistance_levels if r > current_price])
 
-      # Расширенное логирование
-      if trigger_fired:
-        logger.info(f"✅ ТРИГГЕР LTF для {signal_type.value} сработал! Причина: {trigger_reason}")
-        logger.debug(f"Детали: MFI={df['mfi'].iloc[-1]:.1f}, RSI={df['rsi'].iloc[-1]:.1f}, "
-                     f"Momentum={'✓' if price_momentum else '✗'}, "
-                     f"Volume={'✓' if volume_confirmation else '✗'}")
-      else:
-        logger.debug(f"Триггер LTF не сработал. RSI={df['rsi'].iloc[-1]:.1f}, "
-                     f"MFI={df['mfi'].iloc[-1]:.1f}, Volatility={'OK' if volatility_ok else 'LOW'}")
+    return support_levels[:5], resistance_levels[:5]  # Топ-5 уровней
 
-      return trigger_fired
+  def _analyze_market_structure(self, df: pd.DataFrame) -> str:
+    """
+    Анализирует структуру рынка (Higher Highs/Lower Lows)
+    """
+    # Находим свинг-точки
+    swing_highs = []
+    swing_lows = []
 
-    except Exception as e:
-      logger.error(f"Ошибка в триггере LTF: {e}", exc_info=True)
-      return False
+    for i in range(2, len(df) - 2):
+      # Swing high
+      if (df['high'].iloc[i] > df['high'].iloc[i - 1] and
+          df['high'].iloc[i] > df['high'].iloc[i - 2] and
+          df['high'].iloc[i] > df['high'].iloc[i + 1] and
+          df['high'].iloc[i] > df['high'].iloc[i + 2]):
+        swing_highs.append((i, df['high'].iloc[i]))
 
+      # Swing low
+      if (df['low'].iloc[i] < df['low'].iloc[i - 1] and
+          df['low'].iloc[i] < df['low'].iloc[i - 2] and
+          df['low'].iloc[i] < df['low'].iloc[i + 1] and
+          df['low'].iloc[i] < df['low'].iloc[i + 2]):
+        swing_lows.append((i, df['low'].iloc[i]))
+
+    # Анализируем последние свинги
+    if len(swing_highs) >= 2 and len(swing_lows) >= 2:
+      # Higher Highs и Higher Lows = Uptrend
+      if (swing_highs[-1][1] > swing_highs[-2][1] and
+          swing_lows[-1][1] > swing_lows[-2][1]):
+        return 'uptrend'
+
+      # Lower Highs и Lower Lows = Downtrend
+      elif (swing_highs[-1][1] < swing_highs[-2][1] and
+            swing_lows[-1][1] < swing_lows[-2][1]):
+        return 'downtrend'
+
+    return 'sideways'
+
+  def _check_reversal_patterns(self, df: pd.DataFrame, signal_type: SignalType) -> str:
+    """
+    Проверяет наличие разворотных свечных паттернов
+    """
+    if len(df) < 3:
+      return 'none'
+
+    # Последние 3 свечи для анализа
+    last_3 = df.tail(3)
+
+    # Для покупки ищем бычьи паттерны
+    if signal_type == SignalType.BUY:
+      # Молот (Hammer)
+      last_candle = last_3.iloc[-1]
+      body = abs(last_candle['close'] - last_candle['open'])
+      lower_shadow = min(last_candle['open'], last_candle['close']) - last_candle['low']
+      upper_shadow = last_candle['high'] - max(last_candle['open'], last_candle['close'])
+
+      if lower_shadow > body * 2 and upper_shadow < body * 0.5:
+        return 'bullish'
+
+      # Бычье поглощение
+      if len(last_3) >= 2:
+        prev_candle = last_3.iloc[-2]
+        if (prev_candle['close'] < prev_candle['open'] and  # Предыдущая медвежья
+            last_candle['close'] > last_candle['open'] and  # Текущая бычья
+            last_candle['open'] <= prev_candle['close'] and  # Открытие ниже закрытия предыдущей
+            last_candle['close'] > prev_candle['open']):  # Закрытие выше открытия предыдущей
+          return 'bullish'
+
+    # Для продажи ищем медвежьи паттерны
+    else:
+      # Падающая звезда / Повешенный
+      last_candle = last_3.iloc[-1]
+      body = abs(last_candle['close'] - last_candle['open'])
+      upper_shadow = last_candle['high'] - max(last_candle['open'], last_candle['close'])
+      lower_shadow = min(last_candle['open'], last_candle['close']) - last_candle['low']
+
+      if upper_shadow > body * 2 and lower_shadow < body * 0.5:
+        return 'bearish'
+
+      # Медвежье поглощение
+      if len(last_3) >= 2:
+        prev_candle = last_3.iloc[-2]
+        if (prev_candle['close'] > prev_candle['open'] and  # Предыдущая бычья
+            last_candle['close'] < last_candle['open'] and  # Текущая медвежья
+            last_candle['open'] >= prev_candle['close'] and  # Открытие выше закрытия предыдущей
+            last_candle['close'] < prev_candle['open']):  # Закрытие ниже открытия предыдущей
+          return 'bearish'
+
+    return 'none'
+
+  def _check_divergence(self, df: pd.DataFrame, signal_type: SignalType) -> str:
+    """
+    Проверяет дивергенцию между ценой и осцилляторами (RSI/MACD)
+    """
+    if len(df) < 20:
+      return 'none'
+
+    # Находим последние локальные экстремумы
+    window = 5
+
+    if signal_type == SignalType.BUY:
+      # Ищем бычью дивергенцию (цена делает Lower Low, RSI делает Higher Low)
+      price_lows = []
+      rsi_lows = []
+
+      for i in range(window, len(df) - window):
+        if df['low'].iloc[i] == df['low'].iloc[i - window:i + window + 1].min():
+          price_lows.append((i, df['low'].iloc[i]))
+          rsi_lows.append((i, df['rsi'].iloc[i]))
+
+      if len(price_lows) >= 2:
+        # Сравниваем последние два минимума
+        if (price_lows[-1][1] < price_lows[-2][1] and  # Цена: Lower Low
+            rsi_lows[-1][1] > rsi_lows[-2][1]):  # RSI: Higher Low
+          return 'bullish'
+
+    else:  # SELL
+      # Ищем медвежью дивергенцию (цена делает Higher High, RSI делает Lower High)
+      price_highs = []
+      rsi_highs = []
+
+      for i in range(window, len(df) - window):
+        if df['high'].iloc[i] == df['high'].iloc[i - window:i + window + 1].max():
+          price_highs.append((i, df['high'].iloc[i]))
+          rsi_highs.append((i, df['rsi'].iloc[i]))
+
+      if len(price_highs) >= 2:
+        if (price_highs[-1][1] > price_highs[-2][1] and  # Цена: Higher High
+            rsi_highs[-1][1] < rsi_highs[-2][1]):  # RSI: Lower High
+          return 'bearish'
+
+    return 'none'
+
+  # def calculate_mfi_manual(self, high, low, close, volume, length=14):
+  #   """Ручной расчет MFI если pandas_ta не работает"""
+  #   try:
+  #     typical_price = (high + low + close) / 3
+  #     money_flow = typical_price * volume
+  #
+  #     # Определяем направление потока
+  #     money_flow_positive = money_flow.where(typical_price > typical_price.shift(1), 0)
+  #     money_flow_negative = money_flow.where(typical_price < typical_price.shift(1), 0)
+  #
+  #     # Суммируем за период
+  #     positive_flow = money_flow_positive.rolling(window=length).sum()
+  #     negative_flow = money_flow_negative.rolling(window=length).sum()
+  #
+  #     # Рассчитываем MFI
+  #     money_ratio = positive_flow / (negative_flow + 1e-9)
+  #     mfi = 100 - (100 / (1 + money_ratio))
+  #
+  #     return mfi
+  #   except:
+  #     return pd.Series([50] * len(close))  # Возвращаем нейтральное значение
 
   async def initialize_with_optimization(self):
       """
@@ -3525,7 +3866,10 @@ class IntegratedTradingSystem:
         await asyncio.sleep(10)
 
   async def _check_pending_signal_for_entry(self, symbol: str):
-    """Проверяет ожидающий сигнал на точку входа с использованием продвинутой логики"""
+    """
+    УЛУЧШЕННАЯ ВЕРСИЯ: Проверяет ожидающий сигнал на оптимальную точку входа
+    с использованием анализа уровней и паттернов
+    """
     pending_signals = self.state_manager.get_pending_signals()
 
     if symbol not in pending_signals:
@@ -3534,10 +3878,12 @@ class IntegratedTradingSystem:
     try:
       signal_data = pending_signals[symbol]
 
-      # Проверяем таймаут сигнала (2 часа вместо 30 минут для большей гибкости)
+      # Проверяем таймаут сигнала (увеличиваем до 4 часов для ожидания лучшего входа)
       signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
-      if (datetime.now() - signal_time) > timedelta(hours=3):
-        logger.info(f"Сигнал для {symbol} устарел, удаляем из очереди")
+      signal_age = datetime.now() - signal_time
+
+      if signal_age > timedelta(hours=4):
+        logger.info(f"Сигнал для {symbol} устарел ({signal_age}), удаляем из очереди")
         del pending_signals[symbol]
         self.state_manager.update_pending_signals(pending_signals)
         return
@@ -3553,52 +3899,105 @@ class IntegratedTradingSystem:
       }
       ltf_timeframe = timeframe_map.get(ltf_str, Timeframe.FIVE_MINUTES)
 
-      # Получаем данные LTF с достаточной историей для индикаторов
-      logger.debug(f"Проверка триггера для {symbol} на таймфрейме {ltf_str}...")
-      ltf_data = await self.data_fetcher.get_historical_candles(symbol, ltf_timeframe, limit=100)
+      # Получаем данные LTF с большей историей для анализа уровней
+      logger.debug(f"Проверка оптимального входа для {symbol} на {ltf_str}...")
+      ltf_data = await self.data_fetcher.get_historical_candles(symbol, ltf_timeframe, limit=200)
 
-      if ltf_data.empty or len(ltf_data) < 30:
+      if ltf_data.empty or len(ltf_data) < 50:
         logger.debug(f"Недостаточно данных LTF для {symbol}")
         return
 
-      # Восстанавливаем TradingSignal из данных
+      # Восстанавливаем тип сигнала
       signal_type = SignalType[signal_data['signal_type']]
 
-      # Используем продвинутую проверку триггера
-      if self._check_ltf_entry_trigger(ltf_data, signal_type):
-        logger.info(f"✅ ТРИГГЕР LTF для {symbol} сработал! Исполняем сделку...")
-        signal_age_minutes = ((datetime.now() - signal_time).seconds / 60)
-        logger.info(f"Проверка LTF триггера для {symbol}:")
-        logger.info(f"  - Возраст сигнала: {signal_age_minutes:.1f} минут")
-        logger.info(f"  - Таймфрейм: {ltf_str}")
-        logger.info(f"  - Тип сигнала: {signal_type.value}")
+      # === АНАЛИЗ ТЕКУЩЕЙ РЫНОЧНОЙ СИТУАЦИИ ===
+      current_price = ltf_data['close'].iloc[-1]
 
+      # Проверяем, не ушла ли цена слишком далеко от первоначального сигнала
+      original_price = signal_data['price']
+      price_deviation = abs(current_price - original_price) / original_price
+
+      # Если цена ушла более чем на 2% - пересматриваем целесообразность входа
+      if price_deviation > 0.02:
+        logger.warning(f"Цена {symbol} сильно отклонилась от сигнала ({price_deviation:.1%})")
+
+        # Для BUY: если цена выросла сильно - отменяем
+        if signal_type == SignalType.BUY and current_price > original_price * 1.02:
+          logger.info(f"Отменяем BUY сигнал для {symbol} - цена ушла вверх")
+          del pending_signals[symbol]
+          self.state_manager.update_pending_signals(pending_signals)
+          return
+
+        # Для SELL: если цена упала сильно - отменяем
+        if signal_type == SignalType.SELL and current_price < original_price * 0.98:
+          logger.info(f"Отменяем SELL сигнал для {symbol} - цена ушла вниз")
+          del pending_signals[symbol]
+          self.state_manager.update_pending_signals(pending_signals)
+          return
+
+      # === ПРОВЕРКА ОПТИМАЛЬНОСТИ ТЕКУЩЕГО МОМЕНТА ===
+
+      # 1. Анализируем недавнее движение цены
+      recent_movement = self._analyze_recent_price_movement(ltf_data)
+
+      # 2. Проверяем условия входа с учетом возраста сигнала
+      age_minutes = signal_age.total_seconds() / 60
+
+      # Постепенно смягчаем требования со временем
+      if age_minutes < 30:
+        # Первые 30 минут - ждем идеальных условий
         trigger_result = self._check_ltf_entry_trigger(ltf_data, signal_type)
+      elif age_minutes < 60:
+        # 30-60 минут - немного смягчаем требования
+        trigger_result = self._check_ltf_entry_trigger_relaxed(ltf_data, signal_type, level=1)
+      elif age_minutes < 120:
+        # 1-2 часа - еще больше смягчаем
+        trigger_result = self._check_ltf_entry_trigger_relaxed(ltf_data, signal_type, level=2)
+      else:
+        # 2-4 часа - минимальные требования
+        trigger_result = self._check_ltf_entry_trigger_relaxed(ltf_data, signal_type, level=3)
 
-        if trigger_result:
-          logger.info(f"✅ ТРИГГЕР LTF для {symbol} сработал после {signal_age_minutes:.1f} минут ожидания!")
+      if trigger_result:
+        logger.info(f"✅ ОПТИМАЛЬНЫЙ вход для {symbol} найден после {age_minutes:.0f} минут ожидания!")
+        logger.info(f"  - Тип входа: {trigger_result}")
+        logger.info(f"  - Движение от сигнала: {price_deviation:.1%}")
+
+        # Корректируем размер позиции в зависимости от качества входа
+        size_multiplier = 1.0
+        if age_minutes > 120:  # Старый сигнал
+          size_multiplier = 0.7
+        elif recent_movement == 'strong_adverse':  # Сильное неблагоприятное движение
+          size_multiplier = 0.5
 
         # Восстанавливаем полный TradingSignal
         trading_signal = TradingSignal(
           signal_type=signal_type,
           symbol=signal_data['symbol'],
-          price=signal_data['price'],
+          price=current_price,  # Используем текущую цену!
           confidence=signal_data['confidence'],
           strategy_name=signal_data['strategy_name'],
-          timestamp=datetime.fromisoformat(signal_data['timestamp']),
+          timestamp=datetime.now(),  # Обновляем время
           stop_loss=signal_data.get('stop_loss'),
           take_profit=signal_data.get('take_profit'),
-          metadata=signal_data.get('metadata', {})
+          metadata={
+            **signal_data.get('metadata', {}),
+            'original_price': original_price,
+            'entry_delay_minutes': age_minutes,
+            'entry_type': trigger_result,
+            'size_multiplier': size_multiplier
+          }
         )
 
-        # Исполняем сделку
-        size = signal_data['metadata']['approved_size']
+        # Исполняем сделку с скорректированным размером
+        approved_size = signal_data['metadata']['approved_size']
+        final_size = approved_size * size_multiplier
+
         success, order_details = await self.trade_executor.execute_trade(
-          trading_signal, symbol, size
+          trading_signal, symbol, final_size
         )
 
         if success:
-          logger.info(f"✅ Сделка по {symbol} успешно исполнена через LTF триггер")
+          logger.info(f"✅ Сделка по {symbol} успешно исполнена через оптимальный LTF вход")
           if order_details:
             self.position_manager.add_position_to_cache(order_details)
 
@@ -3613,22 +4012,124 @@ class IntegratedTradingSystem:
                 symbol,
                 {
                   'open_price': order_details.get('open_price'),
-                  'close_price': order_details.get('open_price'),  # При открытии
-                  'profit_loss': 0,  # Пока 0
+                  'close_price': order_details.get('open_price'),
+                  'profit_loss': 0,
                   'profit_pct': 0
                 }
               )
             )
         else:
-          logger.error(f"❌ Не удалось исполнить сделку по {symbol}")
+          logger.error(f"Не удалось исполнить сделку для {symbol}")
       else:
-        # Логируем детали для отладки
-        logger.debug(f"Триггер LTF для {symbol} пока не сработал, продолжаем мониторинг")
+        # Логируем причину, почему не входим
+        if age_minutes < 30:
+          logger.debug(f"Ждем идеальных условий для {symbol} (возраст: {age_minutes:.0f}м)")
+        else:
+          logger.debug(f"Пока нет подходящих условий для {symbol} (возраст: {age_minutes:.0f}м)")
 
     except Exception as e:
-      logger.error(f"Ошибка при проверке точки входа для {symbol}: {e}", exc_info=True)
+      logger.error(f"Ошибка проверки pending сигнала для {symbol}: {e}", exc_info=True)
 
+  def _analyze_recent_price_movement(self, df: pd.DataFrame) -> str:
+      """
+      Анализирует недавнее движение цены для оценки рыночных условий
+      """
+      if len(df) < 10:
+        return 'unknown'
 
+      # Анализируем последние 10 свечей
+      recent = df.tail(10)
+
+      # Расчет общего движения
+      total_move = (recent['close'].iloc[-1] - recent['close'].iloc[0]) / recent['close'].iloc[0]
+
+      # Расчет волатильности
+      avg_candle_range = ((recent['high'] - recent['low']) / recent['close']).mean()
+
+      # Определяем тип движения
+      if abs(total_move) > 0.02:  # Более 2% движения
+        if total_move > 0:
+          return 'strong_up' if avg_candle_range < 0.005 else 'volatile_up'
+        else:
+          return 'strong_down' if avg_candle_range < 0.005 else 'volatile_down'
+      else:
+        return 'sideways' if avg_candle_range < 0.003 else 'choppy'
+
+  def _check_ltf_entry_trigger_relaxed(self, data: pd.DataFrame, signal_type: SignalType, level: int = 1) -> str:
+    """
+    Проверяет триггер с постепенно смягчающимися требованиями
+    Level 1: Немного смягченные условия (30-60 минут)
+    Level 2: Умеренно смягченные условия (1-2 часа)
+    Level 3: Минимальные требования (2+ часа)
+    """
+    if data.empty or len(data) < 30:
+      return None
+
+    try:
+      df = data.copy()
+
+      # Очистка данных
+      required_cols = ['open', 'high', 'low', 'close', 'volume']
+      for col in required_cols:
+        if col in df.columns:
+          df[col] = pd.to_numeric(df[col], errors='coerce')
+      df.dropna(subset=required_cols, inplace=True)
+
+      if len(df) < 30:
+        return None
+
+      # Расчет индикаторов
+      df['rsi'] = ta.rsi(df['close'], length=14)
+      df['volume_sma'] = df['volume'].rolling(20).mean()
+      current_price = df['close'].iloc[-1]
+
+      # Анализ импульса
+      price_change_5 = (df['close'].iloc[-1] - df['close'].iloc[-6]) / df['close'].iloc[-6]
+      volume_ratio = df['volume'].iloc[-1] / df['volume_sma'].iloc[-1]
+
+      if signal_type == SignalType.BUY:
+        # Level 1: Смягченные условия
+        if level == 1:
+          if (df['rsi'].iloc[-1] < 50 and  # RSI не перекуплен
+              price_change_5 > -0.005 and  # Нет сильного падения
+              volume_ratio > 0.8):  # Приемлемый объем
+            return 'relaxed_buy_1'
+
+        # Level 2: Еще более мягкие условия
+        elif level == 2:
+          if (df['rsi'].iloc[-1] < 60 and  # RSI умеренный
+              price_change_5 > -0.01):  # Нет резкого падения
+            return 'relaxed_buy_2'
+
+        # Level 3: Минимальные условия
+        else:
+          if df['rsi'].iloc[-1] < 70:  # Только не сильно перекуплен
+            return 'emergency_buy'
+
+      else:  # SELL
+        # Level 1: Смягченные условия
+        if level == 1:
+          if (df['rsi'].iloc[-1] > 50 and  # RSI не перепродан
+              price_change_5 < 0.005 and  # Нет сильного роста
+              volume_ratio > 0.8):  # Приемлемый объем
+            return 'relaxed_sell_1'
+
+        # Level 2: Еще более мягкие условия
+        elif level == 2:
+          if (df['rsi'].iloc[-1] > 40 and  # RSI умеренный
+              price_change_5 < 0.01):  # Нет резкого роста
+            return 'relaxed_sell_2'
+
+        # Level 3: Минимальные условия
+        else:
+          if df['rsi'].iloc[-1] > 30:  # Только не сильно перепродан
+            return 'emergency_sell'
+
+      return None
+
+    except Exception as e:
+      logger.error(f"Ошибка в relaxed триггере: {e}")
+      return None
 
   async def _log_performance_stats(self):
     """

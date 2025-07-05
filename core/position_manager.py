@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pandas as pd
 import pandas_ta as ta
@@ -15,6 +15,7 @@ from data.database_manager import AdvancedDatabaseManager
 from core.trade_executor import TradeExecutor
 from core.data_fetcher import DataFetcher
 from core.enums import Timeframe, SignalType
+from strategies.sar_strategy import StopAndReverseStrategy
 from utils.logging_config import get_logger
 from core.signal_filter import SignalFilter
 
@@ -26,7 +27,7 @@ class PositionManager:
   Класс для управления открытыми позициями и реализации логики выхода.
   """
 
-  def __init__(self, db_manager: AdvancedDatabaseManager, trade_executor: TradeExecutor, data_fetcher: DataFetcher, connector: BybitConnector, signal_filter: SignalFilter, risk_manager: AdvancedRiskManager):
+  def __init__(self, db_manager: AdvancedDatabaseManager, trade_executor: TradeExecutor, data_fetcher: DataFetcher, connector: BybitConnector, signal_filter: SignalFilter, risk_manager: AdvancedRiskManager, sar_strategy:StopAndReverseStrategy):
     self.db_manager = db_manager
     self.trade_executor = trade_executor
     self.data_fetcher = data_fetcher
@@ -38,7 +39,7 @@ class PositionManager:
     self.config = self.config_manager.load_config()
     self.trading_system = None
     # self.integrated_system: Optional[IntegratedTradingSystem] = None
-
+    self.sar_strategy = sar_strategy
   async def load_open_positions(self):
     """
     Синхронизирует состояние открытых позиций.
@@ -57,6 +58,24 @@ class PositionManager:
 
       # Запрашиваем напрямую все позиции
       result = await self.connector._make_request('GET', endpoint, params, use_cache=False)
+
+      # После загрузки позиций с биржи добавить синхронизацию:
+      # Удаляем из БД позиции, которых нет на бирже
+      db_positions = await self.db_manager.get_all_open_trades()
+      exchange_symbols = set(self.open_positions.keys())
+
+      for db_pos in db_positions:
+        if db_pos['symbol'] not in exchange_symbols:
+          logger.warning(f"Найдена зомби-позиция {db_pos['symbol']} в БД, синхронизация...")
+          # Проверяем еще раз напрямую
+          positions = await self.connector.fetch_positions(db_pos['symbol'])
+          if not any(float(p.get('size', 0)) > 0 for p in positions):
+            await self.db_manager.force_close_trade(
+              trade_id=db_pos['id'],
+              close_price=0,
+              reason="Position not found on exchange during sync"
+            )
+
 
       if result and result.get('list'):
         all_positions = result.get('list', [])
@@ -151,6 +170,7 @@ class PositionManager:
     if not self.open_positions:
       return
 
+
     logger.debug(f"Динамическое управление для {len(self.open_positions)} открытых позиций...")
 
     for symbol, position_data in list(self.open_positions.items()):
@@ -217,6 +237,33 @@ class PositionManager:
         timeframe_map = {"1m": Timeframe.ONE_MINUTE, "5m": Timeframe.FIVE_MINUTES, "15m": Timeframe.FIFTEEN_MINUTES}
         ltf_timeframe = timeframe_map.get(ltf_str, Timeframe.ONE_MINUTE)
         ltf_data = await self.data_fetcher.get_historical_candles(symbol, ltf_timeframe, limit=100)
+
+        atr = htf_data['atr'].iloc[-1]
+        price = htf_data['close'].iloc[-1]
+        atr_percentage = (atr / price) * 100
+
+        if atr_percentage > 5.0:  # Если ATR больше 5% от цены
+          logger.info(f"Высокая волатильность для {symbol} (ATR: {atr_percentage:.2f}%), ужесточаем условия выхода")
+          # Временно увеличиваем требования для выхода
+          strategy_settings['atr_ts_multiplier'] = strategy_settings.get('atr_ts_multiplier', 2.5) * 1.5
+
+        min_hold_time_minutes = 30  # Минимальное время удержания позиции
+
+        if 'open_timestamp' in position_data:
+          open_time = pd.to_datetime(position_data['open_timestamp'])
+          current_time = datetime.now(timezone.utc)
+
+          # Если времен��ая зона не установлена
+          if open_time.tzinfo is None:
+            open_time = open_time.replace(tzinfo=timezone.utc)
+
+          time_held = (current_time - open_time).total_seconds() / 60
+
+          if time_held < min_hold_time_minutes:
+            logger.debug(f"Позиция {symbol} удерживается только {time_held:.1f} минут, пропускаем проверки выхода")
+            continue  # Пропускаем все проверки выхода для новых позиций
+
+
         # # --- КОНЕЦ БЛОКА ЗАГРУЗКИ ---
 
         # --- ПРИОРИТЕТ 1: ЖЕСТКИЙ SL/TP ---
@@ -230,7 +277,7 @@ class PositionManager:
         if not exit_reason and self.sar_strategy and strategy_settings.get('use_sar_reversal', True):
           # Проверяем сигнал от SAR стратегии
           sar_signal = await self.sar_strategy.check_exit_conditions(
-            symbol, position_data, htf_data
+            symbol, htf_data, position_data
           )
 
           if sar_signal and sar_signal.is_reversal:
@@ -307,11 +354,28 @@ class PositionManager:
                     symbol, 'reverse', True
                   )
               else:
+                volume_check_window = 5  # Последние 5 свечей
+                recent_volume = htf_data['volume'].tail(volume_check_window).mean()
+                avg_volume = htf_data['volume'].mean()
+
+                if recent_volume < avg_volume * 0.7:  # Если объем упал на 30%
+                  logger.debug(f"Низкий объем для {symbol}, откладываем закрытие")
+                  continue
+
+
                 logger.warning(f"Не удалось развернуть позицию {symbol}, выполняем обычное закрытие")
                 # Fallback к обычному закрытию + новый вход
                 await self._execute_standard_exit_and_reentry(symbol, reverse_signal,
                                                               account_balance)
             else:
+              volume_check_window = 5  # Последние 5 свечей
+              recent_volume = htf_data['volume'].tail(volume_check_window).mean()
+              avg_volume = htf_data['volume'].mean()
+
+              if recent_volume < avg_volume * 0.7:  # Если объем упал на 30%
+                logger.debug(f"Низкий объем для {symbol}, откладываем закрытие")
+                continue
+
               # Стандартный путь: закрытие + новый вход
               await self._execute_standard_exit_and_reentry(symbol, reverse_signal,
                                                             account_balance)
@@ -1100,7 +1164,7 @@ class PositionManager:
 
     # --- ИСПРАВЛЕННАЯ ПРОВЕРКА НА БЕЗУБЫТОЧНОСТЬ ---
     # Комиссии: открытие + закрытие
-    commission_rate = 0.00075  # Taker fee 0.075%
+    commission_rate = 0.0009  # Taker fee 0.075%
     total_commission_rate = commission_rate * 4  # За вход и выход
 
     # Добавляем небольшой буфер для гарантии прибыльности
@@ -1164,8 +1228,8 @@ class PositionManager:
 
     # Параметры для расчета
     atr_multiplier = strategy_settings.get('atr_ts_multiplier', 2.5)
-    commission_rate = 0.00075
-    min_profit_buffer = (commission_rate * 3) * 2.5
+    commission_rate = 0.0009
+    min_profit_buffer = 0.05
 
     # Мультитаймфреймовый анализ если доступен
     if timeframes_data:
@@ -1208,15 +1272,60 @@ class PositionManager:
             confirmations += 1
 
       # Требуем подтверждение минимум на 2 из 4 таймфреймов
-      if checked_timeframes >= 2 and confirmations >= 2:
+      if checked_timeframes >= 4 and confirmations >= 3:
         profit_pct = ((current_price - open_price) / open_price * 100) if side == 'BUY' else (
               (open_price - current_price) / open_price * 100)
         return (f"Мультитаймфреймовый ATR trailing stop сработал "
                 f"({confirmations}/{checked_timeframes} подтверждений, прибыль: {profit_pct:.2f}%)")
 
+        logger.debug(f"ATR проверка для {position['symbol']}:")
+        logger.debug(f"  - Цена входа: {open_price:.6f}")
+        logger.debug(f"  - Текущая цена: {current_price:.6f}")
+        logger.debug(f"  - Изменение: {((current_price - open_price) / open_price * 100):.2f}%")
+        logger.debug(f"  - ATR: {tf_atr:.6f}")
+        logger.debug(f"  - Chandelier Stop: {effective_stop:.6f}")
+        logger.debug(f"  - Минимальный буфер прибыли: {min_profit_buffer * 100:.2f}%")
+
     # Если мультитаймфреймовый анализ не дал результата, используем стандартную проверку
     return self._check_atr_trailing_stop_single_tf(position, data)
 
+  def _calculate_profit_protection_stop(self, position: Dict, current_price: float,
+                                        highest_since_entry: float) -> Optional[float]:
+    """
+    Рассчитывает уровень защиты прибыли.
+    Активируется только после достижения определенной прибыли.
+    """
+    open_price = float(position.get('open_price', 0))
+    if open_price == 0:
+      return None
+
+    side = position.get('side')
+
+    if side == 'BUY':
+      # Проверяем максимальную прибыль с момента входа
+      max_profit_pct = ((highest_since_entry - open_price) / open_price) * 100
+      current_profit_pct = ((current_price - open_price) / open_price) * 100
+
+      # Активируем защиту только если была прибыль >= 2%
+      if max_profit_pct >= 2.0:
+        # Защищаем 50% от максимальной прибыли
+        protection_level = open_price + (highest_since_entry - open_price) * 0.5
+
+        if current_price < protection_level and current_profit_pct > 0.5:
+          return protection_level
+
+    elif side == 'SELL':
+      # Аналогично для шорта
+      max_profit_pct = ((open_price - lowest_since_entry) / open_price) * 100
+      current_profit_pct = ((open_price - current_price) / open_price) * 100
+
+      if max_profit_pct >= 2.0:
+        protection_level = open_price - (open_price - lowest_since_entry) * 0.5
+
+        if current_price > protection_level and current_profit_pct > 0.5:
+          return protection_level
+
+    return None
 
   def _check_atr_trailing_stop_single_tf(self, position: Dict, data: pd.DataFrame) -> Optional[str]:
     """

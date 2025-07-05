@@ -120,6 +120,32 @@ class PositionManager:
     else:
       logger.info("Синхронизация завершена. Активных позиций на бирже не найдено.")
 
+  async def on_position_closed(self, symbol: str, pnl: float):
+    """
+    Вызывается при закрытии позиции
+    Дает время рынку на стабилизацию перед открытием новых позиций
+    """
+    try:
+      logger.info(f"💰 Позиция {symbol} закрыта с P&L: {pnl:.2f} USDT")
+
+      # Пауза для анализа рынка
+      pause_seconds = 60
+      if pnl < 0:  # Убыточная сделка - пауза больше
+        pause_seconds = 120
+        logger.info(f"⏸️ Пауза {pause_seconds}с после убыточной сделки")
+      else:
+        logger.info(f"⏸️ Пауза {pause_seconds}с для анализа рынка")
+
+      await asyncio.sleep(pause_seconds)
+
+      # Запускаем приоритетную проверку pending сигналов
+      if self.trading_system:
+        logger.info("🔍 Проверка ожидающих сигналов после освобождения средств...")
+        await self.trading_system._check_pending_signals_with_priority()
+
+    except Exception as e:
+      logger.error(f"Ошибка в обработчике закрытия позиции: {e}")
+
   def _check_sl_tp(self, position: Dict, current_price: float) -> Optional[str]:
     """Проверяет, сработал ли Stop-Loss или Take-Profit."""
     side = position.get('side')

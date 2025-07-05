@@ -92,6 +92,114 @@ class TradeExecutor:
         f"Стратегия: {signal.strategy_name}")
 
     try:
+      # === НОВЫЙ БЛОК: Проверка возраста сигнала ===
+      signal_age = datetime.now() - signal.timestamp
+
+      # Если сигнал старше 30 минут - проверяем, актуален ли он еще
+      if signal_age.total_seconds() > 180:  # 3 минут
+        logger.warning(f"⚠️ Сигнал для {symbol} устарел ({signal_age}). Проверяем актуальность...")
+
+        # Получаем текущие данные
+        current_data = await self.data_fetcher.get_historical_candles(
+          symbol,
+          Timeframe.FIVE_MINUTES,
+          limit=50
+        )
+
+        if current_data.empty:
+          logger.error(f"Не удалось получить данные для проверки актуальности {symbol}")
+          return False, None
+
+        # Проверяем, не ушла ли цена слишком далеко
+        current_price = current_data['close'].iloc[-1]
+        price_deviation = abs(current_price - signal.price) / signal.price
+
+        # Если цена ушла более чем на 1.5% - отменяем
+        if price_deviation > 0.005:
+          logger.warning(f"❌ Цена {symbol} сильно отклонилась от сигнала ({price_deviation:.1%}). Отменяем.")
+
+          # Удаляем из pending_signals
+          if hasattr(self, 'integrated_system') and self.integrated_system:
+            pending_signals = self.integrated_system.state_manager.get_pending_signals()
+            if symbol in pending_signals:
+              del pending_signals[symbol]
+              self.integrated_system.state_manager.update_pending_signals(pending_signals)
+
+          return False, {"reason": "price_deviation_too_high", "deviation": price_deviation}
+
+        # Проверяем оптимальность текущего момента для входа
+        if hasattr(self.integrated_system, '_check_ltf_entry_trigger'):
+          ltf_valid = self.integrated_system._check_ltf_entry_trigger(
+            current_data,
+            signal.signal_type
+          )
+
+          if not ltf_valid:
+            logger.info(f"📊 Текущий момент не оптимален для {symbol}. Ждем лучших условий.")
+            # Не удаляем из очереди, просто откладываем
+            return False, {"reason": "waiting_better_entry", "retry": True}
+
+        # Обновляем цену сигнала на текущую
+        signal.price = current_price
+        logger.info(f"✅ Сигнал актуализирован. Новая цена входа: {current_price}")
+
+      # === ПРОВЕРКА БАЛАНСА С РЕЗЕРВОМ ===
+
+      # Получаем текущий баланс через правильный метод
+      balance_data = await self.connector.get_account_balance(account_type="UNIFIED", coin="USDT")
+      if not balance_data or 'coin' not in balance_data:
+        logger.error("Не удалось получить баланс")
+        return False, None
+
+      available_balance = float(balance_data.get('totalAvailableBalance', 0))
+
+      # Оставляем резерв для других сигналов (20% от баланса)
+      reserve_ratio = 0.2
+      usable_balance = available_balance * (1 - reserve_ratio)
+
+      # Рассчитываем необходимую сумму
+      leverage = self.config.get('trade_settings', {}).get('leverage', 10)
+      required_amount = quantity * signal.price / leverage
+
+      if required_amount > usable_balance:
+        logger.warning(
+          f"⚠️ Недостаточно средств для {symbol}. Нужно: ${required_amount:.2f}, доступно: ${usable_balance:.2f}")
+
+        # Проверяем приоритет сигнала
+        if hasattr(self, 'integrated_system') and self.integrated_system:
+          pending_signals = self.integrated_system.state_manager.get_pending_signals()
+
+          # Сортируем сигналы по приоритету (уверенность * возраст)
+          signal_priorities = []
+          for sym, sig_data in pending_signals.items():
+            sig_age = (datetime.now() - datetime.fromisoformat(
+              sig_data['metadata']['signal_time'])).total_seconds() / 3600
+            priority = sig_data['confidence'] * (1 + sig_age * 0.1)  # Старые сигналы получают небольшой бонус
+            signal_priorities.append((sym, priority))
+
+          signal_priorities.sort(key=lambda x: x[1], reverse=True)
+
+          # Если текущий сигнал не в топ-3 по приоритету - откладываем
+          current_priority = next((i for i, (sym, _) in enumerate(signal_priorities) if sym == symbol), -1)
+          if current_priority > 2:
+            logger.info(
+              f"📊 Сигнал {symbol} имеет низкий приоритет ({current_priority + 1}). Ждем освобождения средств.")
+            return False, {"reason": "low_priority", "priority": current_priority}
+
+      # === ИСПОЛНЕНИЕ ОРДЕРА ===
+
+      # Определяем тип ордера в зависимости от возраста сигнала
+      order_type = 'Market'
+      if signal_age.total_seconds() > 600:  # Если старше 10 мин - используем лимитный
+        order_type = 'Limit'
+        # Для BUY ставим чуть ниже текущей цены, для SELL - чуть выше
+        if signal.signal_type == SignalType.BUY:
+          signal.price *= 0.999  # -0.1%
+        else:
+          signal.price *= 1.001  # +0.1%
+
+      logger.info(f"🚀 Размещаем {order_type} ордер для {symbol}")
+
       # 1. Получаем настройки торговли из сохраненного конфига
       trade_settings = self.config.get('trade_settings', {})
       leverage = trade_settings.get('leverage', 10)
@@ -212,6 +320,62 @@ class TradeExecutor:
       logger.error(f"Критическая ошибка при исполнении сделки {symbol}: {e}", exc_info=True)
       return False, None
 
+  async def _revalidate_pending_signals(self):
+    """
+    Новый метод: Периодическая ревалидация всех pending сигналов
+    Вызывается каждые 5 минут
+    """
+    try:
+      pending_signals = self.state_manager.get_pending_signals()
+
+      if not pending_signals:
+        return
+
+      logger.info(f"🔄 Ревалидация {len(pending_signals)} ожидающих сигналов...")
+
+      for symbol, signal_data in list(pending_signals.items()):
+        try:
+          # Проверяем возраст
+          signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
+          age_hours = (datetime.now() - signal_time).total_seconds() / 3600
+
+          # Если старше 4 часов - удаляем
+          if age_hours > 4:
+            logger.warning(f"❌ Удаляем устаревший сигнал {symbol} (возраст: {age_hours:.1f}ч)")
+            del pending_signals[symbol]
+            continue
+
+          # Проверяем актуальность цены
+          current_data = await self.data_fetcher.get_historical_candles(
+            symbol, Timeframe.FIFTEEN_MINUTES, limit=20
+          )
+
+          if current_data.empty:
+            continue
+
+          current_price = current_data['close'].iloc[-1]
+          original_price = signal_data['price']
+          deviation = abs(current_price - original_price) / original_price
+
+          # Обновляем метаданные
+          signal_data['metadata']['current_price'] = current_price
+          signal_data['metadata']['price_deviation'] = deviation
+          signal_data['metadata']['last_revalidation'] = datetime.now().isoformat()
+
+          # Если отклонение слишком большое - помечаем для приоритетной проверки
+          if deviation > 0.02:  # 2%
+            signal_data['metadata']['needs_urgent_check'] = True
+            logger.warning(f"⚠️ {symbol}: большое отклонение цены ({deviation:.1%})")
+
+        except Exception as e:
+          logger.error(f"Ошибка ревалидации сигнала {symbol}: {e}")
+
+      # Сохраняем обновленные данные
+      self.state_manager.update_pending_signals(pending_signals)
+
+    except Exception as e:
+      logger.error(f"Ошибка в процессе ревалидации: {e}")
+
   async def execute_trade_with_smart_pricing(self, signal: TradingSignal, symbol: str, quantity: float) -> Tuple[
     bool, Optional[Dict]]:
     """Использует стакан для умного размещения ордеров."""
@@ -306,6 +470,8 @@ class TradeExecutor:
       # 5. Проверяем результат
       if order_response and order_response.get('orderId'):
         logger.info(f"✅ Ордер на закрытие {symbol} успешно принят биржей. OrderID: {order_response.get('orderId')}")
+
+
 
         # ВАЖНО: На этом этапе мы только отправили ордер.
         # Расчет PnL и обновление статуса в БД на 'CLOSED' должно происходить
@@ -835,7 +1001,7 @@ class TradeExecutor:
             'reverse_from': current_position.get('order_id')  # Ссылка на предыдущую позицию
           }
 
-          self.db_manager.add_trade_with_signal(new_trade_data)
+          await self.db_manager.add_trade_with_signal(new_trade_data)
 
           # 8. Обновляем кэш позиций
           self.position_manager.open_positions[symbol] = {

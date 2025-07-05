@@ -224,6 +224,7 @@ class IntegratedTradingSystem:
     self.is_running = False
     self._monitoring_task: Optional[asyncio.Task] = None
     self._fast_monitoring_task: Optional[asyncio.Task] = None
+    self._revalidation_task: Optional[asyncio.Task] = None
 
     # Инициализируем RetrainingManager без лишних зависимостей
     self.retraining_manager = ModelRetrainingManager(data_fetcher=self.data_fetcher)
@@ -2523,6 +2524,12 @@ class IntegratedTradingSystem:
     if hasattr(self, '_fast_pending_check_task') and self._fast_pending_check_task:
       tasks_to_cancel.append(self._fast_pending_check_task)
 
+    if self._revalidation_task:
+        self._revalidation_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await self._revalidation_task
+
+
     if self.shadow_trading:
       try:
         # Генерируем финальный отчет
@@ -4330,6 +4337,9 @@ class IntegratedTradingSystem:
       self._fast_pending_check_task = asyncio.create_task(self._fast_pending_signals_loop())
       logger.info("✅ Запущена быстрая проверка pending signals")
 
+      # 10. Запуск ревалидации каждые 5 минут
+      self._revalidation_task = asyncio.create_task(self._revalidation_loop())
+
       logger.info("🚀 Все фоновые задачи успешно запущены")
 
 
@@ -4370,6 +4380,112 @@ class IntegratedTradingSystem:
       logger.critical(f"Критическая ошибка при запуске системы: {e}", exc_info=True)
       self.is_running = False
       raise
+
+  async def _revalidation_loop(self):
+    """Цикл периодической ревалидации pending сигналов"""
+    logger.info("Запуск цикла периодической ревалидации...")
+
+    while self.is_running:
+      try:
+        await asyncio.sleep(300)  # 5 минут
+        await self._revalidate_pending_signals()
+      except Exception as e:
+        logger.error(f"Ошибка в цикле ревалидации: {e}")
+
+  async def _revalidate_pending_signals(self):
+      """
+      Периодическая ревалидация всех pending сигналов
+      Вызывается каждые 5 минут
+      """
+      try:
+        pending_signals = self.state_manager.get_pending_signals()
+
+        if not pending_signals:
+          return
+
+        logger.info(f"🔄 Ревалидация {len(pending_signals)} ожидающих сигналов...")
+
+        for symbol, signal_data in list(pending_signals.items()):
+          try:
+            # Проверяем возраст
+            signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
+            age_hours = (datetime.now() - signal_time).total_seconds() / 3600
+
+            # Если старше 4 часов - удаляем
+            if age_hours > 1:
+              logger.warning(f"❌ Удаляем устаревший сигнал {symbol} (возраст: {age_hours:.1f}ч)")
+              del pending_signals[symbol]
+              continue
+
+            # Проверяем актуальность цены
+            current_data = await self.data_fetcher.get_historical_candles(
+              symbol, Timeframe.FIFTEEN_MINUTES, limit=20
+            )
+
+            if current_data.empty:
+              continue
+
+            current_price = current_data['close'].iloc[-1]
+            original_price = signal_data['price']
+            deviation = abs(current_price - original_price) / original_price
+
+            # Обновляем метаданные
+            signal_data['metadata']['current_price'] = current_price
+            signal_data['metadata']['price_deviation'] = deviation
+            signal_data['metadata']['last_revalidation'] = datetime.now().isoformat()
+
+            # Если отклонение слишком большое - помечаем для приоритетной проверки
+            if deviation > 0.02:  # 2%
+              signal_data['metadata']['needs_urgent_check'] = True
+              logger.warning(f"⚠️ {symbol}: большое отклонение цены ({deviation:.1%})")
+
+          except Exception as e:
+            logger.error(f"Ошибка ревалидации сигнала {symbol}: {e}")
+
+        # Сохраняем обновленные данные
+        self.state_manager.update_pending_signals(pending_signals)
+
+      except Exception as e:
+        logger.error(f"Ошибка в процессе ревалидации: {e}")
+
+  async def _check_pending_signals_with_priority(self):
+    """
+    Проверяет pending сигналы с учетом приоритетов
+    Вызывается после закрытия позиций
+    """
+    try:
+      pending_signals = self.state_manager.get_pending_signals()
+
+      if not pending_signals:
+        return
+
+      # Сортируем по приоритету
+      signal_list = []
+      for symbol, sig_data in pending_signals.items():
+        sig_age = (datetime.now() - datetime.fromisoformat(sig_data['metadata']['signal_time'])).total_seconds() / 3600
+        priority = sig_data['confidence'] * (1 + sig_age * 0.1)
+
+        # Добавляем бонус за срочность
+        if sig_data['metadata'].get('needs_urgent_check', False):
+          priority *= 1.5
+
+        signal_list.append((symbol, priority, sig_data))
+
+      signal_list.sort(key=lambda x: x[1], reverse=True)
+
+      # Проверяем топ сигналы
+      for symbol, priority, sig_data in signal_list[:3]:
+        logger.info(f"🎯 Проверка приоритетного сигнала {symbol} (приоритет: {priority:.2f})")
+
+        # Запускаем проверку
+        await self._check_pending_signal_for_entry(symbol)
+
+        # Небольшая пауза между проверками
+        await asyncio.sleep(5)
+
+    except Exception as e:
+      logger.error(f"Ошибка проверки сигналов с приоритетами: {e}")
+
 
   async def _set_leverage_for_all_symbols(self, leverage: int):
     """Устанавливает плечо для всех символов с оптимизацией и предотвращением дублирования"""

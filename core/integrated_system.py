@@ -3515,7 +3515,7 @@ class IntegratedTradingSystem:
       price_deviation = abs(current_price - original_price) / original_price
 
       # Если цена ушла более чем на 0,5% - пересматриваем целесообразность входа
-      if price_deviation > 0.005:
+      if price_deviation > 0.015:
         logger.warning(f"Цена {symbol} сильно отклонилась от сигнала ({price_deviation:.1%})")
 
         # Для BUY: если цена выросла сильно - отменяем

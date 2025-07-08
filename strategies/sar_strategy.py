@@ -429,41 +429,39 @@ class StopAndReverseStrategy(BaseStrategy):
             return components
 
     def _check_psar_trigger(self, data: pd.DataFrame) -> bool:
-        """Проверка триггера Parabolic SAR"""
+        """Проверка пересечения PSAR с ценой"""
         try:
-            # Рассчитываем PSAR
-            psar_data = ta.psar(data['high'], data['low'], data['close'], 
-                              af0=self.psar_start, af=self.psar_step, max_af=self.psar_max)
-            
+            if len(data) < 3 or 'psar' not in data.columns:
+                return False
+
+            # Безопасное извлечение PSAR значений
+            psar_data = data['psar']
             if psar_data is None or len(psar_data) < 2:
                 return False
-            
-            # Получаем PSAR значения
-            if isinstance(psar_data, pd.DataFrame):
-                psar_col = next((col for col in psar_data.columns if 'PSAR' in col), None)
-                if psar_col is None:
-                    return False
-                psar_values = psar_data[psar_col]
-            else:
-                psar_values = psar_data
-            
-            if psar_values.empty or len(psar_values) < 2:
-                return False
-            
+
+            # Получаем последние значения
             current_price = data['close'].iloc[-1]
             prev_price = data['close'].iloc[-2]
-            current_psar = psar_values.iloc[-1]
-            prev_psar = psar_values.iloc[-2]
-            
+
+            # Безопасное получение PSAR значений
+            if hasattr(psar_data, 'iloc'):
+                current_psar = psar_data.iloc[-1]
+                prev_psar = psar_data.iloc[-2]
+            else:
+                psar_values = np.array(psar_data)
+                current_psar = psar_values[-1]
+                prev_psar = psar_values[-2]
+
+            # Проверяем на NaN
+            if pd.isna(current_psar) or pd.isna(prev_psar):
+                return False
+
             # Проверяем переворот PSAR
-            # Сигнал на покупку: цена была ниже PSAR, теперь выше
             buy_signal = (prev_price <= prev_psar) and (current_price > current_psar)
-            
-            # Сигнал на продажу: цена была выше PSAR, теперь ниже  
             sell_signal = (prev_price >= prev_psar) and (current_price < current_psar)
-            
+
             return buy_signal or sell_signal
-            
+
         except Exception as e:
             logger.error(f"Ошибка проверки PSAR триггера: {e}")
             return False
@@ -480,7 +478,13 @@ class StopAndReverseStrategy(BaseStrategy):
             
             # Ищем локальные максимумы и минимумы
             prices = data['close'].values[-30:]  # Последние 30 баров
-            rsi_values = rsi.values[-30:]
+            # Безопасное извлечение значений RSI
+            if hasattr(rsi, 'values'):
+                rsi_values = rsi.values[-30:]
+            elif hasattr(rsi, 'iloc'):
+                rsi_values = rsi.iloc[-30:].values
+            else:
+                rsi_values = np.array(rsi)[-30:]
             
             # Находим пики и впадины
             price_peaks = self._find_peaks(prices)
@@ -511,15 +515,27 @@ class StopAndReverseStrategy(BaseStrategy):
             macd_data = ta.macd(data['close'], fast=self.macd_fast, slow=self.macd_slow, signal=self.macd_signal)
             if macd_data is None or macd_data.empty:
                 return False
-            
+
             # Используем MACD гистограмму для дивергенции
-            macd_hist = macd_data.iloc[:, 2] if len(macd_data.columns) > 2 else None
+            if isinstance(macd_data, pd.DataFrame) and len(macd_data.columns) > 2:
+                macd_hist = macd_data.iloc[:, 2]
+            elif isinstance(macd_data, tuple) and len(macd_data) > 2:
+                macd_hist = macd_data[2]  # Третий элемент tuple - гистограмма
+            else:
+                logger.debug("MACD данные не содержат гистограмму")
+                return False
+
             if macd_hist is None:
                 return False
-            
-            # Аналогично RSI дивергенции
+
+            # Безопасное извлечение значений
             prices = data['close'].values[-30:]
-            hist_values = macd_hist.values[-30:]
+            if hasattr(macd_hist, 'values'):
+                hist_values = macd_hist.values[-30:]
+            elif hasattr(macd_hist, 'iloc'):
+                hist_values = macd_hist.iloc[-30:].values
+            else:
+                hist_values = np.array(macd_hist)[-30:]
             
             price_peaks = self._find_peaks(prices)
             hist_peaks = self._find_peaks(hist_values)
@@ -540,23 +556,32 @@ class StopAndReverseStrategy(BaseStrategy):
             logger.error(f"Ошибка проверки MACD дивергенции: {e}")
             return False
 
-    def _find_peaks(self, data: pd.DataFrame, min_distance: int = 3) -> List[float]:
+    def _find_peaks(self, data: np.ndarray, min_distance: int = 3) -> List[float]:
         """Находит локальные максимумы в данных, корректно извлекая значения."""
-        peaks = []
-        # We use .iloc for integer-location based indexing, which is safer
-        for i in range(min_distance, len(data) - min_distance):
-            # Isolate the 'high' value at the current position
-            current_high_value = data.iloc[i]['high']
+        try:
+            # Преобразуем в numpy array для универсальности
+            if hasattr(data, 'values'):
+                values = data.values
+            elif hasattr(data, 'iloc'):
+                values = data.values
+            else:
+                values = np.array(data)
 
-            # Compare the current 'high' with the 'high' of surrounding candles
-            is_peak = all(current_high_value >= data.iloc[i - j]['high'] for j in range(1, min_distance + 1)) and \
-                      all(current_high_value >= data.iloc[i + j]['high'] for j in range(1, min_distance + 1))
+            peaks = []
+            for i in range(min_distance, len(values) - min_distance):
+                is_peak = True
+                for j in range(i - min_distance, i + min_distance + 1):
+                    if j != i and values[j] >= values[i]:
+                        is_peak = False
+                        break
+                if is_peak:
+                    peaks.append(values[i])
 
-            if is_peak:
-                # CORRECTED: Append only the float value, not the entire row
-                peaks.append(current_high_value)
+            return peaks
 
-        return peaks
+        except Exception as e:
+            logger.error(f"Ошибка поиска пиков: {e}")
+            return []
 
     # def _find_peaks(self, data: np.ndarray, min_distance: int = 3) -> List[float]:
     #     """Находит локальные максимумы в данных"""
@@ -576,20 +601,32 @@ class StopAndReverseStrategy(BaseStrategy):
     #             troughs.append(data[i])
     #     return troughs
 
-    def _find_troughs(self, data: pd.DataFrame, min_distance: int = 3) -> List[float]:
-        """Находит локальные минимумы в данных"""
-        troughs = []
-        for i in range(min_distance, len(data) - min_distance):
-            # Предполагаем, что 'data' это DataFrame, и нас интересует колонка 'low'
-            current_low_value = data.iloc[i]['low']
+    def _find_troughs(self, data: np.ndarray, min_distance: int = 3) -> List[float]:
+        """Находит локальные минимумы в данных."""
+        try:
+            # Преобразуем в numpy array для универсальности
+            if hasattr(data, 'values'):
+                values = data.values
+            elif hasattr(data, 'iloc'):
+                values = data.values
+            else:
+                values = np.array(data)
 
-            # Сравниваем конкретные значения, а не целые строки
-            is_trough = all(current_low_value <= data.iloc[i - j]['low'] for j in range(1, min_distance + 1)) and \
-                        all(current_low_value <= data.iloc[i + j]['low'] for j in range(1, min_distance + 1))
+            troughs = []
+            for i in range(min_distance, len(values) - min_distance):
+                is_trough = True
+                for j in range(i - min_distance, i + min_distance + 1):
+                    if j != i and values[j] <= values[i]:
+                        is_trough = False
+                        break
+                if is_trough:
+                    troughs.append(values[i])
 
-            if is_trough:
-                troughs.append(current_low_value)  # <-- ИСПРАВЛЕНО: добавляется только число
-        return troughs
+            return troughs
+
+        except Exception as e:
+            logger.error(f"Ошибка поиска впадин: {e}")
+            return []
 
     def _check_rsi_extreme_zone(self, data: pd.DataFrame) -> bool:
         """Проверка RSI в экстремальной зоне (5м/15м)"""

@@ -116,8 +116,8 @@ class TradeExecutor:
         current_price = current_data['close'].iloc[-1]
         price_deviation = abs(current_price - signal.price) / signal.price
 
-        # Если цена ушла более чем на 0.5% - отменяем
-        if price_deviation > 0.005:
+        # Если цена ушла более чем на 0.15% - отменяем
+        if price_deviation > 0.015:
           logger.warning(f"❌ Цена {symbol} сильно отклонилась от сигнала ({price_deviation:.1%}). Отменяем.")
 
           # Удаляем из pending_signals

@@ -187,7 +187,7 @@
     "filters": {
         "btc_trend_filter": {
             "enabled": false,
-            "correlation_threshold": 0.85
+            "correlation_threshold": 0.95
         }
     },
     "stop_and_reverse_strategy": {
@@ -295,9 +295,9 @@
             "daily_loss_limit_percentage": 3.0,
             "volatility_circuit_breaker": 5.0
         },
-        "chop_threshold": 60,
-        "adx_threshold": 25,
-        "atr_multiplier": 2.5,
+        "chop_threshold": 95,
+        "adx_threshold": 15,
+        "atr_multiplier": 1.0,
         "psar_start": 0.02,
         "psar_step": 0.02,
         "psar_max": 0.2,

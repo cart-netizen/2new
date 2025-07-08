@@ -47,24 +47,25 @@ class SignalFilter:
         # Мы уже рассчитываем `volume_spike_ratio` в FeatureEngineer
         volume_spike_ratio = data.get('volume_spike_ratio', pd.Series([0])).iloc[-1]
 
-        # Если объем вырос более чем в 4 раза по сравнению со средним, считаем это аномалией
-        if volume_spike_ratio > 4.0:
+        # Если объем вырос более чем в 2 раза по сравнению со средним, считаем это аномалией
+        if volume_spike_ratio > 2.0:
           logger.warning(
             f"ФИЛЬТР для {signal.symbol}: Обнаружен аномальный всплеск объема (x{volume_spike_ratio:.1f}). Фильтр по тренду BTC временно игнорируется.")
-        else:
+        # else:
           # Если всплеска нет, проводим стандартную проверку по BTC
-          logger.debug(f"ФИЛЬТР для {signal.symbol}: Проверка тренда BTC...")
-          btc_data = await self.data_fetcher.get_historical_candles("BTCUSDT", Timeframe.ONE_HOUR, limit=50)
-          if not btc_data.empty:
-            btc_ema = ta.ema(btc_data['close'], length=21)
-            if btc_ema is not None and not btc_ema.empty:
-              last_btc_price = btc_data['close'].iloc[-1]
-              last_btc_ema = btc_ema.iloc[-1]
-
-              if signal.signal_type == SignalType.BUY and last_btc_price < last_btc_ema:
-                return False, f"Отклонено: сигнал BUY, но BTC в нисходящем тренде"
-              if signal.signal_type == SignalType.SELL and last_btc_price > last_btc_ema:
-                return False, f"Отклонено: сигнал SELL, но BTC в восходящем тренде"
+          #---------Закрыто в 08.07 для теста отсутствия фильтра по BTC-------------------------------------------
+          # logger.debug(f"ФИЛЬТР для {signal.symbol}: Проверка тренда BTC...")
+          # btc_data = await self.data_fetcher.get_historical_candles("BTCUSDT", Timeframe.ONE_HOUR, limit=50)
+          # if not btc_data.empty:
+          #   btc_ema = ta.ema(btc_data['close'], length=21)
+          #   if btc_ema is not None and not btc_ema.empty:
+          #     last_btc_price = btc_data['close'].iloc[-1]
+          #     last_btc_ema = btc_ema.iloc[-1]
+          #
+          #     if signal.signal_type == SignalType.BUY and last_btc_price < last_btc_ema:
+          #       return False, f"Отклонено: сигнал BUY, но BTC в нисходящем тренде"
+          #     if signal.signal_type == SignalType.SELL and last_btc_price > last_btc_ema:
+          #       return False, f"Отклонено: сигнал SELL, но BTC в восходящем тренде"
       # --- КОНЕЦ НОВОГО БЛОКА ---
 
       # --- 1. Фильтр по тренду (EMA) ---
@@ -133,7 +134,7 @@ class SignalFilter:
               #   reason = f"Отклонено: сигнал {signal.signal_type.value}, но BTC в {trend_direction} тренде и корреляция высока ({correlation:.2f})"
               #   logger.warning(f"ФИЛЬТР BTC: {reason}")
               #   return False, reason
-              if correlation is not None and correlation >= 0.85:  # Повысили порог с 0.75
+              if correlation is not None and correlation >= 0.95:  # Повысили порог с 0.75
                 # И даже тогда, проверяем силу сигнала
                 if signal.confidence < 0.8:  # Только для слабых сигналов
                   return False, f"Слабый сигнал против тренда BTC (корреляция {correlation:.2f})"

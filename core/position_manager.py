@@ -275,7 +275,7 @@ class PositionManager:
           # Временно увеличиваем требования для выхода
           strategy_settings['atr_ts_multiplier'] = strategy_settings.get('atr_ts_multiplier', 2.5) * 1.5
 
-        min_hold_time_minutes = 30  # Минимальное время удержания позиции
+        min_hold_time_minutes = 10  # Минимальное время удержания позиции
 
         if 'open_timestamp' in position_data:
           open_time = pd.to_datetime(position_data['open_timestamp'])

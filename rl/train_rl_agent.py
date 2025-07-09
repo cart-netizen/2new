@@ -233,22 +233,14 @@ class RLTrainer:
     # Преобразуем в формат FinRL
     finrl_df = prepare_data_for_finrl(all_data, list(all_data.keys()))
 
-    # ДОБАВЛЯЕМ ПРОВЕРКУ СТРУКТУРЫ ДАННЫХ
-    logger.info(f"Структура данных после prepare_data_for_finrl:")
-    logger.info(f"Колонки: {finrl_df.columns.tolist()}")
-    logger.info(f"Типы данных:\n{finrl_df.dtypes}")
-
-    # Проверяем критические колонки
-    for col in ['open', 'high', 'low', 'close', 'volume']:
-      if col not in finrl_df.columns:
-        raise ValueError(f"Отсутствует обязательная колонка: {col}")
-
-      # Проверяем, что данные числовые
-      sample_value = finrl_df[col].iloc[0] if len(finrl_df) > 0 else None
-      logger.info(f"Пример значения {col}: {sample_value}, тип: {type(sample_value)}")
+    # Отладка
+    debug_dataframe_structure(finrl_df, "After prepare_data_for_finrl")
 
     # Добавляем технические индикаторы в формате FinRL
     finrl_df = self._add_finrl_indicators(finrl_df)
+
+    # Финальная отладка
+    debug_dataframe_structure(finrl_df, "Final training data")
 
     logger.info(f"📊 Подготовлено {len(finrl_df)} записей для обучения")
 
@@ -301,10 +293,9 @@ class RLTrainer:
       if hasattr(regime, 'name'):
         data['market_regime'] = regime.name
       else:
-        # Преобразуем в строку или числовое значение
         data['market_regime'] = str(regime) if regime else 'UNKNOWN'
 
-      # Если нужно числовое представление:
+      # Числовое представление режима
       regime_mapping = {
         'STRONG_TREND_UP': 4,
         'TREND_UP': 3,
@@ -315,14 +306,13 @@ class RLTrainer:
       }
       data['market_regime_numeric'] = regime_mapping.get(data['market_regime'].iloc[-1], -1)
 
-      # ИСПРАВЛЕНО: используем правильный метод для прогноза волатильности
+      # Прогноз волатильности
       try:
         if hasattr(self.volatility_predictor, 'predict_volatility'):
-          vol_pred = await self.volatility_predictor.predict_volatility(symbol, data)
+          vol_pred = self.volatility_predictor.predict_volatility(data)
         elif hasattr(self.volatility_predictor, 'predict_future_volatility'):
           vol_pred = self.volatility_predictor.predict_future_volatility(data)
         else:
-          # Если нет подходящего метода, используем простой расчет
           vol_pred = data['close'].pct_change().rolling(20).std().iloc[-1]
 
         if isinstance(vol_pred, dict):
@@ -333,11 +323,12 @@ class RLTrainer:
         logger.warning(f"Не удалось получить прогноз волатильности: {e}")
         data['predicted_volatility'] = 0.0
 
-      # Детекция аномалий
-      anomaly_reports = await self.anomaly_detector.detect_anomalies(data, symbol)
+      # ИСПРАВЛЕНО: убираем await, так как detect_anomalies синхронный
+      anomaly_reports = self.anomaly_detector.detect_anomalies(data, symbol)
       if anomaly_reports:
-        # В качестве оценки берем максимальную "серьезность" аномалии
         anomaly_score = max(report.severity for report in anomaly_reports)
+      else:
+        anomaly_score = 0.0
       data['anomaly_score'] = anomaly_score
 
     except Exception as e:
@@ -352,71 +343,131 @@ class RLTrainer:
 
   def _add_finrl_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
     """Добавляет индикаторы в формате FinRL для всех символов"""
-    # Verify input structure
     if 'tic' not in df.columns:
-      raise ValueError("Input DataFrame must contain 'tic' column")
+      raise ValueError("DataFrame должен содержать колонку 'tic'")
+
+    # Список индикаторов, которые мы будем добавлять
+    indicators_config = {
+      'rsi': {'default': 50.0, 'required': True},
+      'macd': {'default': 0.0, 'required': True},
+      'macd_signal': {'default': 0.0, 'required': True},
+      'macd_diff': {'default': 0.0, 'required': True},
+      'cci': {'default': 0.0, 'required': True},
+      'adx': {'default': 25.0, 'required': True},
+      'atr': {'default': 0.0, 'required': True}
+    }
 
     result_dfs = []
 
     for tic in df['tic'].unique():
       tic_df = df[df['tic'] == tic].copy()
 
-      # Validate price data
-      price_cols = ['open', 'high', 'low', 'close']
-      if not all(col in tic_df.columns for col in price_cols):
-        raise ValueError(f"Missing price columns for {tic}")
-
-      # Ensure numeric values
+      # Проверяем наличие ценовых данных
+      price_cols = ['open', 'high', 'low', 'close', 'volume']
       for col in price_cols:
+        if col not in tic_df.columns:
+          raise ValueError(f"Отсутствует колонка {col} для {tic}")
+
+        # Убеждаемся, что данные числовые
         tic_df[col] = pd.to_numeric(tic_df[col], errors='coerce')
-        if tic_df[col].isna().any():
-          raise ValueError(f"Non-numeric values in {col} for {tic}")
 
-      # Add indicators with proper defaults
-      indicators = {
-        'rsi': 50.0,
-        'macd': 0.0,
-        'macd_signal': 0.0,
-        'macd_diff': 0.0,
-        'cci': 0.0,
-        'adx': 25.0,
-        'atr': 0.0
-      }
-
-      for indicator, default in indicators.items():
+      # Добавляем индикаторы
+      for indicator, config in indicators_config.items():
         if indicator not in tic_df.columns:
-          tic_df[indicator] = default
-        tic_df[indicator] = pd.to_numeric(tic_df[indicator], errors='coerce').fillna(default)
+          tic_df[indicator] = config['default']
+        else:
+          # Проверяем и исправляем тип данных
+          tic_df[indicator] = pd.to_numeric(tic_df[indicator], errors='coerce').fillna(config['default'])
+
+      # Убеждаемся, что нет NaN
+      tic_df = tic_df.fillna(method='ffill').fillna(method='bfill')
+
+      # Если все еще есть NaN, заполняем дефолтными значениями
+      for col in tic_df.columns:
+        if tic_df[col].isna().any():
+          if col in indicators_config:
+            tic_df[col] = tic_df[col].fillna(indicators_config[col]['default'])
+          else:
+            tic_df[col] = tic_df[col].fillna(0)
 
       result_dfs.append(tic_df)
 
     if not result_dfs:
-      raise ValueError("No valid data after processing")
+      raise ValueError("Нет данных после обработки")
 
-    return pd.concat(result_dfs).sort_values(['date', 'tic']).reset_index(drop=True)
+    # Объединяем и сортируем
+    final_df = pd.concat(result_dfs, ignore_index=True)
+    final_df = final_df.sort_values(['date', 'tic']).reset_index(drop=True)
+
+    logger.info(f"Добавлены индикаторы. Финальная форма: {final_df.shape}")
+    logger.info(f"Колонки: {final_df.columns.tolist()}")
+
+    return final_df
 
   async def create_environment(self, df: pd.DataFrame) -> BybitTradingEnvironment:
     """Создает торговую среду"""
     logger.info("Создание торговой среды...")
 
+    # Детальная диагностика
+    logger.info(f"Входной DataFrame shape: {df.shape}")
+    logger.info(f"Columns: {df.columns.tolist()}")
+
+    if 'tic' in df.columns:
+      logger.info(f"Уникальные tickers: {df['tic'].unique()}")
+
+    if 'date' in df.columns:
+      logger.info(f"Date range: {df['date'].min()} to {df['date'].max()}")
+
+    # Проверка структуры
+    logger.info(f"DataFrame dtypes:\n{df.dtypes}")
+    logger.info(f"Первые 5 строк:\n{df.head()}")
+
+    # Отладка структуры данных
+    debug_dataframe_structure(df, "Before environment creation")
+
+    # КРИТИЧНО: Убедимся, что данные в правильном формате для FinRL
+    if 'tic' not in df.columns or 'date' not in df.columns:
+      raise ValueError("DataFrame должен содержать колонки 'tic' и 'date'")
+
+    # Убедимся, что индекс - это RangeIndex, а не даты
+    if not isinstance(df.index, pd.RangeIndex):
+      df = df.reset_index(drop=True)
+
+    # Проверим и исправим типы данных
+    numeric_columns = ['open', 'high', 'low', 'close', 'volume']
+    for col in numeric_columns:
+      if col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Проверяем на NaN
+        if df[col].isna().any():
+          logger.warning(f"Found NaN in {col}, filling with forward fill")
+          df[col] = df[col].fillna(method='ffill').fillna(method='bfill')
+
+    # ВАЖНО: FinRL требует, чтобы данные были отсортированы и выровнены
+    df = df.sort_values(['date', 'tic']).reset_index(drop=True)
+
     # Создаем функцию вознаграждения
     reward_function = RiskAdjustedRewardFunction(
-        risk_manager=self.risk_manager,
-        config=self.config.get('reward_config', {})
+      risk_manager=self.risk_manager,
+      config=self.config.get('reward_config', {})
     )
 
-    # Параметры среды - добавляем reward_scaling
+    # Параметры среды
     env_config = {
-        'hmax': 100,
-        'initial_amount': self.config.get('initial_capital', 10000),
-        'transaction_cost_pct': 0.001,
-        'reward_scaling': 1e-4,  # Убедитесь, что это здесь
-        'buy_cost_pct': 0.001,
-        'sell_cost_pct': 0.001
+      'hmax': 100,
+      'initial_amount': self.config.get('initial_capital', 10000),
+      'transaction_cost_pct': 0.001,
+      'reward_scaling': 1e-4,
+      'buy_cost_pct': 0.001,
+      'sell_cost_pct': 0.001
     }
 
-    # Создаем среду
-    environment = BybitTradingEnvironment(
+    # Финальная отладка перед созданием среды
+    debug_dataframe_structure(df, "Final check before environment")
+
+    try:
+      # Создаем среду
+      environment = BybitTradingEnvironment(
         df=df,
         data_fetcher=self.data_fetcher,
         market_regime_detector=self.market_regime_detector,
@@ -427,13 +478,18 @@ class RLTrainer:
         commission_rate=env_config['transaction_cost_pct'],
         leverage=self.config.get('leverage', 10),
         max_positions=self.config.get('portfolio_config', {}).get('max_positions', 10),
-        config=env_config  # Передаем полный конфиг
-    )
+        config=env_config
+      )
+
+      logger.info("✅ Торговая среда создана успешно")
+
+    except Exception as e:
+      logger.error(f"Ошибка создания среды: {e}")
+      logger.error(f"DataFrame info:\n{df.info()}")
+      raise
 
     # Устанавливаем функцию вознаграждения
     environment.reward_function = reward_function
-
-    logger.info("✅ Торговая среда создана")
 
     return environment
 
@@ -768,6 +824,86 @@ async def main_training():
       await trainer.connector.close()
     if trainer and hasattr(trainer, 'data_fetcher') and hasattr(trainer.data_fetcher, 'connector'):
       await trainer.data_fetcher.connector.close()
+
+def validate_finrl_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Валидирует и исправляет DataFrame для FinRL
+    """
+    # Проверяем необходимые колонки
+    required_columns = ['date', 'tic', 'open', 'high', 'low', 'close', 'volume']
+
+    for col in required_columns:
+      if col not in df.columns:
+        raise ValueError(f"Отсутствует обязательная колонка: {col}")
+
+    # Проверяем, что у нас есть данные для всех символов на каждую дату
+    # Это критично для FinRL!
+    date_tic_combinations = df.groupby(['date', 'tic']).size()
+    dates = df['date'].unique()
+    tics = df['tic'].unique()
+
+    # Создаем полный набор комбинаций дата-символ
+    full_index = pd.MultiIndex.from_product([dates, tics], names=['date', 'tic'])
+
+    # Проверяем пропуски
+    missing_combinations = set(full_index) - set(date_tic_combinations.index)
+
+    if missing_combinations:
+      logger.warning(f"Обнаружено {len(missing_combinations)} пропущенных комбинаций дата-символ")
+
+      # Заполняем пропуски
+      for date, tic in missing_combinations:
+        # Находим ближайшую доступную запись для этого символа
+        tic_data = df[df['tic'] == tic]
+        if len(tic_data) > 0:
+          # Используем последнюю известную цену
+          last_known = tic_data[tic_data['date'] < date].iloc[-1] if len(tic_data[tic_data['date'] < date]) > 0 else \
+          tic_data.iloc[0]
+
+          new_row = last_known.copy()
+          new_row['date'] = date
+          new_row['volume'] = 0  # Нулевой объем для пропущенных дней
+
+          df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+    # Сортируем по дате и символу
+    df = df.sort_values(['date', 'tic']).reset_index(drop=True)
+
+    # Финальная проверка - убеждаемся, что все числовые колонки действительно числовые
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    for col in numeric_cols:
+      df[col] = pd.to_numeric(df[col], errors='coerce').fillna(method='ffill').fillna(0)
+
+    return df
+
+
+def debug_dataframe_structure(df: pd.DataFrame, stage: str = ""):
+  """Отладка структуры DataFrame для FinRL"""
+  logger.info(f"\n{'=' * 50}")
+  logger.info(f"DEBUG DataFrame Structure - {stage}")
+  logger.info(f"{'=' * 50}")
+  logger.info(f"Shape: {df.shape}")
+  logger.info(f"Columns: {df.columns.tolist()}")
+  logger.info(f"Index: {df.index.name} - {type(df.index)}")
+  logger.info(f"Dtypes:\n{df.dtypes}")
+
+  if 'tic' in df.columns:
+    logger.info(f"Unique tickers: {df['tic'].unique()}")
+    logger.info(f"Ticker counts:\n{df['tic'].value_counts()}")
+
+  if 'date' in df.columns:
+    logger.info(f"Date range: {df['date'].min()} to {df['date'].max()}")
+    logger.info(f"Unique dates: {df['date'].nunique()}")
+
+  # Проверка на дубликаты
+  if 'date' in df.columns and 'tic' in df.columns:
+    duplicates = df.duplicated(subset=['date', 'tic'])
+    if duplicates.any():
+      logger.warning(f"Found {duplicates.sum()} duplicate date-tic combinations!")
+
+  # Пример первых строк
+  logger.info(f"First 5 rows:\n{df.head()}")
+  logger.info(f"{'=' * 50}\n")
 
 
 if __name__ == "__main__":

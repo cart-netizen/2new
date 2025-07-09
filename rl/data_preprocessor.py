@@ -12,25 +12,35 @@ def prepare_data_for_finrl(
 ) -> pd.DataFrame:
   """
   Преобразует данные из формата вашего проекта в формат FinRL
-
-  FinRL ожидает DataFrame со следующими колонками:
-  - date
-  - tic (символ)
-  - open, high, low, close, volume
-  - технические индикаторы
   """
+  logger.info(f"Подготовка данных для FinRL. Символы: {symbols}")
+
   all_data = []
 
   for symbol in symbols:
     if symbol not in raw_data or raw_data[symbol].empty:
+      logger.warning(f"Пропускаем {symbol} - нет данных")
       continue
 
     df = raw_data[symbol].copy()
 
-    # Сбрасываем индекс, чтобы timestamp стал колонкой
-    df = df.reset_index()
+    # Сбрасываем индекс
+    if df.index.name == 'timestamp' or isinstance(df.index, pd.DatetimeIndex):
+      df = df.reset_index()
 
-    # Проверяем наличие необходимых колонок
+    # Создаем колонку date
+    if 'timestamp' in df.columns:
+      df['date'] = pd.to_datetime(df['timestamp'])
+    elif 'index' in df.columns:
+      df['date'] = pd.to_datetime(df['index'])
+    else:
+      logger.error(f"Не найдена колонка с датой для {symbol}")
+      continue
+
+    # Добавляем символ
+    df['tic'] = symbol
+
+    # Проверяем наличие всех необходимых колонок
     required_cols = ['open', 'high', 'low', 'close', 'volume']
     missing_cols = [col for col in required_cols if col not in df.columns]
 
@@ -38,59 +48,65 @@ def prepare_data_for_finrl(
       logger.error(f"Отсутствуют колонки для {symbol}: {missing_cols}")
       continue
 
-    # Переименовываем колонки для FinRL
-    if 'timestamp' in df.columns:
-      df['date'] = pd.to_datetime(df['timestamp'])
-    elif 'index' in df.columns:
-      df['date'] = pd.to_datetime(df['index'])
-    else:
-      # Создаем дату из индекса
-      df['date'] = pd.to_datetime(df.index)
+    # Убеждаемся, что все колонки числовые
+    for col in required_cols:
+      df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    df['tic'] = symbol
+    # Убираем строки с NaN в критических колонках
+    df = df.dropna(subset=required_cols)
 
-    # Убеждаемся, что все числовые колонки имеют правильный тип
-    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
-    for col in numeric_cols:
-      if col in df.columns:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-        # Проверяем, что это не скаляр
-        if isinstance(df[col].iloc[0], (int, float, np.number)):
-          pass  # Все хорошо
-        else:
-          logger.error(f"Колонка {col} содержит нечисловые данные для {symbol}")
-
-    # Убираем дубликаты по дате для каждого символа
-    df = df.drop_duplicates(subset=['date'], keep='last')
+    if df.empty:
+      logger.warning(f"После очистки NaN не осталось данных для {symbol}")
+      continue
 
     all_data.append(df)
 
   if not all_data:
-    raise ValueError("Нет данных для создания FinRL датафрейма")
+    raise ValueError("Нет валидных данных для создания FinRL датафрейма")
 
   # Объединяем все данные
   combined_df = pd.concat(all_data, ignore_index=True)
 
-  # Проверяем, что у нас есть данные
-  if combined_df.empty:
-    raise ValueError("Объединенный датафрейм пуст")
+  # КРИТИЧНО: Убедимся, что у нас есть данные для каждого символа на каждую дату
+  # Это требование FinRL!
+  unique_dates = combined_df['date'].unique()
+  unique_tics = combined_df['tic'].unique()
 
-  # Сортируем по дате и символу
-  combined_df = combined_df.sort_values(['date', 'tic']).reset_index(drop=True)
+  logger.info(f"Уникальных дат: {len(unique_dates)}, уникальных символов: {len(unique_tics)}")
 
-  # Проверяем структуру данных
-  logger.info(f"Подготовлено данных для FinRL:")
-  logger.info(f"  Символов: {combined_df['tic'].nunique()}")
-  logger.info(f"  Записей: {len(combined_df)}")
-  logger.info(f"  Период: {combined_df['date'].min()} - {combined_df['date'].max()}")
+  # Создаем полный DataFrame со всеми комбинациями дата-символ
+  full_index = pd.MultiIndex.from_product([unique_dates, unique_tics], names=['date', 'tic'])
+  full_df = pd.DataFrame(index=full_index).reset_index()
 
-  # Финальная проверка на NaN значения в критических колонках
+  # Объединяем с реальными данными
+  final_df = full_df.merge(
+    combined_df,
+    on=['date', 'tic'],
+    how='left'
+  )
+
+  # Заполняем пропуски
+  # Группируем по символу и заполняем пропуски
+  for tic in unique_tics:
+    tic_mask = final_df['tic'] == tic
+    for col in ['open', 'high', 'low', 'close']:
+      final_df.loc[tic_mask, col] = final_df.loc[tic_mask, col].fillna(method='ffill').fillna(method='bfill')
+    # Для volume используем 0 для пропущенных значений
+    final_df.loc[tic_mask, 'volume'] = final_df.loc[tic_mask, 'volume'].fillna(0)
+
+  # Финальная проверка и сортировка
+  final_df = final_df.sort_values(['date', 'tic']).reset_index(drop=True)
+
+  # Убедимся, что нет NaN в критических колонках
   critical_cols = ['open', 'high', 'low', 'close', 'volume']
   for col in critical_cols:
-    if col in combined_df.columns:
-      nan_count = combined_df[col].isna().sum()
-      if nan_count > 0:
-        logger.warning(f"Найдено {nan_count} NaN значений в колонке {col}, заполняем нулями")
-        combined_df[col] = combined_df[col].fillna(0)
+    if final_df[col].isna().any():
+      logger.error(f"Остались NaN в колонке {col}")
+      # Крайняя мера - заполняем средним значением
+      final_df[col] = final_df[col].fillna(final_df[col].mean())
 
-  return combined_df
+  logger.info(f"Финальный DataFrame: {len(final_df)} записей")
+  logger.info(
+    f"Проверка: {len(final_df)} должно равняться {len(unique_dates)} * {len(unique_tics)} = {len(unique_dates) * len(unique_tics)}")
+
+  return final_df

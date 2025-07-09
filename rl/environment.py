@@ -15,6 +15,55 @@ from utils.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def validate_dataframe_for_finrl(df: pd.DataFrame) -> pd.DataFrame:
+  """
+  Валидирует и корректирует DataFrame для FinRL
+  """
+  # Проверяем обязательные колонки
+  required_cols = ['date', 'tic', 'open', 'high', 'low', 'close', 'volume']
+  missing_cols = [col for col in required_cols if col not in df.columns]
+  if missing_cols:
+    raise ValueError(f"Отсутствуют обязательные колонки: {missing_cols}")
+
+  # Убедимся, что date - это datetime
+  df['date'] = pd.to_datetime(df['date'])
+
+  # Сортировка КРИТИЧНА для FinRL
+  df = df.sort_values(['date', 'tic']).reset_index(drop=True)
+
+  # Проверяем, что у нас есть данные для всех символов на каждую дату
+  unique_dates = df['date'].unique()
+  unique_tics = df['tic'].unique()
+
+  expected_rows = len(unique_dates) * len(unique_tics)
+  actual_rows = len(df)
+
+  if expected_rows != actual_rows:
+    logger.warning(f"Несоответствие количества строк: ожидалось {expected_rows}, получено {actual_rows}")
+
+    # Создаем полную матрицу дата-символ
+    full_index = pd.MultiIndex.from_product([unique_dates, unique_tics], names=['date', 'tic'])
+    full_df = pd.DataFrame(index=full_index).reset_index()
+
+    # Мержим с существующими данными
+    df = full_df.merge(df, on=['date', 'tic'], how='left')
+
+    # Заполняем пропуски по группам
+    for tic in unique_tics:
+      mask = df['tic'] == tic
+      for col in ['open', 'high', 'low', 'close']:
+        df.loc[mask, col] = df.loc[mask, col].fillna(method='ffill').fillna(method='bfill')
+      df.loc[mask, 'volume'] = df.loc[mask, 'volume'].fillna(0)
+
+  # Финальная проверка типов
+  for col in ['open', 'high', 'low', 'close', 'volume']:
+    df[col] = pd.to_numeric(df[col], errors='coerce')
+    if df[col].isna().any():
+      df[col] = df[col].fillna(df[col].mean())
+
+  return df
+
+
 class BybitTradingEnvironment(StockTradingEnv):
   """
   Кастомная среда для торговли на Bybit через FinRL
@@ -38,6 +87,13 @@ class BybitTradingEnvironment(StockTradingEnv):
     """
     Инициализация среды с интеграцией существующих компонентов
     """
+    # Валидируем DataFrame
+    df = validate_dataframe_for_finrl(df)
+
+    logger.info(f"Создание среды с DataFrame shape: {df.shape}")
+    logger.info(f"Уникальные символы: {df['tic'].unique()}")
+    logger.info(f"Период: {df['date'].min()} - {df['date'].max()}")
+
     self.data_fetcher = data_fetcher
     self.market_regime_detector = market_regime_detector
     self.risk_manager = risk_manager
@@ -58,57 +114,85 @@ class BybitTradingEnvironment(StockTradingEnv):
     self.shadow_signals = []
 
     # Получаем список технических индикаторов
-    tech_indicators = self._get_technical_indicators_list()
+    tech_indicators = self._get_technical_indicators_list(df)
 
-    # Инициализируем начальные позиции для каждой акции
-    num_stocks = len(df.tic.unique()) if 'tic' in df.columns else 1
-    num_stock_shares = [0] * num_stocks  # Начальные позиции = 0
+    # Определяем количество символов
+    num_stocks = len(df['tic'].unique())
+    num_stock_shares = [0] * num_stocks
 
-    # Инициализация родительского класса с ВСЕМИ требуемыми параметрами
-    super().__init__(
-      df=df,
-      stock_dim=num_stocks,
-      hmax=100,
-      initial_amount=initial_balance,
-      num_stock_shares=num_stock_shares,  # ДОБАВЛЕНО
-      buy_cost_pct=self.config.get('buy_cost_pct', commission_rate),
-      sell_cost_pct=self.config.get('sell_cost_pct', commission_rate),
-      reward_scaling=self.config.get('reward_scaling', 1e-4),  # ДОБАВЛЕНО
-      state_space=len(tech_indicators) + 10,
-      action_space=3,
-      tech_indicator_list=tech_indicators,
-      turbulence_threshold=None,
-      make_plots=False,
-      print_verbosity=0,
-      day=0,
-      initial=True,
-      previous_state=[],
-      model_name="BybitRL",
-      mode="train",
-      iteration=0
-    )
+    # КРИТИЧНО: action_space должен соответствовать количеству акций
+    action_space = num_stocks
 
-    logger.info(f"Инициализирована Bybit среда: баланс={initial_balance}, leverage={leverage}")
+    # Инициализация родительского класса
+    try:
+      super().__init__(
+        df=df,
+        stock_dim=num_stocks,
+        hmax=100,
+        initial_amount=initial_balance,
+        num_stock_shares=num_stock_shares,
+        buy_cost_pct=self.config.get('buy_cost_pct', commission_rate),
+        sell_cost_pct=self.config.get('sell_cost_pct', commission_rate),
+        reward_scaling=self.config.get('reward_scaling', 1e-4),
+        state_space=len(tech_indicators) * num_stocks + num_stocks + 1,  # Правильный расчет
+        action_space=action_space,
+        tech_indicator_list=tech_indicators,
+        turbulence_threshold=None,
+        make_plots=False,
+        print_verbosity=0,
+        day=0,
+        initial=True,
+        previous_state=[],
+        model_name="BybitRL",
+        mode="train",
+        iteration=0
+      )
 
-  def _get_technical_indicators_list(self) -> List[str]:
-    """Получает список технических индикаторов из feature_engineer"""
-    # Базовые индикаторы, которые использует ваш проект
-    indicators = [
+      logger.info(f"✅ Среда успешно инициализирована")
+
+    except Exception as e:
+      logger.error(f"Ошибка при инициализации родительского класса: {e}")
+      logger.error(f"DataFrame структура:\n{df.info()}")
+      logger.error(f"Первые строки:\n{df.head()}")
+      raise
+
+  # def _get_technical_indicators_list(self) -> List[str]:
+  #   """Получает список технических индикаторов из feature_engineer"""
+  #   # Базовые индикаторы, которые использует ваш проект
+  #   indicators = [
+  #     'rsi', 'macd', 'macd_signal', 'macd_diff',
+  #     'adx', 'cci', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
+  #     'ema_short', 'ema_long', 'volume_ratio',
+  #     'price_change', 'high_low_ratio'
+  #   ]
+  #
+  #   # Добавляем кастомные индикаторы из вашего проекта
+  #   custom_indicators = [
+  #     'regime_score',  # Из MarketRegimeDetector
+  #     'risk_score',  # Из RiskManager
+  #     'ml_signal',  # Из ML моделей
+  #     'shadow_score'  # Из Shadow Trading
+  #   ]
+  #
+  #   return indicators + custom_indicators
+
+  def _get_technical_indicators_list(self, df: pd.DataFrame) -> List[str]:
+    """Получает список технических индикаторов, которые есть в DataFrame"""
+    # Базовые индикаторы
+    base_indicators = [
       'rsi', 'macd', 'macd_signal', 'macd_diff',
-      'adx', 'cci', 'atr', 'bb_upper', 'bb_lower', 'bb_middle',
-      'ema_short', 'ema_long', 'volume_ratio',
-      'price_change', 'high_low_ratio'
+      'adx', 'cci', 'atr', 'bb_upper', 'bb_lower', 'bb_middle'
     ]
 
-    # Добавляем кастомные индикаторы из вашего проекта
-    custom_indicators = [
-      'regime_score',  # Из MarketRegimeDetector
-      'risk_score',  # Из RiskManager
-      'ml_signal',  # Из ML моделей
-      'shadow_score'  # Из Shadow Trading
-    ]
+    # Фильтруем только те, которые реально есть в данных
+    available_indicators = []
+    for indicator in base_indicators:
+      if indicator in df.columns:
+        available_indicators.append(indicator)
 
-    return indicators + custom_indicators
+    logger.info(f"Доступные индикаторы: {available_indicators}")
+
+    return available_indicators
 
   def _get_enhanced_state(self) -> np.ndarray:
     """

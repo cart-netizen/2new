@@ -6,6 +6,7 @@ import asyncio
 import pandas as pd
 from datetime import datetime, timedelta
 
+from core.enums import Timeframe
 from core.integrated_system import IntegratedTradingSystem
 from config.config_manager import ConfigManager
 from utils.logging_config import get_logger
@@ -35,7 +36,7 @@ async def quick_rl_test():
     # Получаем данные
     data = await system.data_fetcher.get_historical_candles(
       symbol=test_symbol,
-      timeframe=system.timeframe,
+      timeframe=Timeframe.ONE_HOUR,
       limit=100
     )
 
@@ -76,8 +77,13 @@ async def quick_rl_test():
   except Exception as e:
     logger.error(f"Ошибка быстрого теста: {e}", exc_info=True)
   finally:
-    await system.shutdown()
+    # await system.shutdown()
 
+    # Закрываем все соединения
+    if system and hasattr(system, 'connector') and system.connector:
+      await system.connector.close()
+    if system and hasattr(system, 'data_fetcher') and hasattr(system.data_fetcher, 'connector'):
+      await system.data_fetcher.connector.close()
 
 if __name__ == "__main__":
   asyncio.run(quick_rl_test())

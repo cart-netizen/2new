@@ -129,6 +129,66 @@ class RLTrainer:
       logger.error(f"Ошибка инициализации компонентов: {e}", exc_info=True)
       raise
 
+  # async def load_training_data(self) -> Optional[pd.DataFrame]:
+  #   """
+  #   Загружает и подготавливает данные для обучения с корректной обработкой
+  #   и обогащением признаками для каждой группы символов.
+  #   """
+  #   logger.info("Загрузка данных для обучения...")
+  #
+  #   # --- Шаг 1: Загрузка "сырых" данных ---
+  #   symbols = self.config.get('symbols', ['BTCUSDT', 'ETHUSDT'])
+  #   timeframe = Timeframe.ONE_HOUR
+  #   limit = self.config.get('training_config', {}).get('history_bars', 2000)
+  #
+  #   raw_data_dict = {}
+  #   for symbol in symbols:
+  #     data = await self.data_fetcher.get_historical_candles(
+  #       symbol=symbol, timeframe=timeframe, limit=limit
+  #     )
+  #     if data is not None and not data.empty:
+  #       raw_data_dict[symbol] = data
+  #
+  #   if not raw_data_dict:
+  #     raise ValueError("Не удалось загрузить сырые данные ни для одного символа")
+  #
+  #   # --- Шаг 2: Выравнивание и добавление базовых индикаторов ---
+  #   unaligned_df = prepare_data_for_finrl(raw_data_dict, list(raw_data_dict.keys()))
+  #
+  #   df_pivot = unaligned_df.pivot(index='date', columns='tic', values='close').dropna()
+  #   aligned_df = unaligned_df[unaligned_df.date.isin(df_pivot.index)]
+  #
+  #   data_with_custom_features = await self._add_technical_indicators(aligned_df)
+  #
+  #   # --- Шаг 3: Асинхронное добавление ML признаков для каждой группы ---
+  #   logger.info("Добавление ML-признаков для каждой группы символов...")
+  #
+  #   tasks = []
+  #   # Группируем по 'tic' и итерируем, получая имя группы (symbol) и саму группу (group_df)
+  #   for symbol, group_df in data_with_custom_features.groupby('tic'):
+  #     tasks.append(self._add_ml_features(group_df, symbol))
+  #
+  #   # Запускаем задачи параллельно
+  #   results = await asyncio.gather(*tasks, return_exceptions=True)
+  #
+  #   # Собираем обработанные группы обратно в один DataFrame
+  #   processed_groups = [res for res in results if isinstance(res, pd.DataFrame)]
+  #   if not processed_groups:
+  #     raise ValueError("Не удалось добавить ML признаки ни для одной группы.")
+  #
+  #   data_with_ml_features = pd.concat(processed_groups, ignore_index=True)
+  #   data_with_ml_features.sort_values(['date', 'tic'], inplace=True)
+  #
+  #   # --- Шаг 4: Добавление стандартных FinRL индикаторов ---
+  #   finrl_ready_df = self._add_finrl_indicators(data_with_ml_features)
+  #
+  #   if finrl_ready_df is None or finrl_ready_df.empty:
+  #     raise ValueError("Нет данных после добавления индикаторов FinRL")
+  #
+  #   logger.info(f"📊 Финально подготовлено {len(finrl_ready_df)} записей для обучения")
+  #
+  #   return finrl_ready_df
+
   async def load_training_data(self) -> pd.DataFrame:
     """Загружает и подготавливает данные для обучения"""
     logger.info("Загрузка данных для обучения...")
@@ -172,6 +232,20 @@ class RLTrainer:
 
     # Преобразуем в формат FinRL
     finrl_df = prepare_data_for_finrl(all_data, list(all_data.keys()))
+
+    # ДОБАВЛЯЕМ ПРОВЕРКУ СТРУКТУРЫ ДАННЫХ
+    logger.info(f"Структура данных после prepare_data_for_finrl:")
+    logger.info(f"Колонки: {finrl_df.columns.tolist()}")
+    logger.info(f"Типы данных:\n{finrl_df.dtypes}")
+
+    # Проверяем критические колонки
+    for col in ['open', 'high', 'low', 'close', 'volume']:
+      if col not in finrl_df.columns:
+        raise ValueError(f"Отсутствует обязательная колонка: {col}")
+
+      # Проверяем, что данные числовые
+      sample_value = finrl_df[col].iloc[0] if len(finrl_df) > 0 else None
+      logger.info(f"Пример значения {col}: {sample_value}, тип: {type(sample_value)}")
 
     # Добавляем технические индикаторы в формате FinRL
     finrl_df = self._add_finrl_indicators(finrl_df)
@@ -221,40 +295,105 @@ class RLTrainer:
     """Добавляет ML признаки"""
     try:
       # Детекция режима рынка
-      regime = await self.market_regime_detector.detect_regime(symbol,data)
-      data['market_regime'] = regime.value
+      regime = await self.market_regime_detector.detect_regime(symbol, data)
 
-      # Прогноз волатильности
-      vol_pred = await self.volatility_predictor.predict(symbol, data)
-      if vol_pred:
-        data['predicted_volatility'] = vol_pred.get('predictions', {}).get(1, 0)
+      # ИСПРАВЛЕНО: RegimeCharacteristics не имеет .value
+      if hasattr(regime, 'name'):
+        data['market_regime'] = regime.name
+      else:
+        # Преобразуем в строку или числовое значение
+        data['market_regime'] = str(regime) if regime else 'UNKNOWN'
+
+      # Если нужно числовое представление:
+      regime_mapping = {
+        'STRONG_TREND_UP': 4,
+        'TREND_UP': 3,
+        'RANGE_BOUND': 2,
+        'TREND_DOWN': 1,
+        'STRONG_TREND_DOWN': 0,
+        'UNKNOWN': -1
+      }
+      data['market_regime_numeric'] = regime_mapping.get(data['market_regime'].iloc[-1], -1)
+
+      # ИСПРАВЛЕНО: используем правильный метод для прогноза волатильности
+      try:
+        if hasattr(self.volatility_predictor, 'predict_volatility'):
+          vol_pred = await self.volatility_predictor.predict_volatility(symbol, data)
+        elif hasattr(self.volatility_predictor, 'predict_future_volatility'):
+          vol_pred = self.volatility_predictor.predict_future_volatility(data)
+        else:
+          # Если нет подходящего метода, используем простой расчет
+          vol_pred = data['close'].pct_change().rolling(20).std().iloc[-1]
+
+        if isinstance(vol_pred, dict):
+          data['predicted_volatility'] = vol_pred.get('volatility', 0) or vol_pred.get('predictions', {}).get(1, 0)
+        else:
+          data['predicted_volatility'] = float(vol_pred) if vol_pred else 0.0
+      except Exception as e:
+        logger.warning(f"Не удалось получить прогноз волатильности: {e}")
+        data['predicted_volatility'] = 0.0
 
       # Детекция аномалий
-      anomaly_score = self.anomaly_detector.calculate_anomaly_score(data)
+      anomaly_reports = await self.anomaly_detector.detect_anomalies(data, symbol)
+      if anomaly_reports:
+        # В качестве оценки берем максимальную "серьезность" аномалии
+        anomaly_score = max(report.severity for report in anomaly_reports)
       data['anomaly_score'] = anomaly_score
 
     except Exception as e:
       logger.error(f"Ошибка добавления ML признаков: {e}")
+      # Добавляем значения по умолчанию
+      data['market_regime'] = 'UNKNOWN'
+      data['market_regime_numeric'] = -1
+      data['predicted_volatility'] = 0.0
+      data['anomaly_score'] = 0.0
 
     return data
 
   def _add_finrl_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
     """Добавляет индикаторы в формате FinRL для всех символов"""
+    # Verify input structure
+    if 'tic' not in df.columns:
+      raise ValueError("Input DataFrame must contain 'tic' column")
+
     result_dfs = []
 
     for tic in df['tic'].unique():
       tic_df = df[df['tic'] == tic].copy()
 
-      # Добавляем индикаторы если их еще нет
-      required_indicators = ['rsi', 'macd', 'cci', 'adx', 'atr']
+      # Validate price data
+      price_cols = ['open', 'high', 'low', 'close']
+      if not all(col in tic_df.columns for col in price_cols):
+        raise ValueError(f"Missing price columns for {tic}")
 
-      for indicator in required_indicators:
+      # Ensure numeric values
+      for col in price_cols:
+        tic_df[col] = pd.to_numeric(tic_df[col], errors='coerce')
+        if tic_df[col].isna().any():
+          raise ValueError(f"Non-numeric values in {col} for {tic}")
+
+      # Add indicators with proper defaults
+      indicators = {
+        'rsi': 50.0,
+        'macd': 0.0,
+        'macd_signal': 0.0,
+        'macd_diff': 0.0,
+        'cci': 0.0,
+        'adx': 25.0,
+        'atr': 0.0
+      }
+
+      for indicator, default in indicators.items():
         if indicator not in tic_df.columns:
-          tic_df[indicator] = 0  # Заглушка, должны быть рассчитаны выше
+          tic_df[indicator] = default
+        tic_df[indicator] = pd.to_numeric(tic_df[indicator], errors='coerce').fillna(default)
 
       result_dfs.append(tic_df)
 
-    return pd.concat(result_dfs, ignore_index=True)
+    if not result_dfs:
+      raise ValueError("No valid data after processing")
+
+    return pd.concat(result_dfs).sort_values(['date', 'tic']).reset_index(drop=True)
 
   async def create_environment(self, df: pd.DataFrame) -> BybitTradingEnvironment:
     """Создает торговую среду"""
@@ -262,31 +401,33 @@ class RLTrainer:
 
     # Создаем функцию вознаграждения
     reward_function = RiskAdjustedRewardFunction(
-      risk_manager=self.risk_manager,
-      config=self.config.get('reward_config', {})
+        risk_manager=self.risk_manager,
+        config=self.config.get('reward_config', {})
     )
 
-    # Параметры среды
+    # Параметры среды - добавляем reward_scaling
     env_config = {
-      'hmax': 100,
-      'initial_amount': self.config.get('initial_capital', 10000),
-      'transaction_cost_pct': 0.001,
-      'reward_scaling': 1e-4
+        'hmax': 100,
+        'initial_amount': self.config.get('initial_capital', 10000),
+        'transaction_cost_pct': 0.001,
+        'reward_scaling': 1e-4,  # Убедитесь, что это здесь
+        'buy_cost_pct': 0.001,
+        'sell_cost_pct': 0.001
     }
 
     # Создаем среду
     environment = BybitTradingEnvironment(
-      df=df,
-      data_fetcher=self.data_fetcher,
-      market_regime_detector=self.market_regime_detector,
-      risk_manager=self.risk_manager,
-      shadow_trading_manager=None,  # Для обучения не используем
-      feature_engineer=self.feature_engineer,
-      initial_balance=env_config['initial_amount'],
-      commission_rate=env_config['transaction_cost_pct'],
-      leverage=self.config.get('leverage', 10),
-      max_positions=self.config.get('portfolio_config', {}).get('max_positions', 10),
-      config=env_config
+        df=df,
+        data_fetcher=self.data_fetcher,
+        market_regime_detector=self.market_regime_detector,
+        risk_manager=self.risk_manager,
+        shadow_trading_manager=None,
+        feature_engineer=self.feature_engineer,
+        initial_balance=env_config['initial_amount'],
+        commission_rate=env_config['transaction_cost_pct'],
+        leverage=self.config.get('leverage', 10),
+        max_positions=self.config.get('portfolio_config', {}).get('max_positions', 10),
+        config=env_config  # Передаем полный конфиг
     )
 
     # Устанавливаем функцию вознаграждения
@@ -570,7 +711,7 @@ class RLTrainer:
 async def main_training():
   """Основная функция обучения, исправленная и с сохранением оригинальной логики."""
   logger.info("🚀 Запуск обучения RL агента")
-
+  trainer = None
   # 1. Загружаем конфигурацию ПЕРЕД созданием трейнера.
   # Путь '../config.json' указывает, что файл находится в папке config
   # на один уровень выше, чем папка rl.
@@ -621,9 +762,12 @@ async def main_training():
   except Exception as e:
     logger.error(f"❌ Ошибка во время основного процесса обучения: {e}", exc_info=True)
     raise  # Повторно вызываем ошибку для полной диагностики
-  # finally:
-    # Гарантированное закрытие ресурсов
-    # await trainer.cleanup()
+  finally:
+    # Закрываем все соединения
+    if trainer and hasattr(trainer, 'connector') and trainer.connector:
+      await trainer.connector.close()
+    if trainer and hasattr(trainer, 'data_fetcher') and hasattr(trainer.data_fetcher, 'connector'):
+      await trainer.data_fetcher.connector.close()
 
 
 if __name__ == "__main__":

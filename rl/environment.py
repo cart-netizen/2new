@@ -49,28 +49,33 @@ class BybitTradingEnvironment(StockTradingEnv):
     self.config = config or {}
 
     # Дополнительные параметры для Bybit
-    self.funding_rate = 0.0001  # Средняя ставка финансирования
-    self.slippage = 0.0005  # Проскальзывание
+    self.funding_rate = 0.0001
+    self.slippage = 0.0005
 
     # История для анализа
     self.trade_history = []
     self.regime_history = []
     self.shadow_signals = []
 
-    # Получаем список технических индикаторов из feature_engineer
+    # Получаем список технических индикаторов
     tech_indicators = self._get_technical_indicators_list()
 
-    # Инициализация родительского класса
+    # Инициализируем начальные позиции для каждой акции
+    num_stocks = len(df.tic.unique()) if 'tic' in df.columns else 1
+    num_stock_shares = [0] * num_stocks  # Начальные позиции = 0
+
+    # Инициализация родительского класса с ВСЕМИ требуемыми параметрами
     super().__init__(
       df=df,
-      stock_dim=len(df.tic.unique()) if 'tic' in df.columns else 1,
-      hmax=100,  # Максимальное количество контрактов на символ
+      stock_dim=num_stocks,
+      hmax=100,
       initial_amount=initial_balance,
-      # transaction_cost_pct=commission_rate,
-      buy_cost_pct=config.get('buy_cost_pct', 0.001),  # Используем правильный аргумент
-      sell_cost_pct=config.get('sell_cost_pct', 0.001),  # Используем правильный аргумент
-      state_space=len(tech_indicators) + 10,  # Техн. индикаторы + доп. признаки
-      action_space=3,  # Buy, Hold, Sell
+      num_stock_shares=num_stock_shares,  # ДОБАВЛЕНО
+      buy_cost_pct=self.config.get('buy_cost_pct', commission_rate),
+      sell_cost_pct=self.config.get('sell_cost_pct', commission_rate),
+      reward_scaling=self.config.get('reward_scaling', 1e-4),  # ДОБАВЛЕНО
+      state_space=len(tech_indicators) + 10,
+      action_space=3,
       tech_indicator_list=tech_indicators,
       turbulence_threshold=None,
       make_plots=False,

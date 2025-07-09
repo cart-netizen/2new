@@ -1676,5 +1676,6 @@ class UnifiedFeatureEngineer:
         ]
 
 
+
 # Создаем глобальный экземпляр
 unified_feature_engineer = UnifiedFeatureEngineer()

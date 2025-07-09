@@ -23,7 +23,7 @@ from shadow_trading.signal_tracker import DatabaseMonitor
 from strategies.GridStrategy import GridStrategy
 from shadow_trading.shadow_trading_manager import ShadowTradingManager, FilterReason
 from ml.feature_engineering import AdvancedFeatureEngineer # Добавить импорт
-from strategies.rl_strategy import FinRLStrategy # Добавить импорт
+from strategies.rl_strategy import RLStrategy # Добавить импорт
 
 
 from strategies.dual_thrust_strategy import DualThrustStrategy
@@ -339,7 +339,7 @@ class IntegratedTradingSystem:
 
         # Создаем процессор признаков
         self.rl_feature_processor = RLFeatureProcessor(
-          feature_engineer=self.feature_engineer,
+          feature_engineer=self.feature_engineer_rl,
           config=self.config['rl_trading'].get('feature_config', {})
         )
 

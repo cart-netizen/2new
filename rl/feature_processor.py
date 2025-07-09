@@ -1,4 +1,5 @@
 # rl/feature_processor.py
+import asyncio
 
 import pandas as pd
 import numpy as np
@@ -353,3 +354,115 @@ class RLFeatureProcessor:
     except Exception as e:
       logger.error(f"Ошибка обучения Feature Processor: {e}")
       self.is_fitted = False
+
+  async def process_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Новый публичный метод-оркестратор для полного обогащения данных.
+    """
+    if df.empty:
+      return pd.DataFrame()
+
+    # Шаг 1: Добавляем технические индикаторы синхронно
+    logger.info("Добавление технических индикаторов...")
+    processed_df = df.groupby('tic', group_keys=False).apply(self._add_technical_indicators)
+
+    # Шаг 2: Асинхронно добавляем ML-признаки (режим рынка, аномалии)
+    logger.info("Добавление ML-признаков (режим рынка, аномалии)...")
+
+    tasks = []
+    for name, group in processed_df.groupby('tic'):
+      tasks.append(self._add_advanced_features_to_group(group))
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    final_df_list = [res for res in results if isinstance(res, pd.DataFrame)]
+
+    if not final_df_list:
+      logger.error("Не удалось обработать ни одну группу признаков.")
+      return pd.DataFrame()
+
+    final_df = pd.concat(final_df_list).sort_values(['date', 'tic']).reset_index(drop=True)
+    final_df.bfill(inplace=True).ffill(inplace=True)
+
+    return final_df
+
+  async def _add_advanced_features_to_group(self, df_group: pd.DataFrame) -> pd.DataFrame:
+    """
+    Асинхронный вспомогательный метод для добавления ML-признаков к группе.
+    """
+    df = df_group.copy()
+    symbol = df['tic'].iloc[0]
+    try:
+      # --- Режим рынка ---
+      regime = await self.market_regime_detector.detect_regime(symbol, df)
+      if regime:
+        df['market_regime'] = regime.primary_regime.value
+      else:
+        df['market_regime'] = 0
+
+      # --- Аномалии ---
+      # Используем detect_anomalies, как и исправляли ранее
+      anomaly_reports = await self.anomaly_detector.detect_anomalies(df, symbol)
+      if anomaly_reports:
+        df['anomaly_score'] = max(report.severity for report in anomaly_reports)
+      else:
+        df['anomaly_score'] = 0.0
+
+    except Exception as e:
+      logger.error(f"Ошибка добавления ML признаков для {symbol}: {e}")
+      df['market_regime'] = 0
+      df['anomaly_score'] = 0.0
+
+    return df
+
+  async def process_all_features(self, df: pd.DataFrame) -> pd.DataFrame:
+      """
+      Новый метод-оркестратор, который асинхронно обрабатывает все признаки
+      для полного DataFrame, содержащего несколько тикеров.
+      """
+      if df.empty:
+        return pd.DataFrame()
+
+      logger.info("Асинхронное добавление ML-признаков для всех групп...")
+
+      # Создаем задачи для каждой группы (каждого тикера)
+      tasks = []
+      for tic, group_df in df.groupby('tic'):
+        tasks.append(self._add_features_to_group(group_df, tic))
+
+      # ПРАВИЛЬНЫЙ ВЫЗОВ: Запускаем задачи параллельно с помощью asyncio.gather
+      results = await asyncio.gather(*tasks, return_exceptions=True)
+
+      # Собираем обработанные группы обратно в один DataFrame
+      processed_groups = [res for res in results if isinstance(res, pd.DataFrame)]
+
+      if not processed_groups:
+        raise ValueError("Не удалось обработать признаки ни для одной группы.")
+
+      final_df = pd.concat(processed_groups, ignore_index=True)
+      final_df.sort_values(['date', 'tic'], inplace=True)
+      final_df.bfill(inplace=True).ffill(inplace=True)  # Заполняем возможные пропуски
+
+      return final_df
+
+  async def _add_features_to_group(self, df_group: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """
+    Вспомогательный метод для асинхронного добавления признаков к одной группе.
+    """
+    df = df_group.copy()
+    try:
+      # --- Режим рынка ---
+      regime = await self.market_regime_detector.detect_regime(symbol, df)
+      df['market_regime'] = regime.primary_regime.value if regime else 0
+
+      # --- Аномалии ---
+      # Используем detect_anomalies, а не несуществующий calculate_anomaly_score
+      anomaly_reports = await self.anomaly_detector.detect_anomalies(df, symbol)
+      df['anomaly_score'] = max(r.severity for r in anomaly_reports) if anomaly_reports else 0.0
+
+    except Exception as e:
+      logger.error(f"Ошибка добавления ML признаков для {symbol}: {e}")
+      df['market_regime'] = 0
+      df['anomaly_score'] = 0.0
+
+    return df

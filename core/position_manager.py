@@ -665,7 +665,7 @@ class PositionManager:
         logger.debug(f"✅ Adaptive Selector обновлен для {strategy_name}")
 
       # 2. SAR STRATEGY - уведомляем о закрытии (ТОЛЬКО ОДИН РАЗ)
-      if (strategy_name == "Stop_and_Reverse" or "SAR" in strategy_name.upper()):
+      if (strategy_name == "Stop_and_Reverse" or "SAR" in strategy_name.upper()) and integrated_system:
         sar_strategy = getattr(integrated_system, 'sar_strategy', None)
         if sar_strategy and hasattr(sar_strategy, 'handle_position_update'):
           if symbol in getattr(sar_strategy, 'current_positions', {}):

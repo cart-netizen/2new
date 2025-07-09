@@ -98,19 +98,46 @@ class PositionManager:
               logger.info(f"Найдена соответствующая запись в локальной БД для {symbol}")
               self.open_positions[symbol] = local_trade_data
             else:
-              # Если в БД нет, создаем заглушку из данных биржи
-              logger.warning(f"Позиция по {symbol} существует на бирже, но отсутствует в локальной БД")
-              self.open_positions[symbol] = {
+              # Если в БД нет, создаем запись в БД
+              logger.warning(f"Позиция по {symbol} существует на бирже, но отсутствует в локальной БД. Создаем запись.")
+
+              # Создаем запись в БД для синхронизации
+              trade_data = {
                 'symbol': symbol,
                 'side': position.get('side', 'Buy').upper(),
                 'open_price': float(position.get('avgPrice', 0)),
                 'quantity': size,
-                'stop_loss': float(position.get('stopLoss', 0)) if position.get('stopLoss') else None,
-                'take_profit': float(position.get('takeProfit', 0)) if position.get('takeProfit') else None,
-                'unrealizedPnl': float(position.get('unrealisedPnl', 0)),
                 'leverage': int(position.get('leverage', 1)),
-                'id': -1  # Указываем, что это "неизвестная" сделка
+                'strategy_name': 'Unknown_Recovery',
+                'metadata': {
+                  'recovered_from_exchange': True,
+                  'recovery_time': datetime.now().isoformat(),
+                  'original_data': position
+                }
               }
+
+              # Добавляем в БД
+              await self.db_manager.add_trade_with_signal(trade_data, None)
+              logger.info(f"Создана запись в БД для восстановленной позиции {symbol}")
+
+              # Теперь загружаем из БД
+              local_trade_data = await self.db_manager.get_open_trade_by_symbol(symbol)
+              if local_trade_data:
+                self.open_positions[symbol] = local_trade_data
+            # else:
+            #   # Если в БД нет, создаем заглушку из данных биржи
+            #   logger.warning(f"Позиция по {symbol} существует на бирже, но отсутствует в локальной БД")
+            #   self.open_positions[symbol] = {
+            #     'symbol': symbol,
+            #     'side': position.get('side', 'Buy').upper(),
+            #     'open_price': float(position.get('avgPrice', 0)),
+            #     'quantity': size,
+            #     'stop_loss': float(position.get('stopLoss', 0)) if position.get('stopLoss') else None,
+            #     'take_profit': float(position.get('takeProfit', 0)) if position.get('takeProfit') else None,
+            #     'unrealizedPnl': float(position.get('unrealisedPnl', 0)),
+            #     'leverage': int(position.get('leverage', 1)),
+            #     'id': -1  # Указываем, что это "неизвестная" сделка
+            #   }
       else:
         logger.info("Не получено позиций с биржи")
 
@@ -294,16 +321,9 @@ class PositionManager:
 
         # # --- КОНЕЦ БЛОКА ЗАГРУЗКИ ---
 
-        # --- ПРИОРИТЕТ 1: ЖЕСТКИЙ SL/TP ---
-        exit_reason = self._check_sl_tp(position_data, current_price)
-        if exit_reason:
-          logger.info(f"ВЫХОД для {symbol}: Сработал стандартный SL/TP. Причина: {exit_reason}")
-          await self.trade_executor.close_position(symbol=symbol)
-          continue
-
-        # --- ПРОВЕРКА STOP AND REVERSE ---
-        if not exit_reason and self.sar_strategy and strategy_settings.get('use_sar_reversal', True):
-          # Проверяем сигнал от SAR стратегии
+        # --- ПРИОРИТЕТ 1: ПРОВЕРКА STOP AND REVERSE (РАЗВОРОТ ТРЕНДА) ---
+        if self.sar_strategy and strategy_settings.get('use_sar_reversal', True):
+          # Проверяем сигнал от SAR стратегии с пониженным порогом
           sar_signal = await self.sar_strategy.check_exit_conditions(
             symbol, htf_data, position_data
           )
@@ -317,9 +337,10 @@ class PositionManager:
             if current_side == new_direction:
               logger.debug(f"SAR сигнал для {symbol} в том же направлении, пропускаем")
             else:
-              # Проверяем качество сигнала для разворота
-              if sar_signal.confidence >= 0.7:
-                logger.info(f"🔄 SAR разворот для {symbol}: {current_side} -> {new_direction}")
+              # Снижаем порог confidence с 0.7 до 0.5
+              if sar_signal.confidence >= 0.5:
+                logger.info(
+                  f"🔄 SAR разворот для {symbol}: {current_side} -> {new_direction}, confidence={sar_signal.confidence:.2f}")
 
                 # Выполняем разворот позиции
                 reversal_success = await self.trade_executor.reverse_position(
@@ -334,6 +355,20 @@ class PositionManager:
                 else:
                   # Если разворот не удался, закрываем позицию
                   exit_reason = f"SAR сигнал на разворот (не удался автоматический разворот)"
+                  logger.info(f"ВЫХОД для {symbol}: {exit_reason}")
+                  await self.trade_executor.close_position(symbol=symbol)
+                  continue
+              else:
+                logger.debug(f"SAR сигнал для {symbol} с низкой уверенностью: {sar_signal.confidence:.2f}")
+          elif sar_signal:
+            logger.debug(f"SAR сигнал для {symbol} не является разворотом")
+
+        # --- ПРИОРИТЕТ 2: ЖЕСТКИЙ SL/TP ---
+        exit_reason = self._check_sl_tp(position_data, current_price)
+        if exit_reason:
+          logger.info(f"ВЫХОД для {symbol}: Сработал стандартный SL/TP. Причина: {exit_reason}")
+          await self.trade_executor.close_position(symbol=symbol)
+          continue
 
         # --- ПРИОРИТЕТ 2: ТРЕЙЛИНГ-СТОП ПО ATR (на HTF)---
         if not exit_reason:
@@ -1490,3 +1525,61 @@ class PositionManager:
         )
 
     logger.debug("Проверка статусов ордеров завершена")
+
+  async def monitor_sar_indicators(self):
+    """
+    Периодически проверяет PSAR индикаторы для всех открытых позиций.
+    Вызывается каждые 30 секунд для быстрого обнаружения разворотов.
+    """
+    if not self.sar_strategy or not self.open_positions:
+      return
+
+    logger.debug(f"Мониторинг PSAR индикаторов для {len(self.open_positions)} позиций")
+
+    for symbol, position in list(self.open_positions.items()):
+      try:
+        # Получаем свежие данные
+        data = await self.data_fetcher.get_historical_candles(
+          symbol, Timeframe.FIVE_MINUTES, limit=30
+        )
+
+        if data.empty:
+          continue
+
+        # Рассчитываем PSAR если нет
+        if 'psar' not in data.columns:
+          psar_df = ta.psar(data['high'], data['low'], data['close'])
+          if psar_df is not None and not psar_df.empty:
+            psar_col = [col for col in psar_df.columns if 'PSAR' in col and 'PSARl' not in col and 'PSARs' not in col]
+            if psar_col:
+              data['psar'] = psar_df[psar_col[0]]
+
+        if 'psar' in data.columns:
+          current_price = data['close'].iloc[-1]
+          psar_value = data['psar'].iloc[-1]
+          position_side = position.get('side')
+
+          # Проверяем потенциальный разворот
+          potential_reversal = False
+          if position_side == 'BUY' and current_price < psar_value:
+            potential_reversal = True
+            logger.info(
+              f"⚠️ PSAR предупреждение для LONG {symbol}: цена {current_price:.4f} приближается к PSAR {psar_value:.4f}")
+          elif position_side == 'SELL' and current_price > psar_value:
+            potential_reversal = True
+            logger.info(
+              f"⚠️ PSAR предупреждение для SHORT {symbol}: цена {current_price:.4f} приближается к PSAR {psar_value:.4f}")
+
+          if potential_reversal:
+            # Получаем баланс аккаунта для manage_open_positions
+            account_balance = None
+            if hasattr(self, 'integrated_system') and self.integrated_system:
+              account_balance = self.integrated_system.account_balance
+            elif hasattr(self, 'trading_system') and self.trading_system:
+              account_balance = self.trading_system.account_balance
+
+            # Запускаем полную проверку
+            await self.manage_open_positions(account_balance)
+
+      except Exception as e:
+        logger.error(f"Ошибка мониторинга PSAR для {symbol}: {e}")

@@ -38,7 +38,20 @@ class SignalFilter:
       return False, "Нет сигнала для фильтрации"
 
     try:
+      # Добавить после try:
       current_price = signal.price
+
+      # Проверяем, является ли символ приоритетным
+      integrated_system = getattr(self, '_integrated_system', None)
+      is_priority_symbol = False
+
+      if integrated_system and hasattr(integrated_system, 'focus_list_symbols'):
+        is_priority_symbol = signal.symbol in integrated_system.focus_list_symbols
+
+      if is_priority_symbol:
+        logger.info(f"🎯 {signal.symbol} в приоритетном списке - применяем адаптивные фильтры")
+
+
 
       # --- НОВЫЙ УМНЫЙ БЛОК: ФИЛЬТР ПО ТРЕНДУ BTC ---
       if self.config.get('use_btc_trend_filter', True) and 'BTC' not in signal.symbol:
@@ -145,12 +158,21 @@ class SignalFilter:
       # --- 3. Фильтр по волатильности (ATR) ---
       if self.config.get('use_volatility_filter'):
         max_atr_percentage = self.config.get('max_atr_percentage', 5.0) / 100
+
+        # Для приоритетных символов увеличиваем порог
+        if is_priority_symbol:
+          max_atr_percentage *= 3.0  # Утраиваем допустимую волатильность
+          logger.debug(f"Увеличен порог волатильности для {signal.symbol}: {max_atr_percentage * 100:.1f}%")
+
         atr_data = ta.atr(data['high'], data['low'], data['close'], length=14)
         if atr_data is not None and not atr_data.empty:
           last_atr = atr_data.iloc[-1]
           atr_percent = (last_atr / current_price)
           if atr_percent > max_atr_percentage:
-            return False, f"Высокая волатильность (ATR={atr_percent:.2%})"
+            if not is_priority_symbol:  # Только для обычных символов
+              return False, f"Высокая волатильность (ATR={atr_percent:.2%})"
+            else:
+              logger.info(f"Приоритетный символ {signal.symbol}: игнорируем высокую волатильность")
 
       logger.info("СИГНАЛ-ФИЛЬТР: Сигнал прошел все проверки.")
       signal_logger.info(f"ФИЛЬТР: ПРОЙДЕН.")

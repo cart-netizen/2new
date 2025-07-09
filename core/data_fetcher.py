@@ -227,6 +227,162 @@ class DataFetcher:
         logger.error(f"Ошибка при получении активных символов: {e}")
         return []
 
+  async def get_symbols_by_volatility(self, symbols: List[str], limit: int = 20) -> List[Dict[str, Any]]:
+    """Получает символы, отсортированные по волатильности и активности"""
+    try:
+      volatility_data = []
+
+      # Получаем данные о всех тикерах одним запросом
+      endpoint = "/v5/market/tickers"
+      params = {'category': 'linear'}
+
+      tickers_result = await self.connector._make_request('GET', endpoint, params, use_cache=True)
+
+      if not tickers_result or not tickers_result.get('list'):
+        logger.error("Не удалось получить данные тикеров")
+        return []
+
+      all_tickers = tickers_result.get('list', [])
+
+      # Создаем словарь для быстрого поиска
+      ticker_dict = {ticker['symbol']: ticker for ticker in all_tickers}
+
+      # Обрабатываем только интересующие нас символы
+      for symbol in symbols:
+        if symbol not in ticker_dict:
+          continue
+
+        ticker = ticker_dict[symbol]
+
+        # Извлекаем данные о волатильности
+        price_change_24h = float(ticker.get('price24hPcnt', 0)) * 100  # Конвертируем в проценты
+        volume_24h = float(ticker.get('turnover24h', 0))  # Объем в USD
+
+        # Получаем свечи для расчета ATR
+        candles = await self.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=24)
+        if not candles.empty and len(candles) >= 14:
+          import pandas_ta as ta
+          atr = ta.atr(candles['high'], candles['low'], candles['close'], length=14)
+          if atr is not None and not atr.empty:
+            current_atr = atr.iloc[-1]
+            atr_percent = (current_atr / candles['close'].iloc[-1]) * 100
+          else:
+            atr_percent = abs(price_change_24h) / 10  # Примерная оценка
+        else:
+          atr_percent = abs(price_change_24h) / 10
+
+        # Рассчитываем комплексный показатель волатильности
+        volatility_score = abs(price_change_24h) * 0.5 + atr_percent * 0.5
+
+        volatility_data.append({
+          'symbol': symbol,
+          'price_change_24h': price_change_24h,
+          'volume_24h': volume_24h,
+          'atr_percent': atr_percent,
+          'volatility_score': volatility_score
+        })
+
+      # Сортируем по волатильности
+      volatility_data.sort(key=lambda x: x['volatility_score'], reverse=True)
+
+      logger.info(f"Найдено {len(volatility_data)} символов с данными о волатильности")
+
+      return volatility_data[:limit]
+
+    except Exception as e:
+      logger.error(f"Ошибка при получении данных о волатильности: {e}")
+      return []
+
+  async def get_symbols_volatility_batch(self, symbols: List[str], limit: int = 20) -> List[Dict[str, Any]]:
+    """Оптимизированная версия получения волатильности с батчевой загрузкой"""
+    try:
+      volatility_data = []
+
+      # 1. Получаем все тикеры одним запросом
+      endpoint = "/v5/market/tickers"
+      params = {'category': 'linear'}
+
+      tickers_result = await self.connector._make_request('GET', endpoint, params, use_cache=True)
+
+      if not tickers_result or not tickers_result.get('list'):
+        logger.error("Не удалось получить данные тикеров")
+        return []
+
+      all_tickers = tickers_result.get('list', [])
+      ticker_dict = {ticker['symbol']: ticker for ticker in all_tickers}
+
+      # 2. Фильтруем символы по базовым критериям
+      candidates = []
+
+      for symbol in symbols:
+        if symbol not in ticker_dict:
+          continue
+
+        ticker = ticker_dict[symbol]
+        price_change_24h = float(ticker.get('price24hPcnt', 0)) * 100
+        volume_24h = float(ticker.get('turnover24h', 0))
+
+        # Базовый фильтр по изменению цены
+        if abs(price_change_24h) < 1.0:  # Менее 1% - пропускаем
+          continue
+
+        candidates.append({
+          'symbol': symbol,
+          'price_change_24h': price_change_24h,
+          'volume_24h': volume_24h,
+          'ticker': ticker
+        })
+
+      # 3. Сортируем кандидатов по изменению цены и берем топ для расчета ATR
+      candidates.sort(key=lambda x: abs(x['price_change_24h']), reverse=True)
+      top_candidates = candidates[:limit * 2]  # Берем с запасом
+
+      # 4. Батчевая загрузка свечей для расчета ATR
+      atr_tasks = []
+      for candidate in top_candidates:
+        task = self._calculate_atr_for_symbol(candidate['symbol'])
+        atr_tasks.append(task)
+
+      atr_results = await asyncio.gather(*atr_tasks, return_exceptions=True)
+
+      # 5. Собираем финальные данные
+      for i, candidate in enumerate(top_candidates):
+        atr_percent = atr_results[i] if not isinstance(atr_results[i], Exception) else abs(
+          candidate['price_change_24h']) / 10
+
+        volatility_score = abs(candidate['price_change_24h']) * 0.5 + atr_percent * 0.5
+
+        volatility_data.append({
+          'symbol': candidate['symbol'],
+          'price_change_24h': candidate['price_change_24h'],
+          'volume_24h': candidate['volume_24h'],
+          'atr_percent': atr_percent,
+          'volatility_score': volatility_score
+        })
+
+      # 6. Финальная сортировка по волатильности
+      volatility_data.sort(key=lambda x: x['volatility_score'], reverse=True)
+
+      return volatility_data[:limit]
+
+    except Exception as e:
+      logger.error(f"Ошибка при батчевом получении волатильности: {e}")
+      return []
+
+  async def _calculate_atr_for_symbol(self, symbol: str) -> float:
+    """Вспомогательный метод для расчета ATR"""
+    try:
+      candles = await self.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=24)
+      if not candles.empty and len(candles) >= 14:
+        import pandas_ta as ta
+        atr = ta.atr(candles['high'], candles['low'], candles['close'], length=14)
+        if atr is not None and not atr.empty:
+          current_atr = atr.iloc[-1]
+          return (current_atr / candles['close'].iloc[-1]) * 100
+      return 0.0
+    except Exception:
+      return 0.0
+
   async def _check_symbol_data_availability(self, symbol: str) -> bool:
     """Проверяет наличие достаточных исторических данных для символа"""
     try:

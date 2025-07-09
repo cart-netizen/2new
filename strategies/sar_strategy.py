@@ -2169,7 +2169,9 @@ class StopAndReverseStrategy(BaseStrategy):
         Возвращает сигнал разворота если условия соблюдены.
         """
         try:
+            logger.debug(f"Проверка условий выхода SAR для {symbol}, позиция: {position.get('side')}")
             if len(data) < 20:
+                logger.debug(f"Недостаточно данных для SAR анализа {symbol}: {len(data)} свечей")
                 return None
 
             current_price = data['close'].iloc[-1]

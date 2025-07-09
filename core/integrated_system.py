@@ -153,6 +153,12 @@ class IntegratedTradingSystem:
       logger.error(f"Ошибка инициализации SAR стратегии: {e}")
       self.sar_strategy = None
 
+    self.watchlist_symbols = []  # Полный список (200-300 символов)
+    self.focus_list_symbols = []  # Приоритетный список (10-20 символов)
+    self.last_focus_update = datetime.now()
+    self.priority_monitoring_enabled = self.config.get('general_settings', {}).get('priority_monitoring', {}).get(
+      'enabled', True)
+
     missing_strategy_names = []
     expected_strategies = {
       'Live_ML_Strategy': ml_strategy,
@@ -235,7 +241,7 @@ class IntegratedTradingSystem:
     self.signal_quality_analyzer = SignalQualityAnalyzer(self.data_fetcher, self.db_manager)
     self.min_quality_score = 0.6  # Минимальный балл качества для исполнения
     self.signal_filter = SignalFilter(self.config, self.data_fetcher, self.market_regime_detector, self.correlation_manager)
-
+    self.signal_filter._integrated_system = self
 
     self.position_manager = PositionManager(
       db_manager=self.db_manager,
@@ -1348,10 +1354,20 @@ class IntegratedTradingSystem:
       self.active_symbols = self.config.get('general_settings', {}).get('static_symbol_list', [])
     else:  # Динамический режим
       logger.info("Выбран динамический режим выбора символов.")
-      limit = self.config.get('general_settings', {}).get('dynamic_symbols_count', 20)
+      limit = self.config.get('general_settings', {}).get('dynamic_symbols_count', 200)
       all_symbols = await self.data_fetcher.get_active_symbols_by_volume(limit=limit)
       # Применяем черный список
-      self.active_symbols = [s for s in all_symbols if s not in blacklist]
+      self.watchlist_symbols = [s for s in all_symbols if s not in blacklist]
+
+      # Инициализируем focus list
+      if self.priority_monitoring_enabled:
+        await self.update_focus_list()
+        # Активные символы = watchlist для совместимости
+        self.active_symbols = self.watchlist_symbols
+      else:
+        # Если приоритетный мониторинг выключен, работаем по-старому
+        self.active_symbols = self.watchlist_symbols
+        self.focus_list_symbols = []
 
     if not self.active_symbols:
       logger.error("Не удалось выбрать ни одного активного символа для торговли. Проверьте config.json.")
@@ -3112,6 +3128,84 @@ class IntegratedTradingSystem:
 
       logger.info("Оптимизированная инициализация завершена")
 
+  async def update_focus_list(self):
+    """Обновляет список приоритетных символов для мониторинга"""
+    try:
+      priority_config = self.config.get('general_settings', {}).get('priority_monitoring', {})
+      if not priority_config.get('enabled', True):
+        return
+
+      logger.info("🔄 Обновление списка приоритетных символов...")
+
+      # Получаем данные о волатильности для всех символов из watchlist
+      volatility_data = await self.data_fetcher.get_symbols_volatility_batch(
+        self.watchlist_symbols,
+        limit=priority_config.get('focus_list_size', 20) * 2  # Берем с запасом
+      )
+
+      if not volatility_data:
+        logger.warning("Не удалось получить данные о волатильности")
+        return
+
+      # Фильтруем по критериям
+      focus_candidates = []
+
+      volatility_threshold = priority_config.get('volatility_threshold_percent', 3.0)
+      volume_spike_ratio = priority_config.get('volume_spike_ratio', 2.0)
+      atr_spike_ratio = priority_config.get('atr_spike_ratio', 2.0)
+
+      for item in volatility_data:
+        symbol = item['symbol']
+
+        # Критерий 1: Изменение цены за 24ч > порога
+        if abs(item['price_change_24h']) < volatility_threshold:
+          continue
+
+        # Критерий 2: ATR выше нормы
+        if item['atr_percent'] < 1.0:  # Минимум 1% ATR
+          continue
+
+        # Дополнительная проверка: не берем аномальные пампы
+        if abs(item['price_change_24h']) > 100:  # Более 30% за день - подозрительно
+          logger.warning(f"Пропускаем {symbol} - аномальное движение {item['price_change_24h']:.1f}%")
+          continue
+
+        focus_candidates.append(item)
+
+      # Сортируем по волатильности и берем топ
+      focus_candidates.sort(key=lambda x: x['volatility_score'], reverse=True)
+      new_focus_list = [item['symbol'] for item in focus_candidates[:priority_config.get('focus_list_size', 40)]]
+
+      # Обновляем focus list
+      old_focus = set(self.focus_list_symbols)
+      new_focus = set(new_focus_list)
+
+      added = new_focus - old_focus
+      removed = old_focus - new_focus
+
+      if added:
+        logger.info(f"➕ Добавлены в приоритет: {', '.join(added)}")
+      if removed:
+        logger.info(f"➖ Удалены из приоритета: {', '.join(removed)}")
+
+      self.focus_list_symbols = new_focus_list
+      self.last_focus_update = datetime.now()
+
+      # Сохраняем в state manager для отображения
+      self.state_manager.set_custom_data('focus_list', {
+        'symbols': self.focus_list_symbols,
+        'updated': self.last_focus_update.isoformat(),
+        'stats': {
+          'total': len(self.focus_list_symbols),
+          'top_movers': focus_candidates[:5] if focus_candidates else []
+        }
+      })
+
+      logger.info(f"✅ Focus list обновлен: {len(self.focus_list_symbols)} символов")
+
+    except Exception as e:
+      logger.error(f"Ошибка обновления focus list: {e}")
+
   async def _monitoring_loop_optimized(self):
     """
     Оптимизированный мониторинг с батчингом запросов
@@ -3148,6 +3242,26 @@ class IntegratedTradingSystem:
           logger.warning("Обнаружено возможное зависание, перезагружаем позиции")
           await self.position_manager.load_open_positions()
 
+        # Обновляем focus list если пора
+        if self.priority_monitoring_enabled:
+          priority_config = self.config.get('general_settings', {}).get('priority_monitoring', {})
+          update_interval = priority_config.get('update_interval_minutes', 15)
+
+          if (datetime.now() - self.last_focus_update).total_seconds() > update_interval * 60:
+            await self.update_focus_list()
+
+        # Проверяем приоритетные символы чаще
+        if self.focus_list_symbols and cycle_count % 3 == 1:  # Каждый 3-й цикл
+          logger.debug(f"🎯 Быстрая проверка {len(self.focus_list_symbols)} приоритетных символов")
+
+          # Обрабатываем focus list символы
+          for symbol in self.focus_list_symbols:
+            if not self.is_running:
+              break
+
+            await self._monitor_symbol_for_entry_enhanced(symbol)
+            await asyncio.sleep(1)
+
         # Обновляем баланс один раз за цикл
         await self.update_account_balance()
         # Обновляем метрики баланса для дашборда
@@ -3157,6 +3271,12 @@ class IntegratedTradingSystem:
         # Управляем открытыми позициями
 
         await self._update_dashboard_metrics()
+        # Периодическая проверка ордеров (каждые 30 секунд)
+        if cycle_count % 3 == 0:
+          await self.position_manager.track_pending_orders()
+        # Периодический мониторинг PSAR индикаторов (каждые 30 секунд)
+        if cycle_count % 3 == 0:
+          await self.position_manager.monitor_sar_indicators()
 
 
         # Разбиваем символы на батчи для параллельной обработки
@@ -3401,10 +3521,25 @@ class IntegratedTradingSystem:
       if current_price <= 0:
         return
 
-      # 1. Проверка жесткого SL/TP
+      # 1. БЫСТРАЯ проверка SAR разворота (приоритет)
+      if self.sar_strategy and position_data.get('strategy_name') == 'Stop_and_Reverse':
+        # Для SAR позиций проверяем разворот тренда в первую очередь
+        quick_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.FIVE_MINUTES, limit=50)
+        if not quick_data.empty:
+          sar_signal = await self.sar_strategy.check_exit_conditions(
+            symbol, quick_data, position_data
+          )
+
+          if sar_signal and sar_signal.is_reversal and sar_signal.confidence >= 0.6:
+            logger.info(f"🚨 Быстрый мониторинг: обнаружен SAR разворот для {symbol}")
+            # Запускаем полную проверку через manage_open_positions
+            await self.position_manager.manage_open_positions(account_balance)
+            return
+
+      # 2. Проверка жесткого SL/TP
       exit_reason = self.position_manager._check_sl_tp(position_data, current_price)
 
-      # 2. Проверка критической просадки (если цена упала более чем на X%)
+      # 3. Проверка критической просадки (если цена упала более чем на X%)
       if not exit_reason:
         open_price = float(position_data.get('open_price', 0))
         if open_price > 0:

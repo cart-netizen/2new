@@ -1319,6 +1319,7 @@ with tab3:
 
   # Используем расширенную статистику
   detailed_stats = get_enhanced_shadow_stats(days_period)
+  filter_rate = 0.0
 
   if detailed_stats['total_signals'] > 0:
     # Основные метрики (остается как есть)
@@ -2501,6 +2502,25 @@ with tabs[3]:
   else:
     st.info("История режимов пока недоступна")
 #--------------------------------------------------------------------------------новое
+  focus_list_data = state_manager.get_custom_data('focus_list')
+  if focus_list_data:
+    st.subheader("🎯 Приоритетные символы (Focus List)")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+      st.metric("Всего в приоритете", focus_list_data['stats']['total'])
+    with col2:
+      st.metric("Последнее обновление",
+                datetime.fromisoformat(focus_list_data['updated']).strftime("%H:%M:%S"))
+
+    # Топ движения
+    if focus_list_data['stats'].get('top_movers'):
+      st.write("**Топ-5 по волатильности:**")
+      for mover in focus_list_data['stats']['top_movers'][:5]:
+        st.write(f"• {mover['symbol']}: "
+                 f"{mover['price_change_24h']:+.1f}% / "
+                 f"ATR: {mover['atr_percent']:.1f}%")
+
   # После отображения текущих режимов добавьте:
   if st.button("Экспортировать статистику режимов"):
     state_manager.set_command("export_regime_statistics")

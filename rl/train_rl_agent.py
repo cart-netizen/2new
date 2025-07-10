@@ -27,7 +27,7 @@ from rl.finrl_agent import EnhancedRLAgent
 from rl.feature_processor import RLFeatureProcessor
 from rl.reward_functions import RiskAdjustedRewardFunction
 from rl.data_preprocessor import prepare_data_for_finrl
-
+from stable_baselines3.common.callbacks import BaseCallback
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -520,11 +520,43 @@ class RLTrainer:
     save_freq = training_config.get('save_frequency', 20000)
 
     # Создаем callback для мониторинга
-    class TrainingCallback:
-      def __init__(self, trainer):
+    class TrainingCallback(BaseCallback):
+      """
+      Кастомный callback для мониторинга процесса обучения
+      """
+
+      def __init__(self, trainer, verbose=0):
+        super(TrainingCallback, self).__init__(verbose)
         self.trainer = trainer
         self.episode_rewards = []
         self.episode_lengths = []
+
+      def _on_step(self) -> bool:
+        """
+        Вызывается на каждом шаге среды
+        """
+        # Логируем прогресс каждые 1000 шагов
+        if self.num_timesteps % 1000 == 0:
+          logger.info(f"Шаг {self.num_timesteps}")
+
+          # Получаем информацию о последних эпизодах
+          if len(self.model.ep_info_buffer) > 0:
+            mean_reward = np.mean([ep_info["r"] for ep_info in self.model.ep_info_buffer])
+            logger.info(f"Средняя награда (последние эпизоды): {mean_reward:.2f}")
+
+        return True  # Возвращаем True для продолжения обучения
+
+      def _on_rollout_end(self) -> None:
+        """
+        Вызывается в конце rollout
+        """
+        pass
+
+      def _on_training_end(self) -> None:
+        """
+        Вызывается в конце обучения
+        """
+        logger.info("Обучение завершено!")
 
       def __call__(self, locals_dict, globals_dict):
         # Сохраняем метрики
@@ -542,7 +574,7 @@ class RLTrainer:
 
         return True
 
-    callback = TrainingCallback(self)
+    callback = TrainingCallback(self, verbose=1)
 
     # Обучаем агента
     logger.info(f"Обучение {self.config.get('algorithm', 'PPO')} на {total_timesteps} шагов...")

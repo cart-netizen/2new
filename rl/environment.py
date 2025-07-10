@@ -194,37 +194,38 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
 
   def _get_enhanced_state(self) -> np.ndarray:
     """
-    Создает расширенное состояние с использованием всех компонентов системы
+    Создает расширенное состояние с дополнительными признаками
     """
     try:
-      # Базовое состояние из родительского класса
-      base_state = super()._get_state()
+      # Получаем базовое состояние из текущего состояния среды
+      if hasattr(self, 'state') and self.state is not None:
+        base_state = np.array(self.state)
+      else:
+        # Если состояние еще не инициализировано, создаем пустое
+        base_state = np.zeros(self.state_space)
 
-      # Текущий индекс данных
-      current_idx = self.day
+      # Дополнительные признаки для улучшения обучения
 
-      # Получаем текущие данные
-      current_data = self.data.iloc[current_idx:current_idx + 1]
-
-      # 1. Режим рынка
-      if hasattr(self.market_regime_detector, 'detect_regime'):
+      # 1. Режим рынка (one-hot encoding)
+      if self.market_regime_detector and hasattr(self.market_regime_detector, 'current_regime'):
         regime = self.market_regime_detector.current_regime
         regime_features = [
-          float(regime == MarketRegime.STRONG_TREND_UP),
-          float(regime == MarketRegime.TREND_UP),
-          float(regime == MarketRegime.RANGE_BOUND),
-          float(regime == MarketRegime.TREND_DOWN),
-          float(regime == MarketRegime.STRONG_TREND_DOWN),
+          1.0 if regime == 'bullish' else 0.0,
+          1.0 if regime == 'bearish' else 0.0,
+          1.0 if regime == 'sideways' else 0.0,
+          1.0 if regime == 'volatile' else 0.0
         ]
       else:
-        regime_features = [0, 0, 1, 0, 0]  # По умолчанию - боковик
+        regime_features = [0, 0, 1, 0]  # По умолчанию sideways
 
       # 2. Метрики риска
       if self.risk_manager:
         risk_metrics = {
           'current_drawdown': self.risk_manager.get_current_drawdown(),
-          'position_risk': len(self.stocks) / self.max_positions,
-          'leverage_usage': self.leverage * sum(self.stocks) / self.amount,
+          'position_risk': len(
+            [s for s in base_state[1 + self.stock_dim:1 + 2 * self.stock_dim] if s > 0]) / self.max_positions,
+          'leverage_usage': self.leverage * sum(base_state[1 + self.stock_dim:1 + 2 * self.stock_dim]) / base_state[
+            0] if base_state[0] > 0 else 0,
           'daily_var': self.risk_manager.calculate_portfolio_var()
         }
         risk_features = list(risk_metrics.values())
@@ -243,10 +244,15 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
         shadow_features = [0, 0, 0]
 
       # 4. Портфельные метрики
+      current_balance = base_state[0] if len(base_state) > 0 else self.initial_amount
+      current_positions = base_state[1 + self.stock_dim:1 + 2 * self.stock_dim] if len(
+        base_state) > 1 + 2 * self.stock_dim else np.zeros(self.stock_dim)
+
       portfolio_features = [
-        self.amount / self.initial_amount,  # Относительный баланс
-        sum(self.stocks) / max(1, len(self.stocks)),  # Средняя позиция
-        len([s for s in self.stocks if s > 0]) / len(self.stocks),  # Доля активных позиций
+        current_balance / self.initial_amount,  # Относительный баланс
+        np.mean(current_positions) if len(current_positions) > 0 else 0,  # Средняя позиция
+        len([s for s in current_positions if s > 0]) / len(current_positions) if len(current_positions) > 0 else 0,
+        # Доля активных позиций
       ]
 
       # Объединяем все признаки
@@ -262,7 +268,11 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
 
     except Exception as e:
       logger.error(f"Ошибка создания расширенного состояния: {e}")
-      return super()._get_state()
+      # В случае ошибки возвращаем базовое состояние
+      if hasattr(self, 'state') and self.state is not None:
+        return np.array(self.state)
+      else:
+        return np.zeros(self.state_space)
 
   def _get_shadow_trading_metrics(self) -> Dict[str, float]:
     """Получает метрики из Shadow Trading системы"""
@@ -304,15 +314,23 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
     Выполняет шаг в среде с учетом особенностей Bybit
     """
     # Сохраняем текущее состояние для анализа
-    self.regime_history.append(self.market_regime_detector.current_regime if self.market_regime_detector else None)
+    self.regime_history.append(self.market_regime_detector.current_regimes if self.market_regime_detector else None)
 
     # Выполняем базовый шаг
     state, reward, terminated, truncated, info = super().step(actions)
 
+    # Сохраняем состояние для дальнейшего использования
+    self.state = state
+
+    # Получаем текущие позиции из состояния
+    # В FinRL состояние структурировано как: [balance, prices..., shares..., tech_indicators...]
+    current_positions = state[1 + self.stock_dim:1 + 2 * self.stock_dim]
+    current_balance = state[0]
+
     # Расширяем информацию
     info['regime'] = self.regime_history[-1]
-    info['leverage_used'] = self.leverage * sum(self.stocks) / self.amount
-    info['position_count'] = len([s for s in self.stocks if s > 0])
+    info['leverage_used'] = self.leverage * sum(current_positions) / current_balance if current_balance > 0 else 0
+    info['position_count'] = len([s for s in current_positions if s > 0])
 
     # Применяем кастомную функцию вознаграждения
     if hasattr(self, 'reward_function'):
@@ -325,24 +343,34 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
         'step': self.day,
         'action': actions,
         'reward': reward,
-        'balance': self.amount,
-        'positions': self.stocks.copy(),
+        'balance': current_balance,
+        'positions': current_positions.copy() if hasattr(current_positions, 'copy') else list(current_positions),
         'info': info
       })
 
-    # Получаем расширенное состояние
-    enhanced_state = self._get_enhanced_state()
-
-    return enhanced_state, reward, terminated, truncated, info
+    # Для простоты пока возвращаем базовое состояние
+    # Расширенное состояние может вызывать проблемы с размерностью
+    return state, reward, terminated, truncated, info
 
   def _calculate_risk_metrics(self) -> Dict[str, Any]:
     """Рассчитывает метрики риска для текущего состояния"""
     try:
+      # Используем сохраненное состояние
+      if hasattr(self, 'state') and self.state is not None:
+        current_state = self.state
+      else:
+        # Fallback на пустое состояние
+        current_state = np.zeros(self.state_space)
+
+      current_balance = current_state[0] if len(current_state) > 0 else self.initial_amount
+      current_positions = current_state[1 + self.stock_dim:1 + 2 * self.stock_dim] if len(
+        current_state) > 1 + 2 * self.stock_dim else np.zeros(self.stock_dim)
+
       # Расчет просадки
       if self.trade_history:
         balances = [t['balance'] for t in self.trade_history]
         peak = max(balances)
-        current_drawdown = (peak - self.amount) / peak
+        current_drawdown = (peak - current_balance) / peak if peak > 0 else 0
       else:
         current_drawdown = 0
 
@@ -352,9 +380,10 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
       # Risk/Reward ratio
       if self.trade_history and len(self.trade_history) > 1:
         returns = [
-          (self.trade_history[i]['balance'] - self.trade_history[i - 1]['balance']) / self.trade_history[i - 1][
-            'balance']
+          (self.trade_history[i]['balance'] - self.trade_history[i - 1]['balance']) /
+          self.trade_history[i - 1]['balance']
           for i in range(1, len(self.trade_history))
+          if self.trade_history[i - 1]['balance'] > 0
         ]
         avg_win = np.mean([r for r in returns if r > 0]) if any(r > 0 for r in returns) else 0
         avg_loss = abs(np.mean([r for r in returns if r < 0])) if any(r < 0 for r in returns) else 1
@@ -366,7 +395,7 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
         'drawdown': current_drawdown,
         'var_exceeded': var_exceeded,
         'risk_reward_ratio': risk_reward_ratio,
-        'leverage_ratio': self.leverage * sum(self.stocks) / self.amount
+        'leverage_ratio': self.leverage * sum(current_positions) / current_balance if current_balance > 0 else 0
       }
 
     except Exception as e:
@@ -389,11 +418,16 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
   def render(self, mode='human'):
     """Визуализация состояния среды"""
     if mode == 'human':
+      current_state = self.state if hasattr(self, 'state') else self._get_state()
+      current_balance = current_state[0]
+      current_positions = current_state[1 + self.stock_dim:1 + 2 * self.stock_dim]
+
       print(f"\n=== Bybit Trading Environment ===")
       print(f"Step: {self.day}")
-      print(f"Balance: ${self.amount:,.2f}")
-      print(f"Positions: {sum(self.stocks)} contracts")
-      print(f"Leverage Used: {self.leverage * sum(self.stocks) / self.amount:.2f}x")
+      print(f"Balance: ${current_balance:,.2f}")
+      print(f"Positions: {sum(current_positions)} contracts")
+      print(
+        f"Leverage Used: {self.leverage * sum(current_positions) / current_balance:.2f}x" if current_balance > 0 else "Leverage Used: 0.00x")
       if self.regime_history:
         print(f"Market Regime: {self.regime_history[-1]}")
       print("================================\n")

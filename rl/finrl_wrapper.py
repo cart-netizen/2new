@@ -88,23 +88,45 @@ class FinRLCompatibleEnv(StockTradingEnv):
     # Возвращаем в формате Gymnasium
     return state, info
 
-  def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
-    """Переопределяем step для совместимости с Gymnasium"""
-    # FinRL ожидает действия как numpy array
-    if not isinstance(action, np.ndarray):
-      action = np.array(action)
+  # def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
+  #   """Переопределяем step для совместимости с Gymnasium"""
+  #   # FinRL ожидает действия как numpy array
+  #   if not isinstance(action, np.ndarray):
+  #     action = np.array(action)
+  #
+  #   # Вызываем родительский step
+  #   state, reward, done, info = super().step(action)
+  #
+  #   # Преобразуем state в numpy array если нужно
+  #   if isinstance(state, list):
+  #     state = np.array(state, dtype=np.float32)
+  #
+  #   # Gymnasium использует (terminated, truncated) вместо просто done
+  #   terminated = done
+  #   truncated = False
+  #
+  #   return state, reward, terminated, truncated, info
 
-    # Вызываем родительский step
-    state, reward, done, info = super().step(action)
+  def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, dict]:
+    """
+    Выполняет шаг в среде с корректной обработкой 5 возвращаемых значений.
+    """
+    # Вызываем родительский метод step, который возвращает 5 значений
+    state, reward, terminated, truncated, info = super().step(action)
+
+    # Общая переменная 'done' вычисляется как комбинация двух флагов
+    done = terminated or truncated
 
     # Преобразуем state в numpy array если нужно
     if isinstance(state, list):
       state = np.array(state, dtype=np.float32)
 
-    # Gymnasium использует (terminated, truncated) вместо просто done
-    terminated = done
-    truncated = False
+    # Ваш кастомный код для обработки info
+    current_date = self.get_current_date()
+    if done:
+      info['episode_end_date'] = current_date
 
+    # Возвращаем все 5 значений, как того требует новый стандарт Gymnasium
     return state, reward, terminated, truncated, info
 
   def get_current_date(self) -> pd.Timestamp:
@@ -243,15 +265,13 @@ if __name__ == "__main__":
     # Делаем несколько шагов
     print("\n=== Тестирование шагов ===")
     for i in range(3):
-      # Создаем правильное действие для Box action space
-      action = env.action_space.sample()  # Случайное действие
-      # Или используем конкретные значения
-      # action = np.array([0.1, -0.1])  # Купить первую, продать вторую
-
+      action = env.action_space.sample()
       print(f"\nДействие: {action}")
 
+      # >>> НАЧАЛО ПАТЧА <<<
       state, reward, terminated, truncated, info = env.step(action)
       done = terminated or truncated
+      # >>> КОНЕЦ ПАТЧА <<<
 
       print(f"\nШаг {i + 1}:")
       print(f"  Дата: {env.get_current_date()}")

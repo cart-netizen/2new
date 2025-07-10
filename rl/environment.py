@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, List, Tuple
 from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from gymnasium import spaces
 import logging
-
+from finrl_wrapper import FinRLCompatibleEnv, FinRLDataProcessor
 from core.enums import Timeframe, SignalType
 from core.market_regime_detector import MarketRegime
 from ml.feature_engineering import AdvancedFeatureEngineer
@@ -64,7 +64,7 @@ def validate_dataframe_for_finrl(df: pd.DataFrame) -> pd.DataFrame:
   return df
 
 
-class BybitTradingEnvironment(StockTradingEnv):
+class BybitTradingEnvironment(FinRLCompatibleEnv):
   """
   Кастомная среда для торговли на Bybit через FinRL
   Интегрирована с существующими компонентами проекта
@@ -87,13 +87,7 @@ class BybitTradingEnvironment(StockTradingEnv):
     """
     Инициализация среды с интеграцией существующих компонентов
     """
-    # Валидируем DataFrame
-    df = validate_dataframe_for_finrl(df)
-
-    logger.info(f"Создание среды с DataFrame shape: {df.shape}")
-    logger.info(f"Уникальные символы: {df['tic'].unique()}")
-    logger.info(f"Период: {df['date'].min()} - {df['date'].max()}")
-
+    # Сохраняем компоненты проекта
     self.data_fetcher = data_fetcher
     self.market_regime_detector = market_regime_detector
     self.risk_manager = risk_manager
@@ -120,41 +114,41 @@ class BybitTradingEnvironment(StockTradingEnv):
     num_stocks = len(df['tic'].unique())
     num_stock_shares = [0] * num_stocks
 
-    # КРИТИЧНО: action_space должен соответствовать количеству акций
-    action_space = num_stocks
+    # Размерность пространства состояний
+    state_space_dim = 1 + num_stocks + num_stocks + len(tech_indicators) * num_stocks
 
-    # Инициализация родительского класса
-    try:
-      super().__init__(
-        df=df,
-        stock_dim=num_stocks,
-        hmax=100,
-        initial_amount=initial_balance,
-        num_stock_shares=num_stock_shares,
-        buy_cost_pct=self.config.get('buy_cost_pct', commission_rate),
-        sell_cost_pct=self.config.get('sell_cost_pct', commission_rate),
-        reward_scaling=self.config.get('reward_scaling', 1e-4),
-        state_space=len(tech_indicators) * num_stocks + num_stocks + 1,  # Правильный расчет
-        action_space=action_space,
-        tech_indicator_list=tech_indicators,
-        turbulence_threshold=None,
-        make_plots=False,
-        print_verbosity=0,
-        day=0,
-        initial=True,
-        previous_state=[],
-        model_name="BybitRL",
-        mode="train",
-        iteration=0
-      )
+    logger.info(
+      f"Создание среды: stocks={num_stocks}, indicators={len(tech_indicators)}, state_space={state_space_dim}")
 
-      logger.info(f"✅ Среда успешно инициализирована")
+    # ВАЖНО: FinRL ожидает массивы для комиссий
+    buy_cost_pct = [self.config.get('buy_cost_pct', commission_rate)] * num_stocks
+    sell_cost_pct = [self.config.get('sell_cost_pct', commission_rate)] * num_stocks
 
-    except Exception as e:
-      logger.error(f"Ошибка при инициализации родительского класса: {e}")
-      logger.error(f"DataFrame структура:\n{df.info()}")
-      logger.error(f"Первые строки:\n{df.head()}")
-      raise
+    # Инициализация родительского класса с правильной обработкой данных
+    super().__init__(
+      df=df,
+      stock_dim=num_stocks,
+      hmax=100,
+      initial_amount=initial_balance,
+      num_stock_shares=num_stock_shares,
+      buy_cost_pct=buy_cost_pct,  # Теперь массив
+      sell_cost_pct=sell_cost_pct,  # Теперь массив
+      reward_scaling=self.config.get('reward_scaling', 1e-4),
+      state_space=state_space_dim,
+      action_space=num_stocks,
+      tech_indicator_list=tech_indicators,
+      turbulence_threshold=None,
+      make_plots=False,
+      print_verbosity=0,
+      day=0,
+      initial=True,
+      previous_state=[],
+      model_name="BybitRL",
+      mode="train",
+      iteration=0
+    )
+
+    logger.info(f"✅ Среда успешно инициализирована")
 
   # def _get_technical_indicators_list(self) -> List[str]:
   #   """Получает список технических индикаторов из feature_engineer"""
@@ -176,23 +170,27 @@ class BybitTradingEnvironment(StockTradingEnv):
   #
   #   return indicators + custom_indicators
 
-  def _get_technical_indicators_list(self, df: pd.DataFrame) -> List[str]:
-    """Получает список технических индикаторов, которые есть в DataFrame"""
-    # Базовые индикаторы
-    base_indicators = [
-      'rsi', 'macd', 'macd_signal', 'macd_diff',
-      'adx', 'cci', 'atr', 'bb_upper', 'bb_lower', 'bb_middle'
-    ]
+  def _get_technical_indicators_list(self, df: pd.DataFrame) -> list:
+    """
+    Получает список технических индикаторов из DataFrame
+    """
+    # Базовые колонки, которые не являются индикаторами
+    base_columns = ['date', 'tic', 'open', 'high', 'low', 'close', 'volume',
+                    'timestamp', 'turnover']
 
-    # Фильтруем только те, которые реально есть в данных
-    available_indicators = []
-    for indicator in base_indicators:
-      if indicator in df.columns:
-        available_indicators.append(indicator)
+    # Колонки, которые мы исключаем из технических индикаторов
+    exclude_columns = base_columns + ['market_regime', 'market_regime_numeric']
 
-    logger.info(f"Доступные индикаторы: {available_indicators}")
+    # Все остальные числовые колонки считаем техническими индикаторами
+    tech_indicators = []
+    for col in df.columns:
+      if col not in exclude_columns and df[col].dtype in ['float64', 'int64']:
+        # Проверяем, что это действительно индикатор (есть для всех символов)
+        if df.groupby('tic')[col].count().min() > 0:
+          tech_indicators.append(col)
 
-    return available_indicators
+    logger.info(f"Найдены технические индикаторы: {tech_indicators}")
+    return tech_indicators
 
   def _get_enhanced_state(self) -> np.ndarray:
     """

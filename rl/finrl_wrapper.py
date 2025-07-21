@@ -185,7 +185,7 @@ def create_finrl_compatible_env(
       tech_indicator_list=available_indicators,
       turbulence_threshold=None,
       make_plots=False,
-      print_verbosity=1,  # Включаем вывод для отладки
+      print_verbosity=10000,  # Включаем вывод для отладки
       day=0,
       initial=True,
       previous_state=[],

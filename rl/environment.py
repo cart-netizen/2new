@@ -7,6 +7,7 @@ from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
 from gymnasium import spaces
 import logging
 from finrl_wrapper import FinRLCompatibleEnv, FinRLDataProcessor
+from rl.finrl_wrapper import FinRLCompatibleEnv, FinRLDataProcessor
 from core.enums import Timeframe, SignalType
 from core.market_regime_detector import MarketRegime
 from ml.feature_engineering import AdvancedFeatureEngineer
@@ -139,7 +140,7 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
       tech_indicator_list=tech_indicators,
       turbulence_threshold=None,
       make_plots=False,
-      print_verbosity=0,
+      print_verbosity=1,
       day=0,
       initial=True,
       previous_state=[],
@@ -314,92 +315,136 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
     Выполняет шаг в среде с учетом особенностей Bybit
     """
     # Сохраняем текущее состояние для анализа
-    self.regime_history.append(self.market_regime_detector.current_regimes if self.market_regime_detector else None)
+    if self.market_regime_detector:
+      self.regime_history.append(self.market_regime_detector.current_regimes)
 
-    # Выполняем базовый шаг
+    # Выполняем базовый шаг родительского класса
+    # FinRLCompatibleEnv уже возвращает 5 значений
     state, reward, terminated, truncated, info = super().step(actions)
 
-    # Сохраняем состояние для дальнейшего использования
+    # Сохраняем состояние
     self.state = state
 
-    # Получаем текущие позиции из состояния
-    # В FinRL состояние структурировано как: [balance, prices..., shares..., tech_indicators...]
-    current_positions = state[1 + self.stock_dim:1 + 2 * self.stock_dim]
-    current_balance = state[0]
+    # Безопасное извлечение данных из состояния
+    if isinstance(state, np.ndarray) and len(state) >= 1 + 2 * self.stock_dim:
+      current_balance = state[0]
+      current_positions = state[1 + self.stock_dim:1 + 2 * self.stock_dim]
+    else:
+      current_balance = self.initial_amount
+      current_positions = np.zeros(self.stock_dim)
 
     # Расширяем информацию
-    info['regime'] = self.regime_history[-1]
-    info['leverage_used'] = self.leverage * sum(current_positions) / current_balance if current_balance > 0 else 0
-    info['position_count'] = len([s for s in current_positions if s > 0])
+    info['regime'] = self.regime_history[-1] if self.regime_history else None
+    info['leverage_used'] = (self.leverage * np.sum(current_positions) / current_balance
+                             if current_balance > 0 else 0)
+    info['position_count'] = int(np.sum(current_positions > 0))
 
-    # Применяем кастомную функцию вознаграждения
-    if hasattr(self, 'reward_function'):
+    # Применяем кастомную функцию вознаграждения если она есть
+    if hasattr(self, 'reward_function') and self.reward_function:
       risk_metrics = self._calculate_risk_metrics()
       reward = self.reward_function.calculate_reward(reward, risk_metrics)
 
     # Записываем сделку для анализа
-    if any(actions != 0):  # Если были действия
+    if np.any(actions != 0):  # Если были действия
       self.trade_history.append({
         'step': self.day,
-        'action': actions,
-        'reward': reward,
-        'balance': current_balance,
-        'positions': current_positions.copy() if hasattr(current_positions, 'copy') else list(current_positions),
-        'info': info
+        'action': actions.tolist() if hasattr(actions, 'tolist') else list(actions),
+        'reward': float(reward),
+        'balance': float(current_balance),
+        'positions': current_positions.tolist() if hasattr(current_positions, 'tolist') else list(current_positions),
+        'info': info.copy()
       })
 
-    # Для простоты пока возвращаем базовое состояние
-    # Расширенное состояние может вызывать проблемы с размерностью
     return state, reward, terminated, truncated, info
+
+  def reset(self, *, seed=None, options=None) -> Tuple[np.ndarray, Dict]:
+    """Сброс среды с очисткой истории"""
+    # Очищаем историю
+    self.trade_history = []
+    self.regime_history = []
+    self.shadow_signals = []
+
+    # Вызываем родительский reset
+    result = super().reset(seed=seed, options=options)
+
+    # Обрабатываем разные форматы возврата
+    if isinstance(result, tuple):
+      state, info = result
+    else:
+      state = result
+      info = {}
+
+    # Убеждаемся, что state - это numpy array
+    if not isinstance(state, np.ndarray):
+      state = np.array(state, dtype=np.float32)
+
+    # Сохраняем начальное состояние
+    self.state = state
+
+    return state, info
 
   def _calculate_risk_metrics(self) -> Dict[str, Any]:
     """Рассчитывает метрики риска для текущего состояния"""
     try:
-      # Используем сохраненное состояние
-      if hasattr(self, 'state') and self.state is not None:
+      # Безопасное получение текущего состояния
+      if hasattr(self, 'state') and isinstance(self.state, np.ndarray):
         current_state = self.state
       else:
-        # Fallback на пустое состояние
-        current_state = np.zeros(self.state_space)
+        return {
+          'drawdown': 0,
+          'var_exceeded': False,
+          'risk_reward_ratio': 1,
+          'leverage_ratio': 0
+        }
 
-      current_balance = current_state[0] if len(current_state) > 0 else self.initial_amount
-      current_positions = current_state[1 + self.stock_dim:1 + 2 * self.stock_dim] if len(
-        current_state) > 1 + 2 * self.stock_dim else np.zeros(self.stock_dim)
+      # Безопасное извлечение данных
+      if len(current_state) >= 1 + 2 * self.stock_dim:
+        current_balance = float(current_state[0])
+        current_positions = current_state[1 + self.stock_dim:1 + 2 * self.stock_dim]
+      else:
+        current_balance = self.initial_amount
+        current_positions = np.zeros(self.stock_dim)
 
       # Расчет просадки
-      if self.trade_history:
-        balances = [t['balance'] for t in self.trade_history]
-        peak = max(balances)
-        current_drawdown = (peak - current_balance) / peak if peak > 0 else 0
-      else:
-        current_drawdown = 0
-
-      # Проверка превышения VaR
-      var_exceeded = current_drawdown > 0.1  # 10% VaR
+      current_drawdown = 0
+      if self.trade_history and len(self.trade_history) > 0:
+        balances = [float(t.get('balance', current_balance)) for t in self.trade_history]
+        if balances:
+          peak = max(balances)
+          current_drawdown = (peak - current_balance) / peak if peak > 0 else 0
 
       # Risk/Reward ratio
+      risk_reward_ratio = 1.0
       if self.trade_history and len(self.trade_history) > 1:
-        returns = [
-          (self.trade_history[i]['balance'] - self.trade_history[i - 1]['balance']) /
-          self.trade_history[i - 1]['balance']
-          for i in range(1, len(self.trade_history))
-          if self.trade_history[i - 1]['balance'] > 0
-        ]
-        avg_win = np.mean([r for r in returns if r > 0]) if any(r > 0 for r in returns) else 0
-        avg_loss = abs(np.mean([r for r in returns if r < 0])) if any(r < 0 for r in returns) else 1
-        risk_reward_ratio = avg_win / avg_loss if avg_loss > 0 else 0
-      else:
-        risk_reward_ratio = 0
+        returns = []
+        for i in range(1, len(self.trade_history)):
+          prev_balance = float(self.trade_history[i - 1].get('balance', 1))
+          curr_balance = float(self.trade_history[i].get('balance', 1))
+          if prev_balance > 0:
+            returns.append((curr_balance - prev_balance) / prev_balance)
+
+        if returns:
+          wins = [r for r in returns if r > 0]
+          losses = [r for r in returns if r < 0]
+          avg_win = np.mean(wins) if wins else 0
+          avg_loss = abs(np.mean(losses)) if losses else 1
+          risk_reward_ratio = avg_win / avg_loss if avg_loss > 0 else 0
+
+      # Leverage ratio
+      leverage_ratio = 0
+      if current_balance > 0:
+        total_position_value = self.leverage * np.sum(np.abs(current_positions))
+        leverage_ratio = total_position_value / current_balance
 
       return {
-        'drawdown': current_drawdown,
-        'var_exceeded': var_exceeded,
-        'risk_reward_ratio': risk_reward_ratio,
-        'leverage_ratio': self.leverage * sum(current_positions) / current_balance if current_balance > 0 else 0
+        'drawdown': float(current_drawdown),
+        'var_exceeded': bool(current_drawdown > 0.1),
+        'risk_reward_ratio': float(risk_reward_ratio),
+        'leverage_ratio': float(leverage_ratio)
       }
 
     except Exception as e:
-      logger.error(f"Ошибка расчета метрик риска: {e}")
+      logger.error(f"Ошибка расчета метрик риска: {e}", exc_info=True)
       return {
         'drawdown': 0,
         'var_exceeded': False,

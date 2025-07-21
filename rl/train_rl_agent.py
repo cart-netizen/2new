@@ -326,6 +326,7 @@ class RLTrainer:
       # ИСПРАВЛЕНО: убираем await, так как detect_anomalies синхронный
       anomaly_reports = self.anomaly_detector.detect_anomalies(data, symbol)
       if anomaly_reports:
+
         anomaly_score = max(report.severity for report in anomaly_reports)
       else:
         anomaly_score = 0.0
@@ -513,11 +514,15 @@ class RLTrainer:
       config=self.config
     )
 
+
+
     # Параметры обучения
     training_config = self.config.get('training_config', {})
     total_timesteps = training_config.get('total_timesteps', 100000)
     eval_freq = training_config.get('eval_frequency', 10000)
     save_freq = training_config.get('save_frequency', 20000)
+
+
 
     # Создаем callback для мониторинга
     class TrainingCallback(BaseCallback):
@@ -530,21 +535,41 @@ class RLTrainer:
         self.trainer = trainer
         self.episode_rewards = []
         self.episode_lengths = []
+        self.n_episodes = 0
 
       def _on_step(self) -> bool:
         """
         Вызывается на каждом шаге среды
         """
-        # Логируем прогресс каждые 1000 шагов
-        if self.num_timesteps % 1000 == 0:
-          logger.info(f"Шаг {self.num_timesteps}")
+        # Проверяем завершение эпизода
+        if self.locals.get('dones', [False])[0]:
+          self.n_episodes += 1
 
-          # Получаем информацию о последних эпизодах
-          if len(self.model.ep_info_buffer) > 0:
-            mean_reward = np.mean([ep_info["r"] for ep_info in self.model.ep_info_buffer])
-            logger.info(f"Средняя награда (последние эпизоды): {mean_reward:.2f}")
+          # Получаем информацию о последнем эпизоде
+          info = self.locals.get('infos', [{}])[0]
+          episode_reward = info.get('episode', {}).get('r', 0)
+          episode_length = info.get('episode', {}).get('l', 0)
 
-        return True  # Возвращаем True для продолжения обучения
+          self.episode_rewards.append(episode_reward)
+          self.episode_lengths.append(episode_length)
+
+          # Выводим статистику каждые 10 эпизодов
+          if self.n_episodes % 10 == 0:
+            avg_reward = np.mean(self.episode_rewards[-10:]) if self.episode_rewards else 0
+            avg_length = np.mean(self.episode_lengths[-10:]) if self.episode_lengths else 0
+
+            logger.info(f"\n{'=' * 50}")
+            logger.info(f"Эпизод: {self.n_episodes}")
+            logger.info(f"Средняя награда (последние 10): {avg_reward:.2f}")
+            logger.info(f"Средняя длина эпизода: {avg_length:.0f}")
+            logger.info(f"Всего шагов: {self.num_timesteps}")
+            logger.info(f"{'=' * 50}\n")
+
+        # Логируем прогресс каждые 5000 шагов
+        if self.num_timesteps % 5000 == 0 and self.num_timesteps > 0:
+          logger.info(f"Прогресс: {self.num_timesteps} шагов выполнено")
+
+        return True  # Продолжаем обучение
 
       def _on_rollout_end(self) -> None:
         """
@@ -589,6 +614,34 @@ class RLTrainer:
       save_freq=save_freq
     )
 
+    # Анализ результатов обучения
+    logger.info("\n" + "=" * 60)
+    logger.info("АНАЛИЗ РЕЗУЛЬТАТОВ ОБУЧЕНИЯ")
+    logger.info("=" * 60)
+
+    if hasattr(callback, 'episode_rewards') and callback.episode_rewards:
+      total_episodes = len(callback.episode_rewards)
+      avg_reward = np.mean(callback.episode_rewards)
+      std_reward = np.std(callback.episode_rewards)
+      max_reward = np.max(callback.episode_rewards)
+      min_reward = np.min(callback.episode_rewards)
+
+      logger.info(f"Всего эпизодов: {total_episodes}")
+      logger.info(f"Средняя награда: {avg_reward:.2f} ± {std_reward:.2f}")
+      logger.info(f"Максимальная награда: {max_reward:.2f}")
+      logger.info(f"Минимальная награда: {min_reward:.2f}")
+
+      # Показываем тренд
+      if total_episodes > 20:
+        early_avg = np.mean(callback.episode_rewards[:10])
+        late_avg = np.mean(callback.episode_rewards[-10:])
+        improvement = ((late_avg - early_avg) / abs(early_avg)) * 100 if early_avg != 0 else 0
+
+        logger.info(f"\nУлучшение производительности:")
+        logger.info(f"Первые 10 эпизодов: {early_avg:.2f}")
+        logger.info(f"Последние 10 эпизодов: {late_avg:.2f}")
+        logger.info(f"Изменение: {improvement:+.1f}%")
+
     # Сохраняем результаты обучения
     self.training_results = {
       'algorithm': self.config.get('algorithm', 'PPO'),
@@ -613,27 +666,41 @@ class RLTrainer:
     test_env = await self.create_environment(test_df)
 
     # Запускаем тестирование
-    obs = test_env.reset()
+    # ИСПРАВЛЕНО: правильно обрабатываем возврат reset()
+    obs, info = test_env.reset()  # reset возвращает кортеж
     done = False
+    truncated = False
 
     rewards = []
     actions = []
     portfolio_values = []
 
-    while not done:
+    # ИСПРАВЛЕНО: используем переменную для хранения текущего баланса
+    initial_balance = test_env.initial_amount if hasattr(test_env, 'initial_amount') else 10000
+    portfolio_values.append(initial_balance)
+
+    while not done and not truncated:
       # Получаем действие от агента
-      action, _ = self.rl_agent.predict(obs, deterministic=True)
+      action, _ = self.rl_agent.predict(obs, deterministic=True)  # obs уже numpy array
 
       # Выполняем действие
-      obs, reward, done, _, info = test_env.step(action)
+      obs, reward, done, truncated, info = test_env.step(action)  # 5 возвращаемых значений
 
       # Сохраняем метрики
       rewards.append(reward)
       actions.append(action)
-      portfolio_values.append(test_env.amount)
+
+      # Получаем текущий баланс из состояния
+      if isinstance(obs, np.ndarray) and len(obs) > 0:
+        current_balance = obs[0]  # Первый элемент состояния - это баланс
+        portfolio_values.append(current_balance)
 
     # Рассчитываем метрики производительности
-    total_return = (portfolio_values[-1] - portfolio_values[0]) / portfolio_values[0]
+    if len(portfolio_values) > 1:
+      total_return = (portfolio_values[-1] - portfolio_values[0]) / portfolio_values[0]
+    else:
+      total_return = 0
+
     sharpe_ratio = self._calculate_sharpe_ratio(rewards)
     max_drawdown = self._calculate_max_drawdown(portfolio_values)
     win_rate = sum(1 for r in rewards if r > 0) / len(rewards) if rewards else 0
@@ -644,8 +711,8 @@ class RLTrainer:
       'sharpe_ratio': sharpe_ratio,
       'max_drawdown': max_drawdown,
       'win_rate': win_rate,
-      'total_trades': len([a for a in actions if a != 1]),  # Не считаем HOLD
-      'final_portfolio_value': portfolio_values[-1],
+      'total_trades': len([a for a in actions if np.any(a != 0)]),  # Не считаем нулевые действия
+      'final_portfolio_value': portfolio_values[-1] if portfolio_values else initial_balance,
       'total_rewards': sum(rewards)
     }
 
@@ -797,7 +864,18 @@ class RLTrainer:
 
 
 async def main_training():
-  """Основная функция обучения, исправленная и с сохранением оригинальной логики."""
+  """Основная функция для запуска обучения"""
+  logger.info("=" * 80)
+  logger.info("ЗАПУСК ОБУЧЕНИЯ RL АГЕНТА")
+  logger.info("=" * 80)
+
+  # Создаем необходимые директории
+  import os
+  os.makedirs('results', exist_ok=True)
+  os.makedirs('rl/models', exist_ok=True)
+  os.makedirs('rl/models/logs', exist_ok=True)
+  os.makedirs('rl/models/best_model', exist_ok=True)
+  os.makedirs('rl/models/eval_logs', exist_ok=True)
   logger.info("🚀 Запуск обучения RL агента")
   trainer = None
   # 1. Загружаем конфигурацию ПЕРЕД созданием трейнера.

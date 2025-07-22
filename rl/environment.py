@@ -95,6 +95,8 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
     self.shadow_trading_manager = shadow_trading_manager
     self.feature_engineer = feature_engineer
     self.leverage = leverage
+    self.warmup_steps = 100  # Первые 100 шагов без торговли
+    self.steps_count = 0
     self.commission_rate = commission_rate
     self.max_positions = max_positions
     self.config = config or {}
@@ -314,6 +316,14 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
     """
     Выполняет шаг в среде с учетом особенностей Bybit
     """
+    # В начале метода step
+    self.steps_count += 1
+
+    # Перед выполнением действий
+    if self.steps_count < self.warmup_steps:
+      # Принудительно держим нулевые позиции в warmup
+      actions = np.zeros_like(actions)
+
     # Сохраняем текущее состояние для анализа
     if self.market_regime_detector:
       self.regime_history.append(self.market_regime_detector.current_regimes)

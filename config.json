@@ -26,6 +26,14 @@
         "enable_request_batching": true,
         "enable_cache": true
     },
+
+      "rl_config": {
+          "data_config": {
+          "min_history_days": 90,
+          "extended_history_days": 120,
+          "min_rows_per_symbol": 1000
+    }
+  },
         "rl_trading": {
             "enabled": true,
             "algorithm": "PPO",

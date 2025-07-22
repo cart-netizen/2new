@@ -71,18 +71,18 @@ class EnhancedRLAgent:
     # Параметры по умолчанию для разных алгоритмов
     default_params = {
       'PPO': {
-        'learning_rate': 0.00003,  # Уменьшено с 0.0003
-        'n_steps': 1024,  # Уменьшено с 2048
-        'batch_size': 32,  # Уменьшено с 64
-        'n_epochs': 10,
-        'gamma': 0.99,
-        'gae_lambda': 0.95,
-        'clip_range': 0.2,
-        'ent_coef': 0.01,
-        'vf_coef': 0.5,
+        'learning_rate': 0.00003,
+        'n_steps': 512,  # Еще меньше для стабильности
+        'batch_size': 32,
+        'n_epochs': 5,  # Меньше эпох
+        'gamma': 0.95,  # Меньше дисконтирование
+        'gae_lambda': 0.9,
+        'clip_range': 0.1,  # Более консервативное обновление
+        'clip_range_vf': None,
+        'ent_coef': 0.001,  # Меньше энтропии
+        'vf_coef': 1.0,  # Больше веса для value function
         'max_grad_norm': 0.5,
-        'use_sde': True,
-        'sde_sample_freq': 4,
+        'use_sde': False,  # Отключить стохастичность на время отладки
         'policy': 'MlpPolicy',
         'verbose': 1
       },

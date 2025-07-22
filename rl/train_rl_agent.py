@@ -95,7 +95,7 @@ class RLTrainer:
         # n_estimators=100
         lookback_periods=100
       )
-
+      logger.info("Детектор аномалий инициализирован с эвристиками")
       # Создаем простой детектор с эвристиками, если обучить не удается
       if self.anomaly_detector:
         logger.info("Инициализация детектора аномалий с эвристиками...")
@@ -195,61 +195,70 @@ class RLTrainer:
   #   return finrl_ready_df
 
   async def load_training_data(self) -> pd.DataFrame:
-    """Загружает и подготавливает данные для обучения"""
-    logger.info("Загрузка данных для обучения...")
+    """Загружает данные для обучения"""
+    try:
+      symbols = self.config.get('symbols', ['BTCUSDT'])
+      timeframe = Timeframe.ONE_HOUR
 
-    symbols = self.config.get('symbols', ['BTCUSDT', 'ETHUSDT'])
-    timeframe = Timeframe.ONE_HOUR
-    limit = self.config.get('training_config', {}).get('history_bars', 2000)
+      logger.info(f"Загрузка данных для символов: {symbols}")
 
-    all_data = {}
+      # Словарь для хранения данных по символам
+      all_data = {}
 
-    # Загружаем данные для каждого символа
-    for symbol in symbols:
-      logger.info(f"Загрузка данных для {symbol}...")
+      # Загружаем максимально доступное количество свечей
+      max_limit = 1000
 
-      try:
-        # Получаем исторические данные
+      for symbol in symbols:
+        logger.info(f"Загрузка данных для {symbol}...")
+
+        # Получаем данные
         data = await self.data_fetcher.get_historical_candles(
           symbol=symbol,
           timeframe=timeframe,
-          limit=limit
+          limit=max_limit,
+          use_cache=False
         )
 
         if data is not None and not data.empty:
-          # Добавляем технические индикаторы
-          data = await self._add_technical_indicators(data)
+          logger.info(f"Загружено {len(data)} свечей для {symbol}")
 
-          # Добавляем ML признаки
-          data = await self._add_ml_features(data, symbol)
-
+          # Сохраняем в словарь
           all_data[symbol] = data
-          logger.info(f"✅ Загружено {len(data)} баров для {symbol}")
+
+          # Проверяем структуру данных
+          logger.debug(f"Колонки данных {symbol}: {data.columns.tolist()}")
+          logger.debug(f"Первые строки:\n{data.head()}")
         else:
           logger.warning(f"⚠️ Нет данных для {symbol}")
 
-      except Exception as e:
-        logger.error(f"Ошибка загрузки данных для {symbol}: {e}")
-        continue
+      if not all_data:
+        logger.error("Не удалось загрузить данные ни для одного символа")
+        return pd.DataFrame()
 
-    if not all_data:
-      raise ValueError("Не удалось загрузить данные ни для одного символа")
+      # Теперь передаем словарь в prepare_data_for_finrl
+      df = prepare_data_for_finrl(all_data, list(all_data.keys()))
 
-    # Преобразуем в формат FinRL
-    finrl_df = prepare_data_for_finrl(all_data, list(all_data.keys()))
+      # Проверяем результат
+      if df is not None and not df.empty:
+        unique_dates = df['date'].nunique()
+        total_rows = len(df)
+        rows_per_symbol = total_rows // len(symbols)
 
-    # Отладка
-    debug_dataframe_structure(finrl_df, "After prepare_data_for_finrl")
+        logger.info(f"📊 Итоговый размер данных:")
+        logger.info(f"   - Всего строк: {total_rows}")
+        logger.info(f"   - Уникальных дат: {unique_dates}")
+        logger.info(f"   - Строк на символ: {rows_per_symbol}")
 
-    # Добавляем технические индикаторы в формате FinRL
-    finrl_df = self._add_finrl_indicators(finrl_df)
+        # Минимальная проверка
+        min_required_per_symbol = 800
+        if rows_per_symbol < min_required_per_symbol:
+          logger.warning(f"⚠️ Данных меньше рекомендуемого: {rows_per_symbol} < {min_required_per_symbol}")
 
-    # Финальная отладка
-    debug_dataframe_structure(finrl_df, "Final training data")
+      return df
 
-    logger.info(f"📊 Подготовлено {len(finrl_df)} записей для обучения")
-
-    return finrl_df
+    except Exception as e:
+      logger.error(f"Ошибка загрузки данных: {e}", exc_info=True)
+      return pd.DataFrame()
 
   async def _add_technical_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
     """Добавляет технические индикаторы"""
@@ -414,6 +423,20 @@ class RLTrainer:
     """Создает торговую среду"""
     logger.info("Создание торговой среды...")
 
+    unique_dates = df['date'].nunique()
+    unique_symbols = df['tic'].nunique()
+
+    logger.info(f"Создание среды: {unique_dates} дней, {unique_symbols} символов")
+
+    # Минимальная проверка для FinRL
+    min_days_required = 800  # Для эпизодов по 800 дней
+    if unique_dates < min_days_required:
+      logger.warning(f"Недостаточно дней: {unique_dates} < {min_days_required}")
+
+    if len(df) < 800:  # Минимум для полноценного эпизода
+      logger.warning(f"Недостаточно данных: {len(df)} строк. Дополняем...")
+      # Здесь можно либо загрузить больше данных, либо использовать то что есть
+
     # Детальная диагностика
     logger.info(f"Входной DataFrame shape: {df.shape}")
     logger.info(f"Columns: {df.columns.tolist()}")
@@ -509,6 +532,14 @@ class RLTrainer:
     train_env = await self.create_environment(train_df)
     test_env = await self.create_environment(test_df)
 
+    # Добавьте проверку:
+    logger.info(f"Test environment info: obs_space={test_env.observation_space.shape}, "
+                f"action_space={test_env.action_space.shape}")
+
+    # Убедитесь, что eval_env правильно инициализирована
+    if hasattr(test_env, 'df'):
+      logger.info(f"Test env data shape: {test_env.df.shape}")
+
     # Создаем RL агента
     self.rl_agent = EnhancedRLAgent(
       environment=train_env,
@@ -603,6 +634,14 @@ class RLTrainer:
         # # Логируем прогресс каждые 5000 шагов
         # if self.num_timesteps % 5000 == 0 and self.num_timesteps > 0:
         #   logger.info(f"Прогресс: {self.num_timesteps} шагов выполнено")
+
+        if len(self.episode_rewards) > 20:
+          recent_avg = np.mean(self.episode_rewards[-10:])
+          older_avg = np.mean(self.episode_rewards[-20:-10])
+
+          if recent_avg > older_avg * 1.1:  # Улучшение на 10%
+            logger.info(f"📈 Улучшение! Старое: {older_avg:.2f}, Новое: {recent_avg:.2f}")
+
 
         return True  # Продолжаем обучение
 
@@ -940,6 +979,23 @@ async def main_training():
     # Если данные не загрузились, прекращаем работу
     if df is None or df.empty:
       logger.error("❌ Не удалось загрузить данные для обучения. Процесс остановлен.")
+      return
+
+    # Дополнительная проверка размера
+    unique_dates = df['date'].nunique()
+    unique_symbols = df['tic'].nunique()
+    total_rows = len(df)
+
+    logger.info(f"📊 Загружено данных:")
+    logger.info(f"   - Уникальных дат: {unique_dates}")
+    logger.info(f"   - Символов: {unique_symbols}")
+    logger.info(f"   - Всего строк: {total_rows}")
+
+    # Минимальные требования FinRL
+    min_required = 1000 * unique_symbols
+    if total_rows < min_required:
+      logger.error(f"❌ Недостаточно данных: {total_rows} < {min_required}")
+      logger.error("   FinRL требует минимум 1000 точек на символ")
       return
 
     # Разделение на train/test

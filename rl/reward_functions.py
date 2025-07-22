@@ -87,6 +87,13 @@ class RiskAdjustedRewardFunction(BaseRewardFunction):
           drawdown_penalty +
           consistency_bonus
       )
+      # Ограничиваем награду разумными пределами
+      total_reward = np.clip(total_reward, -1000, 1000)
+
+      # Проверяем на NaN и Inf
+      if np.isnan(total_reward) or np.isinf(total_reward):
+        logger.warning(f"Некорректная награда: {total_reward}, заменяем на PnL")
+        return pnl
 
       # Логирование для отладки
       if abs(total_reward) > 100:  # Большие вознаграждения

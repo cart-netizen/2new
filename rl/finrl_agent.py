@@ -71,9 +71,9 @@ class EnhancedRLAgent:
     # Параметры по умолчанию для разных алгоритмов
     default_params = {
       'PPO': {
-        'learning_rate': 0.0003,
-        'n_steps': 2048,
-        'batch_size': 64,
+        'learning_rate': 0.00003,  # Уменьшено с 0.0003
+        'n_steps': 1024,  # Уменьшено с 2048
+        'batch_size': 32,  # Уменьшено с 64
         'n_epochs': 10,
         'gamma': 0.99,
         'gae_lambda': 0.95,

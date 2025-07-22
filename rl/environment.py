@@ -344,6 +344,12 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
       risk_metrics = self._calculate_risk_metrics()
       reward = self.reward_function.calculate_reward(reward, risk_metrics)
 
+    # Проверка на банкротство
+    if current_balance <= 0:
+      logger.warning(f"Баланс исчерпан: {current_balance}")
+      terminated = True
+      reward = -1000  # Штрафуем за банкротство
+
     # Записываем сделку для анализа
     if np.any(actions != 0):  # Если были действия
       self.trade_history.append({
@@ -377,6 +383,16 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
     # Убеждаемся, что state - это numpy array
     if not isinstance(state, np.ndarray):
       state = np.array(state, dtype=np.float32)
+
+    # Проверяем состояние на корректность
+    if isinstance(state, np.ndarray):
+      # Проверяем на NaN
+      if np.any(np.isnan(state)):
+        logger.warning("NaN обнаружен в начальном состоянии, заменяем на 0")
+        state = np.nan_to_num(state, 0)
+
+      # Проверяем на экстремальные значения
+      state = np.clip(state, -1e6, 1e6)
 
     # Сохраняем начальное состояние
     self.state = state
@@ -435,6 +451,8 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
       if current_balance > 0:
         total_position_value = self.leverage * np.sum(np.abs(current_positions))
         leverage_ratio = total_position_value / current_balance
+        # Ограничиваем значения для стабильности
+        leverage_ratio = min(leverage_ratio, 100)  # Максимум 100x
 
       return {
         'drawdown': float(current_drawdown),
@@ -452,13 +470,13 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
         'leverage_ratio': 0
       }
 
-  def reset(self, *, seed=None, options=None):
-    """Сброс среды с очисткой истории"""
-    self.trade_history = []
-    self.regime_history = []
-    self.shadow_signals = []
-
-    return super().reset(seed=seed, options=options)
+  # def reset(self, *, seed=None, options=None):
+  #   """Сброс среды с очисткой истории"""
+  #   self.trade_history = []
+  #   self.regime_history = []
+  #   self.shadow_signals = []
+  #
+  #   return super().reset(seed=seed, options=options)
 
   def render(self, mode='human'):
     """Визуализация состояния среды"""

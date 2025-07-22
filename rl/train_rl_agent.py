@@ -96,6 +96,11 @@ class RLTrainer:
         lookback_periods=100
       )
 
+      # Создаем простой детектор с эвристиками, если обучить не удается
+      if self.anomaly_detector:
+        logger.info("Инициализация детектора аномалий с эвристиками...")
+        # Детектор будет использовать правила по умолчанию
+
       # Предсказатель волатильности
       self.volatility_predictor = VolatilityPredictionSystem(
         model_type=ModelType.LIGHTGBM,
@@ -541,6 +546,20 @@ class RLTrainer:
         """
         Вызывается на каждом шаге среды
         """
+        # Получаем текущую информацию
+        if self.num_timesteps % 100 == 0:
+          # Получаем текущие наблюдения из среды
+          if hasattr(self.model, '_last_obs') and self.model._last_obs is not None:
+            obs = self.model._last_obs
+            if isinstance(obs, np.ndarray) and len(obs) > 0:
+              # Проверяем первый элемент (баланс)
+              balance = obs[0][0] if obs.ndim > 1 else obs[0]
+              logger.debug(f"Шаг {self.num_timesteps}: Баланс = {balance:.2f}")
+
+              # Проверка на аномальные значения
+              if balance <= 0 or balance > 1e6:
+                logger.warning(f"Аномальный баланс на шаге {self.num_timesteps}: {balance}")
+
         # Проверяем завершение эпизода
         if self.locals.get('dones', [False])[0]:
           self.n_episodes += 1
@@ -565,9 +584,25 @@ class RLTrainer:
             logger.info(f"Всего шагов: {self.num_timesteps}")
             logger.info(f"{'=' * 50}\n")
 
-        # Логируем прогресс каждые 5000 шагов
-        if self.num_timesteps % 5000 == 0 and self.num_timesteps > 0:
-          logger.info(f"Прогресс: {self.num_timesteps} шагов выполнено")
+        # Сохраняем метрики из info_buffer если есть
+        if hasattr(self.model, 'ep_info_buffer') and len(self.model.ep_info_buffer) > 0:
+          for ep_info in self.model.ep_info_buffer:
+            if 'r' in ep_info and 'l' in ep_info:
+              self.episode_rewards.append(ep_info['r'])
+              self.episode_lengths.append(ep_info['l'])
+              self.n_episodes += 1
+
+        # Логируем прогресс каждые 1000 шагов
+        if self.num_timesteps % 1000 == 0:
+          logger.info(
+            f"Шаг {self.num_timesteps}/{self.trainer.config.get('training_config', {}).get('total_timesteps', 100000)}")
+          if self.episode_rewards:
+            avg_reward = np.mean(self.episode_rewards[-10:])
+            logger.info(f"Средняя награда (последние 10 эпизодов): {avg_reward:.2f}")
+
+        # # Логируем прогресс каждые 5000 шагов
+        # if self.num_timesteps % 5000 == 0 and self.num_timesteps > 0:
+        #   logger.info(f"Прогресс: {self.num_timesteps} шагов выполнено")
 
         return True  # Продолжаем обучение
 

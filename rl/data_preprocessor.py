@@ -24,9 +24,33 @@ def prepare_data_for_finrl(
 
     df = raw_data[symbol].copy()
 
+    # Отладка
+    logger.info(f"Обработка {symbol}:")
+    logger.info(f"  Columns: {df.columns.tolist()}")
+    logger.info(f"  Index: {df.index.name}")
+
     # Сбрасываем индекс
     if df.index.name == 'timestamp' or isinstance(df.index, pd.DatetimeIndex):
       df = df.reset_index()
+      logger.info(f"  После reset_index columns: {df.columns.tolist()}")
+
+    # Создаем колонку date из разных возможных источников
+    date_created = False
+
+    if 'timestamp' in df.columns:
+      df['date'] = pd.to_datetime(df['timestamp'])
+      date_created = True
+    elif 'index' in df.columns and not date_created:
+      df['date'] = pd.to_datetime(df['index'])
+      date_created = True
+    elif 'datetime' in df.columns and not date_created:
+      df['date'] = pd.to_datetime(df['datetime'])
+      date_created = True
+
+    if not date_created:
+      logger.error(f"Не найдена колонка с датой для {symbol}")
+      logger.error(f"Доступные колонки: {df.columns.tolist()}")
+      continue
 
     # Создаем колонку date
     if 'timestamp' in df.columns:
@@ -66,6 +90,32 @@ def prepare_data_for_finrl(
 
   # Объединяем все данные
   combined_df = pd.concat(all_data, ignore_index=True)
+
+  # КРИТИЧНО: Заполняем NaN значения перед созданием среды
+  numeric_columns = combined_df.select_dtypes(include=[np.number]).columns
+  for col in numeric_columns:
+    if combined_df[col].isna().any():
+      logger.warning(f"NaN найден в колонке {col}, заполняем")
+      # Для цен используем forward fill, затем backward fill
+      if col in ['open', 'high', 'low', 'close']:
+        combined_df[col] = combined_df.groupby('tic')[col].transform(
+          lambda x: x.fillna(method='ffill').fillna(method='bfill')
+        )
+      # Для volume используем 0
+      elif col == 'volume':
+        combined_df[col] = combined_df[col].fillna(0)
+      # Для индикаторов используем среднее
+      else:
+        mean_value = combined_df[col].mean()
+        if np.isnan(mean_value):
+          mean_value = 0
+        combined_df[col] = combined_df[col].fillna(mean_value)
+
+  # Финальная проверка
+  if combined_df.isna().any().any():
+    logger.error("Остались NaN после очистки!")
+    # Принудительно заменяем все оставшиеся NaN
+    combined_df = combined_df.fillna(0)
 
   # КРИТИЧНО: Убедимся, что у нас есть данные для каждого символа на каждую дату
   # Это требование FinRL!

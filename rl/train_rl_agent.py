@@ -5,10 +5,9 @@ import pandas as pd
 import numpy as np
 import json
 from pathlib import Path
-from typing import List, Dict, Optional, Any
-from datetime import datetime, timedelta
+from typing import List, Dict, Any
+from datetime import datetime
 import matplotlib.pyplot as plt
-import seaborn as sns
 
 from config.config_manager import ConfigManager
 from core.data_fetcher import DataFetcher
@@ -28,6 +27,8 @@ from rl.feature_processor import RLFeatureProcessor
 from rl.reward_functions import RiskAdjustedRewardFunction
 from rl.data_preprocessor import prepare_data_for_finrl
 from stable_baselines3.common.callbacks import BaseCallback
+
+from rl.safe_wrapper import SafeEnvironmentWrapper
 from utils.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -211,23 +212,115 @@ class RLTrainer:
       for symbol in symbols:
         logger.info(f"Загрузка данных для {symbol}...")
 
-        # Получаем данные
-        data = await self.data_fetcher.get_historical_candles(
-          symbol=symbol,
-          timeframe=timeframe,
-          limit=max_limit,
-          use_cache=False
-        )
+        total_data = []
 
-        if data is not None and not data.empty:
-          logger.info(f"Загружено {len(data)} свечей для {symbol}")
+        # Делаем несколько запросов для получения больше данных
+        for i in range(3):  # 3 запроса = до 3000 свечей
+          if i > 0:
+            await asyncio.sleep(0.5)  # Задержка между запросами
 
-          # Сохраняем в словарь
-          all_data[symbol] = data
+          # Получаем данные
+          data = await self.data_fetcher.get_historical_candles(
+            symbol=symbol,
+            timeframe=timeframe,
+            limit=max_limit,
+            use_cache=False
+          )
+
+          if data is not None and not data.empty:
+            logger.info(f"Структура данных от DataFetcher для {symbol}:")
+            logger.info(f"  Columns: {data.columns.tolist()}")
+            logger.info(f"  Index name: {data.index.name}")
+            logger.info(f"  Index type: {type(data.index)}")
+            logger.info(f"  Sample:\n{data.head(2)}")
+
+          if data is not None and not data.empty:
+            total_data.append(data)
+            logger.info(f"Запрос {i + 1}: получено {len(data)} свечей")
+          else:
+            break
+
+        # После объединения и очистки данных:
+        if total_data:
+          # Конкатенируем все фреймы
+          combined_data = pd.concat(total_data, ignore_index=True)
+
+          # ВАЖНО: Проверяем структуру данных
+          logger.info(f"После конкатенации для {symbol}:")
+          logger.info(f"  Columns: {combined_data.columns.tolist()}")
+          logger.info(f"  Shape: {combined_data.shape}")
+
+          # Если timestamp в индексе, переносим в колонку
+          if 'timestamp' not in combined_data.columns and isinstance(combined_data.index, pd.DatetimeIndex):
+            combined_data = combined_data.reset_index()
+            if 'index' in combined_data.columns:
+              combined_data = combined_data.rename(columns={'index': 'timestamp'})
+
+          # Убираем дубликаты по timestamp
+          if 'timestamp' in combined_data.columns:
+            combined_data = combined_data.drop_duplicates(subset=['timestamp'], keep='first')
+            combined_data = combined_data.sort_values('timestamp').reset_index(drop=True)
+
+          logger.info(f"Всего уникальных свечей для {symbol}: {len(combined_data)}")
+
+          # Проверяем на NaN
+          nan_columns = combined_data.columns[combined_data.isna().any()].tolist()
+          if nan_columns:
+            logger.warning(f"NaN найден в колонках {nan_columns} для {symbol}")
+            # Очищаем данные
+            combined_data = combined_data.fillna(method='ffill').fillna(method='bfill')
+            # Если все еще есть NaN (например, в начале), заполняем нулями
+            combined_data = combined_data.fillna(0)
+
+          # Проверяем на экстремальные значения
+          numeric_cols = combined_data.select_dtypes(include=[np.number]).columns
+          for col in numeric_cols:
+            max_val = combined_data[col].abs().max()
+            if max_val > 1e10:
+              logger.warning(f"Экстремальные значения в {col}: max={max_val}")
+
+          # Добавляем базовые технические индикаторы если их нет
+          if 'volume_ratio' not in combined_data.columns:
+            # Рассчитываем volume_ratio
+            combined_data['volume_ratio'] = combined_data['volume'] / combined_data['volume'].rolling(window=20,
+                                                                                                      min_periods=1).mean()
+            combined_data['volume_ratio'] = combined_data['volume_ratio'].fillna(1.0)
+
+          if 'rsi' not in combined_data.columns:
+            # Простой RSI
+            delta = combined_data['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+            rs = gain / loss
+            combined_data['rsi'] = 100 - (100 / (1 + rs))
+            combined_data['rsi'] = combined_data['rsi'].fillna(50)  # Нейтральное значение
+
+          if 'sma_20' not in combined_data.columns:
+            combined_data['sma_20'] = combined_data['close'].rolling(window=20, min_periods=1).mean()
+
+          # Финальная очистка
+          combined_data = combined_data.fillna(method='ffill').fillna(method='bfill').fillna(0)
+
+          # # Сохраняем в словарь
+          # all_data[symbol] = combined_data
+
+          # Перед сохранением в словарь убеждаемся, что timestamp есть как колонка
+          if 'timestamp' not in combined_data.columns:
+            logger.error(f"КРИТИЧНО: нет колонки timestamp для {symbol}")
+            logger.error(f"Доступные колонки: {combined_data.columns.tolist()}")
+            continue
+
+          # Убедитесь, что индекс сохранен правильно:
+          if isinstance(combined_data.index, pd.DatetimeIndex) and combined_data.index.name == 'timestamp':
+            # Сохраняем timestamp как колонку, если это индекс
+            combined_data = combined_data.reset_index()
+
+          # Теперь сохраняем
+          all_data[symbol] = combined_data
 
           # Проверяем структуру данных
-          logger.debug(f"Колонки данных {symbol}: {data.columns.tolist()}")
-          logger.debug(f"Первые строки:\n{data.head()}")
+          logger.debug(f"Колонки данных {symbol}: {combined_data.columns.tolist()}")
+          logger.debug(f"Первые строки:\n{combined_data.head()}")
         else:
           logger.warning(f"⚠️ Нет данных для {symbol}")
 
@@ -419,7 +512,7 @@ class RLTrainer:
 
     return final_df
 
-  async def create_environment(self, df: pd.DataFrame) -> BybitTradingEnvironment:
+  async def create_environment(self, df: pd.DataFrame) -> SafeEnvironmentWrapper:
     """Создает торговую среду"""
     logger.info("Создание торговой среды...")
 
@@ -436,6 +529,18 @@ class RLTrainer:
     if len(df) < 800:  # Минимум для полноценного эпизода
       logger.warning(f"Недостаточно данных: {len(df)} строк. Дополняем...")
       # Здесь можно либо загрузить больше данных, либо использовать то что есть
+
+    # Базовые колонки, которые не являются индикаторами
+    base_columns = ['date', 'tic', 'open', 'high', 'low', 'close', 'volume', 'timestamp', 'turnover']
+
+    # Находим технические индикаторы
+    tech_indicators = []
+    for col in df.columns:
+      if col not in base_columns and df[col].dtype in ['float64', 'int64', 'float32']:
+        tech_indicators.append(col)
+
+    logger.info(f"Найдено технических индикаторов: {len(tech_indicators)}")
+    logger.info(f"Индикаторы: {tech_indicators[:10]}...")  # Показываем первые 10
 
     # Детальная диагностика
     logger.info(f"Входной DataFrame shape: {df.shape}")
@@ -488,7 +593,8 @@ class RLTrainer:
       'transaction_cost_pct': 0.001,
       'reward_scaling': 1e-4,
       'buy_cost_pct': 0.001,
-      'sell_cost_pct': 0.001
+      'sell_cost_pct': 0.001,
+      'tech_indicator_list': tech_indicators
     }
 
     # Финальная отладка перед созданием среды
@@ -511,16 +617,25 @@ class RLTrainer:
       )
 
       logger.info("✅ Торговая среда создана успешно")
+      # Проверяем размерности
+      logger.info(f"State space: {environment.state_space}")
+      logger.info(f"Action space: {environment.action_space}")
+      logger.info(f"Stock dim: {environment.stock_dim}")
 
     except Exception as e:
       logger.error(f"Ошибка создания среды: {e}")
       logger.error(f"DataFrame info:\n{df.info()}")
       raise
 
-    # Устанавливаем функцию вознаграждения
-    environment.reward_function = reward_function
+    from rl.safe_wrapper import SafeEnvironmentWrapper
+    safe_environment = SafeEnvironmentWrapper(environment)
 
-    return environment
+    # Устанавливаем функцию вознаграждения
+
+    # environment.reward_function = reward_function
+    safe_environment.reward_function = reward_function
+
+    return safe_environment
 
   async def train_agent(self, train_df: pd.DataFrame, test_df: pd.DataFrame):
     """Обучает RL агента"""

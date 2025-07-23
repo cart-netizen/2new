@@ -111,8 +111,22 @@ class FinRLCompatibleEnv(StockTradingEnv):
     """
     Выполняет шаг в среде с корректной обработкой 5 возвращаемых значений.
     """
-    # Вызываем родительский метод step, который возвращает 5 значений
-    state, reward, terminated, truncated, info = super().step(action)
+    # Проверяем границы данных
+    if hasattr(self, 'day') and hasattr(self.df, 'index'):
+      max_day = self.df.index.max()
+      if self.day >= max_day:
+        logger.warning(f"Конец данных: day={self.day}, max={max_day}")
+        # Возвращаем терминальное состояние
+        obs = self._get_state() if hasattr(self, '_get_state') else np.zeros(self.state_space)
+        return obs, 0.0, True, True, {'terminal': 'end_of_data'}
+
+    # Вызываем родительский метод step с обработкой ошибок
+    try:
+      state, reward, terminated, truncated, info = super().step(action)
+    except Exception as e:
+      logger.error(f"Ошибка в FinRL step: {e}")
+      state = np.zeros(self.state_space)
+      return state, -10.0, True, True, {'error': str(e)}
 
     # Общая переменная 'done' вычисляется как комбинация двух флагов
     done = terminated or truncated
@@ -120,6 +134,12 @@ class FinRLCompatibleEnv(StockTradingEnv):
     # Преобразуем state в numpy array если нужно
     if isinstance(state, list):
       state = np.array(state, dtype=np.float32)
+
+    # Проверяем на NaN и Inf
+    if isinstance(state, np.ndarray):
+      if np.any(np.isnan(state)) or np.any(np.isinf(state)):
+        logger.warning("NaN или Inf в state, очищаем")
+        state = np.nan_to_num(state, nan=0.0, posinf=1e6, neginf=-1e6)
 
     # Ваш кастомный код для обработки info
     current_date = self.get_current_date()

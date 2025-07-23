@@ -128,21 +128,43 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
     sell_cost_pct = [self.config.get('sell_cost_pct', commission_rate)] * num_stocks
 
     # Инициализация родительского класса с правильной обработкой данных
+    # super().__init__(
+    #   df=df,
+    #   stock_dim=num_stocks,
+    #   hmax=100,
+    #   initial_amount=initial_balance,
+    #   num_stock_shares=num_stock_shares,
+    #   buy_cost_pct=buy_cost_pct,  # Теперь массив
+    #   sell_cost_pct=sell_cost_pct,  # Теперь массив
+    #   reward_scaling=self.config.get('reward_scaling', 1e-4),
+    #   state_space=state_space_dim,
+    #   action_space=num_stocks,
+    #   tech_indicator_list=tech_indicators,
+    #   turbulence_threshold=None,
+    #   make_plots=False,
+    #   print_verbosity=1,
+    #   day=0,
+    #   initial=True,
+    #   previous_state=[],
+    #   model_name="BybitRL",
+    #   mode="train",
+    #   iteration=0
+    # )
     super().__init__(
       df=df,
       stock_dim=num_stocks,
       hmax=100,
       initial_amount=initial_balance,
-      num_stock_shares=num_stock_shares,
-      buy_cost_pct=buy_cost_pct,  # Теперь массив
-      sell_cost_pct=sell_cost_pct,  # Теперь массив
+      num_stock_shares=[0] * num_stocks,
+      buy_cost_pct=[commission_rate] * num_stocks,
+      sell_cost_pct=[commission_rate] * num_stocks,
       reward_scaling=self.config.get('reward_scaling', 1e-4),
       state_space=state_space_dim,
       action_space=num_stocks,
       tech_indicator_list=tech_indicators,
       turbulence_threshold=None,
       make_plots=False,
-      print_verbosity=1,
+      print_verbosity=0,
       day=0,
       initial=True,
       previous_state=[],
@@ -312,25 +334,81 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
       logger.error(f"Ошибка получения Shadow Trading метрик: {e}")
       return {'missed_profit_ratio': 0, 'shadow_win_rate': 0.5, 'signal_quality': 0.5}
 
+  # def step(self, actions: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+  #   """
+  #   Выполняет шаг в среде с учетом особенностей Bybit
+  #   """
+  #   # В начале метода step
+  #   self.steps_count += 1
+  #
+  #   # Перед выполнением действий
+  #   if self.steps_count < self.warmup_steps:
+  #     # Принудительно держим нулевые позиции в warmup
+  #     actions = np.zeros_like(actions)
+  #
+  #   # Сохраняем текущее состояние для анализа
+  #   if self.market_regime_detector:
+  #     self.regime_history.append(self.market_regime_detector.current_regimes)
+  #
+  #   # Выполняем базовый шаг родительского класса
+  #   # FinRLCompatibleEnv уже возвращает 5 значений
+  #   state, reward, terminated, truncated, info = super().step(actions)
+  # Очищаем состояние
+
+
   def step(self, actions: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-    """
-    Выполняет шаг в среде с учетом особенностей Bybit
-    """
-    # В начале метода step
+    """Выполняет шаг в среде с учетом особенностей Bybit"""
+
+    # Проверяем, не вышли ли мы за пределы данных
+    max_day = self.df.index.max() if hasattr(self.df, 'index') else len(self.df) - 1
+
+    if self.day >= max_day:
+      logger.warning(f"Достигнут конец данных: day={self.day}, max_day={max_day}")
+      # Возвращаем терминальное состояние
+      state = self.state if hasattr(self, 'state') else np.zeros(self.state_space)
+      return state, 0.0, True, True, {'terminal_reason': 'end_of_data'}
+
+    # Увеличиваем счетчик шагов
     self.steps_count += 1
 
-    # Перед выполнением действий
+    # Проверяем и очищаем действия
+    if np.any(np.isnan(actions)) or np.any(np.isinf(actions)):
+      logger.warning("NaN или Inf в действиях, заменяем на 0")
+      actions = np.nan_to_num(actions, nan=0.0)
+      actions = np.clip(actions, -1, 1)  # Ограничиваем диапазон действий
+
+    # В период прогрева не торгуем
     if self.steps_count < self.warmup_steps:
-      # Принудительно держим нулевые позиции в warmup
       actions = np.zeros_like(actions)
 
     # Сохраняем текущее состояние для анализа
     if self.market_regime_detector:
       self.regime_history.append(self.market_regime_detector.current_regimes)
 
-    # Выполняем базовый шаг родительского класса
-    # FinRLCompatibleEnv уже возвращает 5 значений
-    state, reward, terminated, truncated, info = super().step(actions)
+    # Выполняем базовый шаг с защитой от ошибок
+    try:
+      state, reward, terminated, truncated, info = super().step(actions)
+    except ZeroDivisionError as e:
+      logger.error(f"ZeroDivisionError in step: {e}")
+      logger.error(f"Current day: {self.day}, max_day: {max_day}")
+      # Возвращаем терминальное состояние
+      state = self.state if hasattr(self, 'state') else np.zeros(self.state_space)
+      return state, -10.0, True, True, {'error': 'ZeroDivisionError'}
+    except Exception as e:
+      logger.error(f"Error in step: {e}")
+      state = self.state if hasattr(self, 'state') else np.zeros(self.state_space)
+      return state, -10.0, True, True, {'error': str(e)}
+
+    # Очищаем состояние
+    state = self._sanitize_observation(state)
+
+    # Проверяем reward
+    if np.isnan(reward) or np.isinf(reward):
+      logger.warning(f"NaN/Inf в reward: {reward}, заменяем на 0")
+      reward = 0.0
+
+    # Ограничиваем reward разумными пределами
+    reward = np.clip(reward, -1000, 1000)
 
     # Сохраняем состояние
     self.state = state
@@ -404,10 +482,48 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
       # Проверяем на экстремальные значения
       state = np.clip(state, -1e6, 1e6)
 
+    state = self._sanitize_observation(state)
+
     # Сохраняем начальное состояние
     self.state = state
 
     return state, info
+
+  def _sanitize_observation(self, state):
+    """Очищает наблюдение от NaN и inf значений"""
+    if isinstance(state, np.ndarray):
+      # Заменяем NaN на 0
+      if np.any(np.isnan(state)):
+        logger.warning(f"NaN обнаружен в наблюдении, заменяем на 0")
+        state = np.nan_to_num(state, nan=0.0)
+
+      # Заменяем inf на большие, но конечные значения
+      if np.any(np.isinf(state)):
+        logger.warning(f"Inf обнаружен в наблюдении, ограничиваем")
+        state = np.clip(state, -1e10, 1e10)
+
+      # Дополнительная нормализация для стабильности
+      # Нормализуем большие значения (кроме баланса)
+      if len(state) > 1:
+        # Первый элемент - баланс, не нормализуем
+        balance = state[0]
+
+        # Остальные элементы нормализуем
+        other_values = state[1:]
+
+        # Находим экстремальные значения
+        max_abs = np.max(np.abs(other_values[other_values != 0])) if np.any(other_values != 0) else 1.0
+
+        # Если значения слишком большие, масштабируем
+        if max_abs > 1e6:
+          logger.warning(f"Большие значения в obs: max_abs={max_abs}, масштабируем")
+          scale_factor = 1e6 / max_abs
+          other_values = other_values * scale_factor
+
+        # Собираем обратно
+        state = np.concatenate([[balance], other_values])
+
+    return state
 
   def _calculate_risk_metrics(self) -> Dict[str, Any]:
     """Рассчитывает метрики риска для текущего состояния"""
@@ -504,3 +620,46 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
       if self.regime_history:
         print(f"Market Regime: {self.regime_history[-1]}")
       print("================================\n")
+
+class SafeEnvironmentWrapper:
+    """Обертка для безопасности среды от NaN"""
+
+    def __init__(self, env):
+      self.env = env
+      self._last_valid_obs = None
+
+    def reset(self, **kwargs):
+      obs, info = self.env.reset(**kwargs)
+      obs = self._sanitize_obs(obs)
+      self._last_valid_obs = obs.copy()
+      return obs, info
+
+    def step(self, action):
+      # Проверяем action
+      if np.any(np.isnan(action)) or np.any(np.isinf(action)):
+        logger.warning("Invalid action, using zeros")
+        action = np.zeros_like(action)
+
+      obs, reward, terminated, truncated, info = self.env.step(action)
+
+      # Проверяем результаты
+      obs = self._sanitize_obs(obs)
+
+      if np.isnan(reward) or np.isinf(reward):
+        logger.warning(f"Invalid reward: {reward}")
+        reward = 0.0
+
+      self._last_valid_obs = obs.copy()
+      return obs, reward, terminated, truncated, info
+
+    def _sanitize_obs(self, obs):
+      if np.any(np.isnan(obs)) or np.any(np.isinf(obs)):
+        logger.warning("Invalid observation detected")
+        if self._last_valid_obs is not None:
+          return self._last_valid_obs.copy()
+        else:
+          return np.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
+      return obs
+
+    def __getattr__(self, name):
+      return getattr(self.env, name)

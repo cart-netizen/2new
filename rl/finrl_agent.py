@@ -72,18 +72,26 @@ class EnhancedRLAgent:
     default_params = {
       'PPO': {
         'learning_rate': 0.00003,
-        'n_steps': 512,  # Еще меньше для стабильности
+        'n_steps': 512,  # Уменьшаем для стабильности
         'batch_size': 32,
         'n_epochs': 5,  # Меньше эпох
-        'gamma': 0.95,  # Меньше дисконтирование
+        'gamma': 0.95,
         'gae_lambda': 0.9,
-        'clip_range': 0.1,  # Более консервативное обновление
+        'clip_range': 0.1,
         'clip_range_vf': None,
-        'ent_coef': 0.001,  # Меньше энтропии
-        'vf_coef': 1.0,  # Больше веса для value function
+        'normalize_advantage': True,  # Важно для стабильности
+        'ent_coef': 0.001,
+        'vf_coef': 1.0,
         'max_grad_norm': 0.5,
-        'use_sde': False,  # Отключить стохастичность на время отладки
+        'use_sde': False,  # Отключаем для стабильности
+        'target_kl': 0.01,  # Добавляем ограничение KL-дивергенции
         'policy': 'MlpPolicy',
+        'policy_kwargs': {
+          'net_arch': [64, 64],  # Меньшая сеть для начала
+          'activation_fn': torch.nn.Tanh,  # Tanh более стабильна чем ReLU
+          'normalize_images': False,
+          # 'squash_output': True,  # Ограничивает выход
+        },
         'verbose': 1
       },
       'A2C': {

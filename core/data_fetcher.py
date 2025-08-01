@@ -464,8 +464,8 @@ class DataFetcher:
         df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
 
         # Конвертируем типы данных
-        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
-        df.set_index('timestamp', inplace=True)
+        df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms', utc=True)
+        # df.set_index('timestamp', inplace=True)
 
         for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
           df[col] = pd.to_numeric(df[col], errors='coerce')

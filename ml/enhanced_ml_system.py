@@ -4127,7 +4127,7 @@ class TemporalDataManager:
     """
 
     def __init__(self):
-      self.max_data_age_minutes = 15  # Максимальный возраст данных в минутах
+      self.max_data_age_minutes = 65  # Максимальный возраст данных в минутах
       self.required_recent_bars = 5  # Минимум недавних баров для анализа
       self.temporal_weights = True  # Использовать временные веса
       self.real_time_adjustments = True  # Использовать корректировки в реальном времени

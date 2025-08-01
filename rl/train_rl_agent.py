@@ -198,7 +198,10 @@ class RLTrainer:
   async def load_training_data(self) -> pd.DataFrame:
     """Загружает данные для обучения"""
     try:
-      symbols = self.config.get('symbols', ['BTCUSDT'])
+      symbols = self.config.get('symbols', ["BTCUSDT",
+                "ETHUSDT",
+                "SOLUSDT",
+                "XRPUSDT"])
       timeframe = Timeframe.ONE_HOUR
 
       logger.info(f"Загрузка данных для символов: {symbols}")
@@ -212,88 +215,102 @@ class RLTrainer:
       for symbol in symbols:
         logger.info(f"Загрузка данных для {symbol}...")
 
-        total_data = []
+        # Собираем данные через несколько последовательных запросов
+        all_candles = []
+        last_timestamp = None
 
-        # Делаем несколько запросов для получения больше данных
-        for i in range(3):  # 3 запроса = до 3000 свечей
-          if i > 0:
-            await asyncio.sleep(0.5)  # Задержка между запросами
+        # Делаем до 10 запросов по 200 свечей = 2000 свечей максимум
+        for i in range(10):
+          try:
+            if i > 0:
+              await asyncio.sleep(0.2)  # Задержка между запросами
 
-          # Получаем данные
-          data = await self.data_fetcher.get_historical_candles(
-            symbol=symbol,
-            timeframe=timeframe,
-            limit=max_limit,
-            use_cache=False
-          )
+            # Подготавливаем параметры для запроса
+            if hasattr(self.connector, '_make_request'):
+              # Прямой запрос к API Bybit
+              params = {
+                "symbol": symbol,
+                "interval": "60",  # 1 час
+                "limit": 200
+              }
 
-          if data is not None and not data.empty:
-            logger.info(f"Структура данных от DataFetcher для {symbol}:")
-            logger.info(f"  Columns: {data.columns.tolist()}")
-            logger.info(f"  Index name: {data.index.name}")
-            logger.info(f"  Index type: {type(data.index)}")
-            logger.info(f"  Sample:\n{data.head(2)}")
+              # Если есть последняя временная метка, запрашиваем данные ДО нее
+              if last_timestamp:
+                params["endTime"] = last_timestamp
 
-          if data is not None and not data.empty:
-            total_data.append(data)
-            logger.info(f"Запрос {i + 1}: получено {len(data)} свечей")
-          else:
+              result = await self.connector._make_request("GET", "/v5/market/kline", params)
+
+              if result and result.get("result") and result["result"].get("list"):
+                klines = result["result"]["list"]
+
+                # Преобразуем в DataFrame
+                df = pd.DataFrame(klines)
+                df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
+
+                # Конвертируем типы
+                df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
+                for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
+                  df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                all_candles.append(df)
+
+                # Обновляем last_timestamp для следующего запроса
+                last_timestamp = int(df['timestamp'].min().timestamp() * 1000) - 1
+
+                logger.info(f"  Запрос {i + 1}: получено {len(df)} свечей")
+              else:
+                logger.warning(f"  Запрос {i + 1}: нет данных")
+                break
+
+            else:
+              # Fallback на стандартный метод
+              data = await self.data_fetcher.get_historical_candles(
+                symbol=symbol,
+                timeframe=timeframe,
+                limit=200,
+                use_cache=False
+              )
+
+              if data is not None and not data.empty:
+                all_candles.append(data)
+                logger.info(f"  Запрос {i + 1}: получено {len(data)} свечей")
+              else:
+                break
+
+          except Exception as e:
+            logger.error(f"Ошибка при запросе {i + 1} для {symbol}: {e}")
             break
 
-        # После объединения и очистки данных:
-        if total_data:
-          # Конкатенируем все фреймы
-          combined_data = pd.concat(total_data, ignore_index=True)
-
-          # ВАЖНО: Проверяем структуру данных
-          logger.info(f"После конкатенации для {symbol}:")
-          logger.info(f"  Columns: {combined_data.columns.tolist()}")
-          logger.info(f"  Shape: {combined_data.shape}")
-
-          # Если timestamp в индексе, переносим в колонку
-          if 'timestamp' not in combined_data.columns and isinstance(combined_data.index, pd.DatetimeIndex):
-            combined_data = combined_data.reset_index()
-            if 'index' in combined_data.columns:
-              combined_data = combined_data.rename(columns={'index': 'timestamp'})
+        # Объединяем все полученные данные
+        if all_candles:
+          combined_data = pd.concat(all_candles, ignore_index=True)
 
           # Убираем дубликаты по timestamp
           if 'timestamp' in combined_data.columns:
             combined_data = combined_data.drop_duplicates(subset=['timestamp'], keep='first')
             combined_data = combined_data.sort_values('timestamp').reset_index(drop=True)
 
-          logger.info(f"Всего уникальных свечей для {symbol}: {len(combined_data)}")
+          logger.info(f"✅ Всего загружено для {symbol}: {len(combined_data)} уникальных свечей")
 
-          # Проверяем на NaN
-          nan_columns = combined_data.columns[combined_data.isna().any()].tolist()
-          if nan_columns:
-            logger.warning(f"NaN найден в колонках {nan_columns} для {symbol}")
-            # Очищаем данные
-            combined_data = combined_data.fillna(method='ffill').fillna(method='bfill')
-            # Если все еще есть NaN (например, в начале), заполняем нулями
-            combined_data = combined_data.fillna(0)
+          # Проверяем и исправляем структуру данных
+          if 'timestamp' not in combined_data.columns and isinstance(combined_data.index, pd.DatetimeIndex):
+            combined_data = combined_data.reset_index()
+            if 'index' in combined_data.columns:
+              combined_data.rename(columns={'index': 'timestamp'}, inplace=True)
 
-          # Проверяем на экстремальные значения
-          numeric_cols = combined_data.select_dtypes(include=[np.number]).columns
-          for col in numeric_cols:
-            max_val = combined_data[col].abs().max()
-            if max_val > 1e10:
-              logger.warning(f"Экстремальные значения в {col}: max={max_val}")
-
-          # Добавляем базовые технические индикаторы если их нет
+          # Добавляем базовые индикаторы
           if 'volume_ratio' not in combined_data.columns:
-            # Рассчитываем volume_ratio
             combined_data['volume_ratio'] = combined_data['volume'] / combined_data['volume'].rolling(window=20,
                                                                                                       min_periods=1).mean()
             combined_data['volume_ratio'] = combined_data['volume_ratio'].fillna(1.0)
 
           if 'rsi' not in combined_data.columns:
-            # Простой RSI
             delta = combined_data['close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
             rs = gain / loss
             combined_data['rsi'] = 100 - (100 / (1 + rs))
-            combined_data['rsi'] = combined_data['rsi'].fillna(50)  # Нейтральное значение
+            combined_data['rsi'] = combined_data['rsi'].fillna(50)
 
           if 'sma_20' not in combined_data.columns:
             combined_data['sma_20'] = combined_data['close'].rolling(window=20, min_periods=1).mean()
@@ -301,32 +318,18 @@ class RLTrainer:
           # Финальная очистка
           combined_data = combined_data.fillna(method='ffill').fillna(method='bfill').fillna(0)
 
-          # # Сохраняем в словарь
-          # all_data[symbol] = combined_data
-
-          # Перед сохранением в словарь убеждаемся, что timestamp есть как колонка
-          if 'timestamp' not in combined_data.columns:
-            logger.error(f"КРИТИЧНО: нет колонки timestamp для {symbol}")
-            logger.error(f"Доступные колонки: {combined_data.columns.tolist()}")
-            continue
-
-          # Убедитесь, что индекс сохранен правильно:
-          if isinstance(combined_data.index, pd.DatetimeIndex) and combined_data.index.name == 'timestamp':
-            # Сохраняем timestamp как колонку, если это индекс
-            combined_data = combined_data.reset_index()
-
-          # Теперь сохраняем
+          # Сохраняем
           all_data[symbol] = combined_data
-
-          # Проверяем структуру данных
-          logger.debug(f"Колонки данных {symbol}: {combined_data.columns.tolist()}")
-          logger.debug(f"Первые строки:\n{combined_data.head()}")
         else:
-          logger.warning(f"⚠️ Нет данных для {symbol}")
-
-      if not all_data:
-        logger.error("Не удалось загрузить данные ни для одного символа")
+          logger.error(f"❌ Не удалось загрузить данные для {symbol}")
         return pd.DataFrame()
+
+      # ДОБАВИТЬ ДИАГНОСТИКУ:
+      logger.info("📊 Диагностика загруженных данных:")
+      for symbol, data in all_data.items():
+        logger.info(f"  {symbol}: {len(data)} свечей")
+        if 'timestamp' in data.columns:
+          logger.info(f"    Период: {data['timestamp'].min()} - {data['timestamp'].max()}")
 
       # Теперь передаем словарь в prepare_data_for_finrl
       df = prepare_data_for_finrl(all_data, list(all_data.keys()))
@@ -692,6 +695,12 @@ class RLTrainer:
         """
         Вызывается на каждом шаге среды
         """
+        # Проверяем последнее вознаграждение
+        if hasattr(self.locals, 'rewards') and len(self.locals['rewards']) > 0:
+          last_reward = self.locals['rewards'][-1]
+          if last_reward != 0:
+            logger.info(f"🎯 Ненулевая награда: {last_reward}")
+
         # Получаем текущую информацию
         if self.num_timesteps % 100 == 0:
           # Получаем текущие наблюдения из среды

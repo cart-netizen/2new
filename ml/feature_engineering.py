@@ -125,6 +125,10 @@ class AdvancedFeatureEngineer:
         Расчет технических индикаторов с обработкой ошибок
         """
         data = df.copy()
+        if df.index.name == 'timestamp' or isinstance(df.index, pd.DatetimeIndex):
+            df = df.reset_index()
+            if 'index' in df.columns and 'timestamp' not in df.columns:
+                df.rename(columns={'index': 'timestamp'}, inplace=True)
         logger.info("Расчет оптимизированного набора технических индикаторов...")
 
         # --- ШАГ 1: АГРЕССИВНАЯ ОЧИСТКА ДАННЫХ ---
@@ -512,8 +516,8 @@ class AdvancedFeatureEngineer:
 
             if 'timestamp' in data.columns:
                 try:
-                    data['hour'] = pd.to_datetime(data['timestamp']).dt.hour
-                    data['day_of_week'] = pd.to_datetime(data['timestamp']).dt.dayofweek
+                    data['hour'] = pd.to_datetime(data['timestamp'], utc=True).dt.hour
+                    data['day_of_week'] = pd.to_datetime(data['timestamp'], utc=True).dt.dayofweek
                     data['is_weekend'] = (data['day_of_week'] >= 5).astype(int)
                 except Exception as e:
                     logger.warning(f"Ошибка при создании временных признаков: {e}")
@@ -584,6 +588,12 @@ class AdvancedFeatureEngineer:
 
         except Exception as e:
             logger.error(f"Общая ошибка при расчете технических индикаторов: {e}")
+            return data
+
+        if data.index.name == 'timestamp' or isinstance(data.index, pd.DatetimeIndex):
+            data = data.reset_index()
+            if 'index' in data.columns and 'timestamp' not in data.columns:
+                data.rename(columns={'index': 'timestamp'}, inplace=True)
 
         return data
 
@@ -1335,6 +1345,19 @@ class AdvancedFeatureEngineer:
             logger.info(f"МТА для {symbol}: Создание основного набора признаков (1H)...")
             features = self._create_primary_features(df_primary)
 
+            # Убедимся, что у основного DataFrame есть колонка 'timestamp'
+            if 'timestamp' not in features.columns:
+                features.reset_index(inplace=True)
+                if 'index' in features.columns and 'timestamp' not in features.columns:
+                    features.rename(columns={'index': 'timestamp'}, inplace=True)
+
+            if 'timestamp' not in features.columns:
+                logger.error(f"Не удалось найти timestamp в основном наборе признаков для {symbol}")
+                return None, None
+
+            features['timestamp'] = pd.to_datetime(features['timestamp'], utc=True)
+            features.sort_values('timestamp', inplace=True)
+
             for tf_name, df_other in all_data_dict.items():
                 if tf_name == '1h' or df_other is None or df_other.empty:
                     continue
@@ -1342,10 +1365,79 @@ class AdvancedFeatureEngineer:
                 logger.info(f"МТА для {symbol}: Расчет и добавление признаков с {tf_name}...")
                 indicators_other_tf = self._calculate_secondary_indicators(df_other, suffix=f"_{tf_name}")
 
-                features = pd.merge_asof(
-                    features.sort_index(), indicators_other_tf.sort_index(),
-                    on='timestamp', direction='backward'
-                )
+                # Убедимся, что у дополнительного DataFrame тоже есть колонка 'timestamp'
+                if 'timestamp' not in indicators_other_tf.columns:
+                    indicators_other_tf.reset_index(inplace=True)
+                    if 'index' in indicators_other_tf.columns and 'timestamp' not in indicators_other_tf.columns:
+                        indicators_other_tf.rename(columns={'index': 'timestamp'}, inplace=True)
+
+                if 'timestamp' not in indicators_other_tf.columns:
+                    logger.error(f"Не удалось найти timestamp в indicators для {symbol} на {tf_name}")
+                    continue
+
+                indicators_other_tf['timestamp'] = pd.to_datetime(indicators_other_tf['timestamp'], utc=True)
+                indicators_other_tf.sort_values('timestamp', inplace=True)
+
+                # ИСПРАВЛЕНИЕ: Обработка индексов для merge_asof
+                try:
+                    # Проверяем структуру данных
+                    if features.index.name == 'timestamp' and indicators_other_tf.index.name == 'timestamp':
+                        # Оба DataFrame имеют timestamp как индекс
+                        features = pd.merge_asof(
+                            features.sort_index(),
+                            indicators_other_tf.sort_index(),
+                            left_index=True,
+                            right_index=True,
+                            direction='backward',
+                            suffixes=('', f'_{tf_name}')
+                        )
+                    else:
+                        # Сбрасываем индексы для merge_asof
+                        features_reset = features.reset_index() if features.index.name else features.copy()
+                        indicators_reset = indicators_other_tf.reset_index() if indicators_other_tf.index.name else indicators_other_tf.copy()
+
+                        # Убеждаемся что timestamp есть как колонка
+                        if 'timestamp' not in features_reset.columns:
+                            if 'index' in features_reset.columns:
+                                features_reset = features_reset.rename(columns={'index': 'timestamp'})
+                            elif hasattr(features.index, 'to_timestamp'):
+                                features_reset['timestamp'] = pd.to_datetime(features.index, utc=True)
+                            else:
+                                logger.error(f"Не удалось найти timestamp в features для {symbol}")
+                                continue
+
+                        if 'timestamp' not in indicators_reset.columns:
+                            if 'index' in indicators_reset.columns:
+                                indicators_reset = indicators_reset.rename(columns={'index': 'timestamp'})
+                            elif hasattr(indicators_other_tf.index, 'to_timestamp'):
+                                indicators_reset['timestamp'] = pd.to_datetime(indicators_other_tf.index, utc=True)
+                            else:
+                                logger.error(f"Не удалось найти timestamp в indicators для {symbol}")
+                                continue
+
+                        # Выполняем merge_asof
+                        merged = pd.merge_asof(
+                            features_reset.sort_values('timestamp'),
+                            indicators_reset.sort_values('timestamp'),
+                            on='timestamp',
+                            direction='backward',
+                            suffixes=('', f'_{tf_name}')
+                        )
+
+                        # Восстанавливаем индекс если нужно
+                        if features.index.name == 'timestamp':
+                            features = merged.set_index('timestamp')
+                        else:
+                            features = merged
+
+                except Exception as e:
+                    logger.error(f"Ошибка при merge_asof для {tf_name}: {e}")
+                    # Продолжаем без этого таймфрейма
+                    continue
+
+            # --- ИСПРАВЛЕНИЕ ЗДЕСЬ: Возвращаем timestamp обратно в индекс ---
+            if 'timestamp' in features.columns:
+                features.set_index('timestamp', inplace=True)
 
             labels = self.create_labels(features)
             return self._final_preparation(features, labels)
@@ -1353,6 +1445,49 @@ class AdvancedFeatureEngineer:
         except Exception as e:
             logger.error(f"Ошибка при создании мультитаймфрейм-признаков для {symbol}: {e}", exc_info=True)
             return None, None
+
+    def safe_merge_asof(left_df: pd.DataFrame, right_df: pd.DataFrame,
+                        on_column: str = 'timestamp', direction: str = 'backward',
+                        suffixes: tuple = ('', '_other')) -> pd.DataFrame:
+        """
+        Безопасное слияние DataFrame с обработкой различных случаев индексов
+        """
+        # Копируем чтобы не изменять оригиналы
+        left = left_df.copy()
+        right = right_df.copy()
+
+        # Обработка индексов
+        if left.index.name == on_column:
+            left = left.reset_index()
+        elif on_column not in left.columns and hasattr(left.index, 'to_series'):
+            left[on_column] = left.index.to_series()
+
+        if right.index.name == on_column:
+            right = right.reset_index()
+        elif on_column not in right.columns and hasattr(right.index, 'to_series'):
+            right[on_column] = right.index.to_series()
+
+        # Проверяем наличие колонки
+        if on_column not in left.columns or on_column not in right.columns:
+            raise ValueError(f"Колонка '{on_column}' отсутствует в одном из DataFrame")
+
+        # Сортируем по timestamp
+        left = left.sort_values(on_column)
+        right = right.sort_values(on_column)
+
+        # Выполняем merge_asof
+        result = pd.merge_asof(
+            left, right,
+            on=on_column,
+            direction=direction,
+            suffixes=suffixes
+        )
+
+        # Восстанавливаем индекс если нужно
+        if left_df.index.name == on_column:
+            result = result.set_index(on_column)
+
+        return result
 
 #-----------------------------------------------
 

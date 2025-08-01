@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from core.enums import SignalType
 
@@ -10,7 +10,7 @@ class TradingSignal:
     price: Optional[float] # Цена генерации сигнала
     confidence: float
     strategy_name: str
-    timestamp: datetime
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -34,7 +34,7 @@ class Order:
     price: Optional[float] # Для Limit ордеров
     quantity: float
     status: str # New, PartiallyFilled, Filled, Canceled, Rejected
-    timestamp: datetime
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     avg_fill_price: Optional[float] = None
     commission: Optional[float] = None
     pnl: Optional[float] = None # Для закрытых позиций

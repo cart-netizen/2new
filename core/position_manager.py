@@ -111,7 +111,7 @@ class PositionManager:
                 'strategy_name': 'Unknown_Recovery',
                 'metadata': {
                   'recovered_from_exchange': True,
-                  'recovery_time': datetime.now().isoformat(),
+                  'recovery_time': datetime.now(timezone.utc).isoformat(),
                   'original_data': position
                 }
               }

@@ -95,10 +95,10 @@ class TradeExecutor:
 
     try:
       # === НОВЫЙ БЛОК: Проверка возраста сигнала ===
-      signal_age = datetime.now() - signal.timestamp
+      signal_age = datetime.now(timezone.utc) - signal.timestamp
 
       # Если сигнал старше 30 минут - проверяем, актуален ли он еще
-      if signal_age.total_seconds() > 180:  # 3 минут
+      if signal_age.total_seconds() > 1800:  # 3 минут
         logger.warning(f"⚠️ Сигнал для {symbol} устарел ({signal_age}). Проверяем актуальность...")
 
         # Получаем текущие данные

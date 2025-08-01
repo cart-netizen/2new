@@ -449,6 +449,9 @@ class BybitTradingEnvironment(FinRLCompatibleEnv):
         'info': info.copy()
       })
 
+    if reward != 0:
+        logger.debug(f"Non-zero reward: {reward}, action: {action}")
+
     return state, reward, terminated, truncated, info
 
   def reset(self, *, seed=None, options=None) -> Tuple[np.ndarray, Dict]:

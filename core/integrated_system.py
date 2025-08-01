@@ -1,7 +1,7 @@
 import asyncio
 import json
 from contextlib import suppress
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 
 import numpy as np
@@ -23,7 +23,7 @@ from shadow_trading.signal_tracker import DatabaseMonitor
 from strategies.GridStrategy import GridStrategy
 from shadow_trading.shadow_trading_manager import ShadowTradingManager, FilterReason
 from ml.feature_engineering import AdvancedFeatureEngineer # Добавить импорт
-from strategies.rl_strategy import RLStrategy # Добавить импорт
+# from strategies.rl_strategy import RLStrategy # Добавить импорт
 
 
 from strategies.dual_thrust_strategy import DualThrustStrategy
@@ -325,91 +325,91 @@ class IntegratedTradingSystem:
     else:
       logger.error("❌ Strategy manager не инициализирован!")
 
-    if self.config.get('rl_trading', {}).get('enabled', False):
-      logger.info("Инициализация RL Trading компонентов...")
-
-      try:
-        from rl.environment import BybitTradingEnvironment
-        from rl.finrl_agent import EnhancedRLAgent
-        from rl.feature_processor import RLFeatureProcessor
-        from rl.portfolio_manager import RLPortfolioManager
-        from rl.reward_functions import RiskAdjustedRewardFunction
-        from rl.shadow_learning import ShadowTradingLearner
-        from strategies.rl_strategy import RLStrategy
-
-        # Создаем процессор признаков
-        self.rl_feature_processor = RLFeatureProcessor(
-          feature_engineer=self.feature_engineer_rl,
-          config=self.config['rl_trading'].get('feature_config', {})
-        )
-
-        # Создаем менеджер портфеля
-        self.rl_portfolio_manager = RLPortfolioManager(
-          initial_capital=self.config['rl_trading'].get('initial_capital', 10000),
-          risk_manager=self.risk_manager,
-          config=self.config['rl_trading'].get('portfolio_config', {})
-        )
-
-        # Создаем функцию вознаграждения
-        reward_function = RiskAdjustedRewardFunction(
-          risk_manager=self.risk_manager,
-          config=self.config['rl_trading'].get('reward_config', {})
-        )
-
-        # Создаем среду (будет инициализирована позже с данными)
-        self.rl_environment = None  # Создается при получении данных
-
-        # Создаем RL агента
-        self.rl_agent = EnhancedRLAgent(
-          environment=None,  # Будет установлено позже
-          ml_model=self.ml_model,
-          anomaly_detector=self.anomaly_detector,
-          volatility_predictor=self.volatility_predictor,
-          algorithm=self.config['rl_trading'].get('algorithm', 'PPO'),
-          config=self.config['rl_trading']
-        )
-
-        # Загружаем предобученную модель если есть
-        model_name = self.config['rl_trading'].get('pretrained_model')
-        if model_name:
-          try:
-            self.rl_agent.load_model(model_name)
-            logger.info(f"Загружена предобученная RL модель: {model_name}")
-          except Exception as e:
-            logger.warning(f"Не удалось загрузить RL модель: {e}")
-
-        # Создаем Shadow Learning компонент
-        if self.shadow_trading_manager:
-          self.shadow_learner = ShadowTradingLearner(
-            rl_agent=self.rl_agent,
-            shadow_trading_manager=self.shadow_trading_manager,
-            feature_processor=self.rl_feature_processor,
-            data_fetcher=self.data_fetcher,
-            config=self.config['rl_trading'].get('shadow_learning_config', {})
-          )
-
-          # Запускаем непрерывное обучение если включено
-          if self.config['rl_trading'].get('continuous_learning', False):
-            asyncio.create_task(self.shadow_learner.continuous_learning_loop())
-            logger.info("Запущен процесс непрерывного обучения RL")
-
-        # Создаем RL стратегию
-        rl_strategy = RLStrategy(
-          rl_agent=self.rl_agent,
-          feature_processor=self.rl_feature_processor,
-          data_fetcher=self.data_fetcher,
-          config=self.config['rl_trading']
-        )
-
-        # Добавляем в менеджер стратегий
-        self.strategy_manager.add_strategy('RL_Strategy', rl_strategy)
-
-        logger.info("✅ RL Trading компоненты успешно инициализированы")
-
-      except Exception as e:
-        logger.error(f"Ошибка инициализации RL Trading: {e}", exc_info=True)
-        # Отключаем RL если инициализация не удалась
-        self.config['rl_trading']['enabled'] = False
+    # if self.config.get('rl_trading', {}).get('enabled', False):
+    #   logger.info("Инициализация RL Trading компонентов...")
+    #
+    #   try:
+    #     from rl.environment import BybitTradingEnvironment
+    #     from rl.finrl_agent import EnhancedRLAgent
+    #     from rl.feature_processor import RLFeatureProcessor
+    #     from rl.portfolio_manager import RLPortfolioManager
+    #     from rl.reward_functions import RiskAdjustedRewardFunction
+    #     from rl.shadow_learning import ShadowTradingLearner
+    #     from strategies.rl_strategy import RLStrategy
+    #
+    #     # Создаем процессор признаков
+    #     self.rl_feature_processor = RLFeatureProcessor(
+    #       feature_engineer=self.feature_engineer_rl,
+    #       config=self.config['rl_trading'].get('feature_config', {})
+    #     )
+    #
+    #     # Создаем менеджер портфеля
+    #     self.rl_portfolio_manager = RLPortfolioManager(
+    #       initial_capital=self.config['rl_trading'].get('initial_capital', 10000),
+    #       risk_manager=self.risk_manager,
+    #       config=self.config['rl_trading'].get('portfolio_config', {})
+    #     )
+    #
+    #     # Создаем функцию вознаграждения
+    #     reward_function = RiskAdjustedRewardFunction(
+    #       risk_manager=self.risk_manager,
+    #       config=self.config['rl_trading'].get('reward_config', {})
+    #     )
+    #
+    #     # Создаем среду (будет инициализирована позже с данными)
+    #     self.rl_environment = None  # Создается при получении данных
+    #
+    #     # Создаем RL агента
+    #     self.rl_agent = EnhancedRLAgent(
+    #       environment=None,  # Будет установлено позже
+    #       ml_model=self.ml_model,
+    #       anomaly_detector=self.anomaly_detector,
+    #       volatility_predictor=self.volatility_predictor,
+    #       algorithm=self.config['rl_trading'].get('algorithm', 'PPO'),
+    #       config=self.config['rl_trading']
+    #     )
+    #
+    #     # Загружаем предобученную модель если есть
+    #     model_name = self.config['rl_trading'].get('pretrained_model')
+    #     if model_name:
+    #       try:
+    #         self.rl_agent.load_model(model_name)
+    #         logger.info(f"Загружена предобученная RL модель: {model_name}")
+    #       except Exception as e:
+    #         logger.warning(f"Не удалось загрузить RL модель: {e}")
+    #
+    #     # Создаем Shadow Learning компонент
+    #     if self.shadow_trading_manager:
+    #       self.shadow_learner = ShadowTradingLearner(
+    #         rl_agent=self.rl_agent,
+    #         shadow_trading_manager=self.shadow_trading_manager,
+    #         feature_processor=self.rl_feature_processor,
+    #         data_fetcher=self.data_fetcher,
+    #         config=self.config['rl_trading'].get('shadow_learning_config', {})
+    #       )
+    #
+    #       # Запускаем непрерывное обучение если включено
+    #       if self.config['rl_trading'].get('continuous_learning', False):
+    #         asyncio.create_task(self.shadow_learner.continuous_learning_loop())
+    #         logger.info("Запущен процесс непрерывного обучения RL")
+    #
+    #     # Создаем RL стратегию
+    #     rl_strategy = RLStrategy(
+    #       rl_agent=self.rl_agent,
+    #       feature_processor=self.rl_feature_processor,
+    #       data_fetcher=self.data_fetcher,
+    #       config=self.config['rl_trading']
+    #     )
+    #
+    #     # Добавляем в менеджер стратегий
+    #     self.strategy_manager.add_strategy('RL_Strategy', rl_strategy)
+    #
+    #     logger.info("✅ RL Trading компоненты успешно инициализированы")
+    #
+    #   except Exception as e:
+    #     logger.error(f"Ошибка инициализации RL Trading: {e}", exc_info=True)
+    #     # Отключаем RL если инициализация не удалась
+    #     self.config['rl_trading']['enabled'] = False
 
     logger.info("IntegratedTradingSystem полностью инициализирован.")
 
@@ -638,7 +638,7 @@ class IntegratedTradingSystem:
         if data_is_fresh:
           try:
             logger.debug(f"Получение ML предсказания для {symbol}...")
-            _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+            ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
 
             if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
               candidate_signals['ML_Enhanced'] = ml_prediction
@@ -875,7 +875,7 @@ class IntegratedTradingSystem:
         # Добавляем информацию о качестве в метаданные
         if hasattr(signal, 'metadata'):
           signal.metadata['quick_quality_check'] = True
-          signal.metadata['quality_timestamp'] = datetime.now().isoformat()
+          signal.metadata['quality_timestamp'] = datetime.now(timezone.utc).isoformat()
     except Exception as quality_error:
           logger.debug(f"Ошибка быстрой оценки качества: {quality_error}")
     #     if hasattr(signal, 'metadata') and signal.metadata:
@@ -933,7 +933,7 @@ class IntegratedTradingSystem:
     pending_signals = self.state_manager.get_pending_signals()
     signal_dict = signal.to_dict()
     signal_dict['metadata']['approved_size'] = final_size
-    signal_dict['metadata']['signal_time'] = datetime.now().isoformat()
+    signal_dict['metadata']['signal_time'] = datetime.now(timezone.utc).isoformat()
     signal_dict['metadata']['position_size_multiplier'] = position_size_multiplier
 
     pending_signals[symbol] = signal_dict
@@ -3327,46 +3327,46 @@ class IntegratedTradingSystem:
         cycle_start_time = datetime.now()
         cycle_count += 1
 
-        # ПРОВЕРКА И ЗАПУСК RL-СТРАТЕГИИ (имеет наивысший приоритет)
-        # Ее можно включать/выключать через конфиг
-        if self.finrl_strategy and self.config.get('general_settings', {}).get('use_finrl_strategy', False):
-
-          # 1. Собираем текущее состояние для всех активных символов
-          portfolio_data_tasks = [self.data_fetcher.get_historical_candles(s, Timeframe.ONE_HOUR, 200) for s in self.active_symbols]
-          portfolio_data_results = await asyncio.gather(*portfolio_data_tasks)
-
-          valid_dfs = []
-          for i, df in enumerate(portfolio_data_results):
-            if df is not None and not df.empty:
-              df['symbol'] = self.active_symbols[i]
-              valid_dfs.append(df)
-
-          if valid_dfs:
-            current_portfolio_state = pd.concat(valid_dfs).sort_values(['timestamp', 'symbol']).reset_index(drop=True)
-
-            # 2. Получаем набор сигналов от RL-агента
-            rl_signals = await self.finrl_strategy.generate_portfolio_actions(current_portfolio_state)
-
-            # 3. ИСПОЛНЯЕМ СИГНАЛЫ, ИСПОЛЬЗУЯ СУЩЕСТВУЮЩИЙ МЕТОД
-            if rl_signals:
-              logger.info(f"Получено {len(rl_signals)} действий от FinRL агента. Отправка на исполнение...")
-
-              execution_tasks = []
-              for signal in rl_signals:
-                # Создаем задачу на исполнение для каждого сигнала
-                task = self.trade_executor.execute_trade(
-                  signal=signal,
-                  symbol=signal.symbol,
-                  quantity=signal.quantity  # Предполагается, что стратегия рассчитала quantity
-                )
-                execution_tasks.append(task)
-
-              # Асинхронно исполняем все ордера
-              await asyncio.gather(*execution_tasks, return_exceptions=True)
-
-            # Пропускаем остальной цикл, так как RL-агент управляет всем портфелем
-          await asyncio.sleep(monitoring_interval)
-          continue
+        # # ПРОВЕРКА И ЗАПУСК RL-СТРАТЕГИИ (имеет наивысший приоритет)
+        # # Ее можно включать/выключать через конфиг
+        # if self.finrl_strategy and self.config.get('general_settings', {}).get('use_finrl_strategy', False):
+        #
+        #   # 1. Собираем текущее состояние для всех активных символов
+        #   portfolio_data_tasks = [self.data_fetcher.get_historical_candles(s, Timeframe.ONE_HOUR, 200) for s in self.active_symbols]
+        #   portfolio_data_results = await asyncio.gather(*portfolio_data_tasks)
+        #
+        #   valid_dfs = []
+        #   for i, df in enumerate(portfolio_data_results):
+        #     if df is not None and not df.empty:
+        #       df['symbol'] = self.active_symbols[i]
+        #       valid_dfs.append(df)
+        #
+        #   if valid_dfs:
+        #     current_portfolio_state = pd.concat(valid_dfs).sort_values(['timestamp', 'symbol']).reset_index(drop=True)
+        #
+        #     # 2. Получаем набор сигналов от RL-агента
+        #     rl_signals = await self.finrl_strategy.generate_portfolio_actions(current_portfolio_state)
+        #
+        #     # 3. ИСПОЛНЯЕМ СИГНАЛЫ, ИСПОЛЬЗУЯ СУЩЕСТВУЮЩИЙ МЕТОД
+        #     if rl_signals:
+        #       logger.info(f"Получено {len(rl_signals)} действий от FinRL агента. Отправка на исполнение...")
+        #
+        #       execution_tasks = []
+        #       for signal in rl_signals:
+        #         # Создаем задачу на исполнение для каждого сигнала
+        #         task = self.trade_executor.execute_trade(
+        #           signal=signal,
+        #           symbol=signal.symbol,
+        #           quantity=signal.quantity  # Предполагается, что стратегия рассчитала quantity
+        #         )
+        #         execution_tasks.append(task)
+        #
+        #       # Асинхронно исполняем все ордера
+        #       await asyncio.gather(*execution_tasks, return_exceptions=True)
+        #
+        #     # Пропускаем остальной цикл, так как RL-агент управляет всем портфелем
+        #   await asyncio.sleep(monitoring_interval)
+        #   continue
 
 
         # Проверка на зависание
@@ -3743,8 +3743,16 @@ class IntegratedTradingSystem:
       signal_data = pending_signals[symbol]
 
       # Проверяем таймаут сигнала (увеличиваем до 4 часов для ожидания лучшего входа)
-      signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
-      signal_age = datetime.now() - signal_time
+      # signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
+      # signal_age = datetime.now(timezone.utc) - signal_time
+      signal_time_str = signal_data['metadata']['signal_time']
+      # Сначала парсим строку в "наивное" время
+      signal_time_naive = datetime.fromisoformat(signal_time_str)
+      # Затем явно указываем, что это время в UTC
+      signal_time = signal_time_naive.replace(tzinfo=timezone.utc)
+
+      signal_age = datetime.now(timezone.utc) - signal_time
+
 
       if signal_age > timedelta(hours=2):
         logger.info(f"Сигнал для {symbol} устарел ({signal_age}), удаляем из очереди")
@@ -4265,8 +4273,12 @@ class IntegratedTradingSystem:
         for symbol, signal_data in list(pending_signals.items()):
           try:
             # Проверяем возраст
-            signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
-            age_hours = (datetime.now() - signal_time).total_seconds() / 3600
+            signal_time_str = signal_data['metadata']['signal_time']
+            signal_time_naive = datetime.fromisoformat(signal_time_str)
+            # Явно указываем, что это время в UTC
+            signal_time = signal_time_naive.replace(tzinfo=timezone.utc)
+
+            age_hours = (datetime.now(timezone.utc) - signal_time).total_seconds() / 3600
 
             # Если старше 4 часов - удаляем
             if age_hours > 1:
@@ -4955,11 +4967,11 @@ class IntegratedTradingSystem:
       logger.info(f"Принудительное обновление данных для {symbol}")
 
       # Получаем свежие данные
-      fresh_data = asyncio.run(data_fetcher.get_recent_data(symbol, timeframe='1h', limit=100))
+      fresh_data = asyncio.run(data_fetcher.get_historical_candles(symbol, timeframe=Timeframe.ONE_HOUR, limit=100))
 
       if fresh_data is not None and not fresh_data.empty:
         # Проверяем свежесть новых данных
-        validation = self.temporal_manager.validate_data_freshness(fresh_data, symbol)
+        validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(fresh_data, symbol)
 
         if validation['is_fresh']:
           logger.info(f"Получены свежие данные для {symbol}")

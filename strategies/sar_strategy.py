@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 from typing import Optional, Dict, Any, List, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 
 from core.schemas import TradingSignal, SignalType
@@ -333,7 +333,7 @@ class StopAndReverseStrategy(BaseStrategy):
                 price=float(data['close'].iloc[-1]),  # Используем price вместо entry_price
                 confidence=confidence,
                 strategy_name=self.strategy_name,
-                timestamp=datetime.now(),
+                timestamp=datetime.now(timezone.utc),
                 metadata={
                     'sar_components': signal_components.__dict__,
                     'components': components.__dict__,
@@ -2212,7 +2212,7 @@ class StopAndReverseStrategy(BaseStrategy):
                     price=current_price,
                     confidence=0.7,  # Базовая уверенность для SAR разворота
                     strategy_name="SAR_Reversal",  # Используем strategy_name вместо strategy
-                    timestamp=datetime.now(),
+                    timestamp=datetime.now(timezone.utc),
                     metadata={
                         'psar_value': float(psar_value),
                         'is_reversal': True,

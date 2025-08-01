@@ -78,5 +78,5 @@ class GridSignal:
     buy_orders: List[GridOrder]
     sell_orders: List[GridOrder]
     strategy_name: str = "Grid_Trading"
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 # --- КОНЕЦ НОВОГО КОДА ---

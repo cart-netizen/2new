@@ -3,7 +3,7 @@
 import pandas as pd
 import pandas_ta as ta
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from core.schemas import TradingSignal
 from core.enums import SignalType
@@ -204,7 +204,7 @@ class IchimokuStrategy(BaseStrategy):
           price=price,
           confidence=confidence,
           strategy_name=self.strategy_name,
-          timestamp=datetime.now()
+          timestamp=datetime.now(timezone.utc)
         )
 
       # --- Логика для сигнала SELL ---
@@ -223,7 +223,7 @@ class IchimokuStrategy(BaseStrategy):
           price=price,
           confidence=confidence,
           strategy_name=self.strategy_name,
-          timestamp=datetime.now()
+          timestamp=datetime.now(timezone.utc)
         )
 
       return None

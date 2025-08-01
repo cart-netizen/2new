@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Any, Tuple, Optional
 
@@ -95,7 +95,24 @@ class TradeExecutor:
 
     try:
       # === НОВЫЙ БЛОК: Проверка возраста сигнала ===
-      signal_age = datetime.now(timezone.utc) - signal.timestamp
+      # ИСПРАВЛЕНИЕ: Безопасный расчет возраста сигнала
+      try:
+        current_time = datetime.now(timezone.utc)
+
+        # Проверяем, есть ли timezone у timestamp сигнала
+        if signal.timestamp.tzinfo is None:
+          # Если нет timezone, предполагаем UTC
+          signal_timestamp_utc = signal.timestamp.replace(tzinfo=timezone.utc)
+        else:
+          # Если есть timezone, приводим к UTC
+          signal_timestamp_utc = signal.timestamp.astimezone(timezone.utc)
+
+        signal_age = current_time - signal_timestamp_utc
+
+      except Exception as tz_error:
+        logger.warning(f"Ошибка обработки timezone для сигнала {symbol}: {tz_error}")
+        # Fallback: предполагаем, что сигнал создан только что
+        signal_age = timedelta(seconds=0)
 
       # Если сигнал старше 30 минут - проверяем, актуален ли он еще
       if signal_age.total_seconds() > 1800:  # 3 минут

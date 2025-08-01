@@ -2,7 +2,7 @@
 import pandas as pd
 import pandas_ta as ta
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from core.schemas import TradingSignal
 from core.enums import SignalType
 from strategies.base_strategy import BaseStrategy
@@ -42,6 +42,6 @@ class MomentumStrategy(BaseStrategy):
     return TradingSignal(
       signal_type=signal_type, symbol=symbol, price=last_price,
       confidence=0.80,  # Высокая уверенность из-за объема
-      strategy_name=self.strategy_name, timestamp=datetime.now(),
+      strategy_name=self.strategy_name, timestamp=datetime.now(timezone.utc),
       stop_loss=stop_loss
     )

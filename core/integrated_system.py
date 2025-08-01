@@ -475,6 +475,30 @@ class IntegratedTradingSystem:
         signal_logger.info(f"АНАЛИЗ: Пропущено - недостаточно данных.")
         return
 
+      # Проверяем свежесть данных и принудительно обновляем если нужно
+      if hasattr(self.enhanced_ml_model, 'temporal_manager'):
+        validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
+        if not validation['is_fresh']:
+          logger.warning(f"🔄 Принудительно обновляем устаревшие данные для {symbol}")
+
+          # Пытаемся получить свежие данные с отключенным кэшем
+          try:
+            fresh_data = await self.data_fetcher.get_historical_candles(
+              symbol, Timeframe.ONE_HOUR, limit=200, use_cache=False
+            )
+            if fresh_data is not None and not fresh_data.empty:
+              # Проверяем, стали ли данные свежими
+              fresh_validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(fresh_data, symbol)
+              if fresh_validation['is_fresh']:
+                logger.info(f"✅ Получены свежие данные для {symbol}")
+                data = fresh_data
+              else:
+                logger.error(f"❌ Даже обновленные данные для {symbol} устарели! Возможна проблема с API биржи.")
+            else:
+              logger.error(f"❌ Не удалось получить обновленные данные для {symbol}")
+          except Exception as e:
+            logger.error(f"Ошибка принудительного обновления данных для {symbol}: {e}")
+
       regime_characteristics = await self.get_market_regime(symbol, force_check=True)
       if not regime_characteristics:
         logger.warning(f"Не удалось определить режим для {symbol}")
@@ -621,31 +645,41 @@ class IntegratedTradingSystem:
       ml_prediction = None
       data_is_fresh = True
 
-      if self.enhanced_ml_model and self.use_enhanced_ml:
-        # Валидация свежести данных
-        if hasattr(self.enhanced_ml_model, 'temporal_manager'):
-          try:
-            data_validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
-            data_is_fresh = data_validation['is_fresh']
+      if hasattr(self.enhanced_ml_model, 'temporal_manager'):
+        validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
+        if not validation['is_fresh']:
+          logger.warning(f"Принудительно обновляем устаревшие данные для {symbol}")
+          fresh_data = await self.data_fetcher.get_historical_candles(
+            symbol, Timeframe.ONE_HOUR, limit=200, use_cache=False
+          )
+          if fresh_data is not None and not fresh_data.empty:
+            data = fresh_data
 
-            if not data_is_fresh and data_validation.get('data_age_minutes', 0) > 30:
-              logger.warning(f"Данные для {symbol} слишком старые, пропускаем ML анализ")
-              data_is_fresh = False
-          except Exception as validation_error:
-            logger.warning(f"Ошибка валидации свежести данных для {symbol}: {validation_error}")
+      # if self.enhanced_ml_model and self.use_enhanced_ml:
+      #   # Валидация свежести данных
+      #   if hasattr(self.enhanced_ml_model, 'temporal_manager'):
+      #     try:
+      #       data_validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
+      #       data_is_fresh = data_validation['is_fresh']
+      #
+      #       if not data_is_fresh and data_validation.get('data_age_minutes', 0) > 30:
+      #         logger.warning(f"Данные для {symbol} слишком старые, пропускаем ML анализ")
+      #         data_is_fresh = False
+      #     except Exception as validation_error:
+      #       logger.warning(f"Ошибка валидации свежести данных для {symbol}: {validation_error}")
 
-        # Получение ML предсказания
-        if data_is_fresh:
-          try:
-            logger.debug(f"Получение ML предсказания для {symbol}...")
-            ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
+      # Получение ML предсказания
+      if data_is_fresh:
+        try:
+          logger.debug(f"Получение ML предсказания для {symbol}...")
+          _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
 
-            if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
-              candidate_signals['ML_Enhanced'] = ml_prediction
-              signal_logger.info(
-                f"🤖 ML_Enhanced: {ml_prediction.signal_type.value}, уверенность: {ml_prediction.confidence:.3f}")
-          except Exception as ml_error:
-            logger.error(f"Ошибка получения ML предсказания для {symbol}: {ml_error}")
+          if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
+            candidate_signals['ML_Enhanced'] = ml_prediction
+            signal_logger.info(
+              f"🤖 ML_Enhanced: {ml_prediction.signal_type.value}, уверенность: {ml_prediction.confidence:.3f}")
+        except Exception as ml_error:
+          logger.error(f"Ошибка получения ML предсказания для {symbol}: {ml_error}")
 
       # --- УРОВЕНЬ 4: КОНСЕНСУСНЫЙ АНАЛИЗ И ПРИНЯТИЕ РЕШЕНИЯ ---
       final_signal: Optional[TradingSignal] = None
@@ -4281,7 +4315,7 @@ class IntegratedTradingSystem:
             age_hours = (datetime.now(timezone.utc) - signal_time).total_seconds() / 3600
 
             # Если старше 4 часов - удаляем
-            if age_hours > 1:
+            if age_hours > 2:
               logger.warning(f"❌ Удаляем устаревший сигнал {symbol} (возраст: {age_hours:.1f}ч)")
               del pending_signals[symbol]
               continue
@@ -4331,8 +4365,15 @@ class IntegratedTradingSystem:
       # Сортируем по приоритету
       signal_list = []
       for symbol, sig_data in pending_signals.items():
-        sig_age = (datetime.now() - datetime.fromisoformat(sig_data['metadata']['signal_time'])).total_seconds() / 3600
+        sig_age_str = sig_data['metadata']['signal_time']
+        sig_age_naive = datetime.fromisoformat(sig_age_str)
+
+        sig_age = sig_age_naive.replace(tzinfo=timezone.utc) if sig_age_naive.tzinfo is None else sig_age_naive
         priority = sig_data['confidence'] * (1 + sig_age * 0.1)
+
+
+        # sig_age = (datetime.now() - datetime.fromisoformat(sig_data['metadata']['signal_time'])).total_seconds() / 3600
+        # priority = sig_data['confidence'] * (1 + sig_age * 0.1)
 
         # Добавляем бонус за срочность
         if sig_data['metadata'].get('needs_urgent_check', False):

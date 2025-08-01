@@ -2057,6 +2057,32 @@ with tabs[0]:
                        f"{(len(df_filtered[df_filtered['profit_loss'] > 0]) / len(df_filtered) * 100):.1f}%")
       col_stat4.metric("Общий PnL", f"${df_filtered['profit_loss'].sum():.2f}")
 
+  st.subheader("⏳ Сигналы в ожидании входа")
+  pending_signals = state_manager.get_pending_signals()
+
+  if pending_signals:
+    pending_list = []
+    for symbol, signal_data in pending_signals.items():
+      meta = signal_data.get('metadata', {})
+      signal_time = datetime.fromisoformat(meta.get('signal_time', '1970-01-01T00:00:00'))
+      age_minutes = (datetime.now() - signal_time).total_seconds() / 60
+
+      pending_list.append({
+        "Символ": symbol,
+        "Тип": signal_data.get('signal_type'),
+        "Стратегия": signal_data.get('strategy_name'),
+        "Уверенность": f"{signal_data.get('confidence', 0):.2f}",
+        "Цена сигнала": signal_data.get('price'),
+        "Текущая цена": meta.get('current_price', np.nan),
+        "Отклонение": f"{meta.get('price_deviation', 0) * 100:.1f}%",
+        "Возраст (мин)": f"{age_minutes:.0f}"
+      })
+
+    df_pending = pd.DataFrame(pending_list)
+    st.dataframe(df_pending, use_container_width=True, hide_index=True)
+  else:
+    st.info("Нет сигналов, ожидающих входа.")
+
 # --- Вкладка: Производительность ---
 with tabs[1]:
   st.header("📈 Производительность стратегий")

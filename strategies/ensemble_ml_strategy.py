@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import joblib
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from pandas.core.interchange.dataframe_protocol import DataFrame
 
@@ -152,7 +152,7 @@ class EnsembleMLStrategy(BaseStrategy):
         price=current_price,
         confidence=confidence,
         strategy_name=self.strategy_name,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
         # stop_loss=stop_loss,
         # take_profit=take_profit
       )
@@ -183,7 +183,7 @@ class EnsembleMLStrategy(BaseStrategy):
 
       current_price = float(data['close'].iloc[-1])
       return TradingSignal(signal_type=signal_type, symbol=symbol, price=current_price, confidence=0.5,
-                           strategy_name="Fallback", timestamp=datetime.now())
+                           strategy_name="Fallback", timestamp=datetime.now(timezone.utc))
     except Exception as e:
       logger.error(f"Ошибка в Fallback стратегии для {symbol}: {e}")
       return None

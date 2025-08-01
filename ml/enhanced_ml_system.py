@@ -4139,6 +4139,13 @@ class TemporalDataManager:
       try:
         current_time_utc = pd.Timestamp.now(tz='UTC')
 
+        # ДОБАВЬТЕ ЭТО ЛОГИРОВАНИЕ ДЛЯ ДИАГНОСТИКИ:
+        logger.debug(f"=== ДИАГНОСТИКА ВОЗРАСТА ДАННЫХ ===")
+        logger.debug(f"Исходный timestamp: {last_timestamp}")
+        logger.debug(f"Тип timestamp: {type(last_timestamp)}")
+        logger.debug(f"Timezone timestamp: {getattr(last_timestamp, 'tz', 'нет')}")
+        logger.debug(f"Текущее время UTC: {current_time_utc}")
+
         # Определяем интервал таймфрейма в минутах
         timeframe_minutes = {
           '1m': 1, '5m': 5, '15m': 15, '30m': 30,
@@ -4206,19 +4213,47 @@ class TemporalDataManager:
           validation_result['warnings'].append("Временные метки не найдены")
           return validation_result
 
-        # 2. КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: ПРИВЕДЕНИЕ К UTC
+        # ЗАМЕНИТЕ блок "2. КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: ПРИВЕДЕНИЕ К UTC":
         try:
-          # Приводим к UTC
-          if hasattr(last_timestamp, 'tz') and last_timestamp.tz is not None:
-            last_timestamp_utc = last_timestamp.astimezone(pd.Timestamp.utcnow().tzinfo)
+          current_time_utc = pd.Timestamp.now(tz='UTC')
+
+          # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Проверяем формат timestamp
+          logger.debug(f"Исходный timestamp: {last_timestamp}, тип: {type(last_timestamp)}")
+
+          # Обработка разных форматов timestamp
+          if isinstance(last_timestamp, (int, float)):
+            # Проверяем, в миллисекундах ли timestamp
+            if last_timestamp > 1e12:
+              last_timestamp_utc = pd.Timestamp(last_timestamp / 1000, unit='s', tz='UTC')
+            else:
+              last_timestamp_utc = pd.Timestamp(last_timestamp, unit='s', tz='UTC')
+          elif isinstance(last_timestamp, str):
+            # Парсим строку и добавляем UTC
+            last_timestamp_utc = pd.Timestamp(last_timestamp, tz='UTC')
           else:
-            last_timestamp_utc = pd.Timestamp(last_timestamp).tz_localize('UTC')
+            # Обрабатываем pandas Timestamp
+            if hasattr(last_timestamp, 'tz') and last_timestamp.tz is not None:
+              last_timestamp_utc = last_timestamp.astimezone(current_time_utc.tz)
+            else:
+              last_timestamp_utc = pd.Timestamp(last_timestamp).tz_localize('UTC')
 
-          # Рассчитываем РЕАЛЬНЫЙ возраст с учетом таймфрейма
-          real_age_minutes = self._calculate_real_data_age(last_timestamp_utc, timeframe)
+          # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Если данные слишком старые, возможно проблема с API
+          time_diff_hours = abs((current_time_utc - last_timestamp_utc).total_seconds() / 3600)
+          if time_diff_hours > 24:
+            logger.warning(f"🚨 КРИТИЧЕСКИ УСТАРЕВШИЕ ДАННЫЕ: {time_diff_hours:.1f} часов!")
+            logger.warning(f"Последний timestamp: {last_timestamp_utc}")
+            logger.warning(f"Текущее время: {current_time_utc}")
+            logger.warning("Возможные причины: проблемы с API биржи, неправильный формат данных, сетевые проблемы")
 
-          # Также сохраняем "сырой" возраст для отладки
-          raw_age_minutes = (pd.Timestamp.now(tz='UTC') - last_timestamp_utc).total_seconds() / 60
+            # Принудительно устанавливаем максимальный возраст
+            real_age_minutes = 999999
+            raw_age_minutes = time_diff_hours * 60
+          else:
+            # Рассчитываем РЕАЛЬНЫЙ возраст с учетом таймфрейма
+            real_age_minutes = self._calculate_real_data_age(last_timestamp_utc, timeframe)
+
+            # Также сохраняем "сырой" возраст для отладки
+            raw_age_minutes = (current_time_utc - last_timestamp_utc).total_seconds() / 60
 
           validation_result['data_age_minutes'] = raw_age_minutes
           validation_result['real_age_minutes'] = real_age_minutes

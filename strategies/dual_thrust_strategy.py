@@ -3,7 +3,7 @@
 import pandas as pd
 import pandas_ta as ta
 from typing import Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 from core.schemas import TradingSignal
 from core.enums import SignalType, Timeframe
@@ -77,7 +77,7 @@ class DualThrustStrategy(BaseStrategy):
         price=current_price,
         confidence=0.75,  # Пробойные сигналы обычно довольно надежны
         strategy_name=self.strategy_name,
-        timestamp=datetime.now(),
+        timestamp=datetime.now(timezone.utc),
         # stop_loss=stop_loss,
         # take_profit=take_profit
       )

@@ -355,11 +355,16 @@ class TradeExecutor:
       for symbol, signal_data in list(pending_signals.items()):
         try:
           # Проверяем возраст
-          signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
-          age_hours = (datetime.now() - signal_time).total_seconds() / 3600
+          # signal_time = datetime.fromisoformat(signal_data['metadata']['signal_time'])
+          # age_hours = (datetime.now() - signal_time).total_seconds() / 3600
+          signal_time_str = signal_data['metadata']['signal_time']
+          signal_time_naive = datetime.fromisoformat(signal_time_str)
+          signal_time = signal_time_naive.replace(
+            tzinfo=timezone.utc) if signal_time_naive.tzinfo is None else signal_time_naive
+          age_hours = (datetime.now(timezone.utc) - signal_time).total_seconds() / 3600
 
           # Если старше 1 часа - удаляем
-          if age_hours > 1:
+          if age_hours > 2:
             logger.warning(f"❌ Удаляем устаревший сигнал {symbol} (возраст: {age_hours:.1f}ч)")
             del pending_signals[symbol]
             continue

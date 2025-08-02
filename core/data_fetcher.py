@@ -1,4 +1,5 @@
 # core/data_fetcher.py
+import time
 
 import pandas as pd
 from typing import Optional, List, Dict, Any
@@ -453,7 +454,30 @@ class DataFetcher:
 
         logger.debug(f"Запрос свечей {symbol} {timeframe.value} с биржи")
 
-        raw_candles = await self.connector.get_kline(symbol, interval, limit=limit)
+        # ДИАГНОСТИЧЕСКИЙ БЛОК - выявляем источник старых данных
+        logger.info(f"🔍 ДИАГНОСТИКА: Запрос свечей для {symbol} {timeframe.value}")
+        logger.info(f"  - Использование кэша: {use_cache}")
+        logger.info(f"  - Ключ кэша: {cache_key}")
+        logger.info(f"  - Лимит свечей: {limit}")
+
+        # Принудительно очищаем кэш для этого символа если данные устарели
+        if use_cache and cache_key in self.candles_cache:
+          cached_data = self.candles_cache[cache_key]
+          if not cached_data.is_valid():
+            logger.info(f"🗑️ Удаляем устаревший кэш для {symbol}")
+            del self.candles_cache[cache_key]
+          else:
+            last_cached_time = cached_data.data['timestamp'].iloc[-1] if not cached_data.data.empty else None
+            logger.info(f"📦 Последнее время в кэше: {last_cached_time}")
+
+        # Логируем параметры для API
+        logger.info(f"📡 Параметры API запроса: symbol={symbol}, interval={interval}, limit={limit}")
+
+        force_fresh = not use_cache  # Если кэш отключен, принуждаем к свежим данным
+
+        logger.debug(f"🔍 Запрос к API: force_fresh={force_fresh}, use_cache={use_cache}")
+
+        raw_candles = await self.connector.get_kline(symbol, interval, limit=limit, force_fresh=force_fresh)
 
         if not raw_candles:
           logger.warning(f"Не получены данные свечей для {symbol} {timeframe.value}")
@@ -491,6 +515,119 @@ class DataFetcher:
       except Exception as e:
         logger.error(f"Ошибка при получении свечей для {symbol}: {e}")
         return pd.DataFrame()
+
+  async def get_absolutely_fresh_candles(self, symbol: str, timeframe: Timeframe, limit: int = 200) -> pd.DataFrame:
+    """Получает гарантированно свежие данные, полностью обходя все кэши"""
+    try:
+      logger.info(f"🔄 ПРИНУДИТЕЛЬНО получаем свежие данные для {symbol}")
+
+      # 1. Очищаем все кэши
+      self.clear_symbol_cache(symbol)
+      if hasattr(self.connector, 'clear_symbol_cache'):
+        self.connector.clear_symbol_cache(symbol)
+
+      # 2. Добавляем случайный параметр для обхода кэша
+      import random
+      random_param = random.randint(1000, 9999)
+
+      # 3. Прямой запрос к API с принудительными параметрами
+      interval = timeframe.value
+      current_time_ms = int(time.time() * 1000)
+
+      # Прямой вызов API без кэширования
+      raw_candles = await self.connector.get_kline(
+        symbol, interval, limit=limit,
+        force_fresh=True,
+        end=current_time_ms,
+        _cache_buster=random_param  # Дополнительный параметр для обхода кэша
+      )
+
+      if not raw_candles:
+        logger.error(f"❌ Не получены СВЕЖИЕ данные для {symbol}")
+        return pd.DataFrame()
+
+      # Преобразуем в DataFrame
+      df = pd.DataFrame(raw_candles)
+      df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
+
+      # Конвертируем типы данных
+      df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms', utc=True)
+
+      for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+      # Сортируем по времени
+      df.sort_values('timestamp', inplace=True)
+
+      # НЕ кэшируем результат!
+      logger.info(f"✅ Получены принудительно свежие данные для {symbol}: {len(df)} свечей")
+
+      # Логируем временной диапазон
+      if not df.empty:
+        first_time = df['timestamp'].iloc[0]
+        last_time = df['timestamp'].iloc[-1]
+        logger.info(f"🔍 Диапазон СВЕЖИХ данных: {first_time} - {last_time}")
+
+      return df
+
+    except Exception as e:
+      logger.error(f"Ошибка при получении принудительно свежих данных для {symbol}: {e}")
+      return pd.DataFrame()
+
+  async def check_symbol_status(self, symbol: str) -> Dict[str, Any]:
+    """Проверяет статус символа на бирже"""
+    try:
+      # Получаем информацию о тикере
+      endpoint = "/v5/market/tickers"
+      params = {'category': 'linear', 'symbol': symbol}
+
+      result = await self.connector._make_request('GET', endpoint, params, use_cache=False)
+
+      if result and result.get('list') and len(result['list']) > 0:
+        ticker = result['list'][0]
+
+        status_info = {
+          'symbol': symbol,
+          'exists': True,
+          'last_price': float(ticker.get('lastPrice', 0)),
+          'volume_24h': float(ticker.get('turnover24h', 0)),
+          'price_change_24h': float(ticker.get('price24hPcnt', 0)),
+          'status': ticker.get('status', 'unknown')
+        }
+
+        # Проверяем, активен ли символ
+        if status_info['volume_24h'] < 1000:  # Очень низкий объем
+          status_info['warning'] = f"Очень низкий объем: {status_info['volume_24h']}"
+
+        logger.info(f"📊 Статус {symbol}: {status_info}")
+        return status_info
+      else:
+        logger.warning(f"❌ Символ {symbol} не найден или не активен")
+        return {'symbol': symbol, 'exists': False, 'error': 'not_found'}
+
+    except Exception as e:
+      logger.error(f"Ошибка проверки статуса {symbol}: {e}")
+      return {'symbol': symbol, 'exists': False, 'error': str(e)}
+
+  def clear_symbol_cache(self, symbol: str):
+    """Очищает кэш для конкретного символа"""
+    try:
+      # Очищаем candles_cache
+      keys_to_remove = [key for key in self.candles_cache.keys() if symbol in key]
+      for key in keys_to_remove:
+        del self.candles_cache[key]
+
+      # Очищаем symbols_cache если содержит этот символ
+      if self.symbols_cache and self.symbols_cache.data and symbol in self.symbols_cache.data:
+        self.symbols_cache = None
+
+      # Очищаем instrument_info_cache
+      if symbol in self.instrument_info_cache:
+        del self.instrument_info_cache[symbol]
+
+      logger.debug(f"🧹 Очищен DataFetcher кэш для {symbol}: {len(keys_to_remove)} записей")
+    except Exception as e:
+      logger.error(f"Ошибка очистки DataFetcher кэша для {symbol}: {e}")
 
   # Метод для предварительной загрузки данных в кэш
   async def preload_cache(self, symbols: List[str], timeframes: List[Timeframe]):

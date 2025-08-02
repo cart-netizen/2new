@@ -118,7 +118,7 @@ class BybitConnector:
 
     # Кэш для повторяющихся запросов
     self.request_cache = {}
-    self.cache_ttl = 5  # 5 секунд для краткосрочного кэша
+    self.cache_ttl = 0  # 5 секунд для краткосрочного кэша
     self.exchange = None
 
     # Статистика
@@ -306,7 +306,14 @@ class BybitConnector:
         cached_result = self._check_cache(cache_key)
         if cached_result is not None:
           self.request_stats[f"{endpoint} (cached)"] += 1
+          logger.debug(f"📦 Используется кэш для {endpoint}")
           return cached_result
+      elif not use_cache:
+        # НОВОЕ: Если use_cache=False, принудительно удаляем любой существующий кэш
+        temp_cache_key = f"{endpoint}:{json.dumps(params or {}, sort_keys=True)}"
+        if temp_cache_key in self.request_cache:
+          del self.request_cache[temp_cache_key]
+          logger.debug(f"🗑️ Принудительно удален кэш для {endpoint}")
 
       # Применяем rate limiting для конкретного endpoint
       endpoint_limiter = self.endpoint_limiters.get(endpoint, self.rate_limiter)
@@ -418,17 +425,99 @@ class BybitConnector:
     params = {'category': 'linear'}
     return (await self._make_request('GET', endpoint, params, use_cache=True) or {}).get('list', [])
 
-  async def get_kline(self, symbol: str, interval: str, limit: int = 200, **kwargs) -> List[List[Any]]:
-    """Получает исторические данные K-line (свечи) с кэшированием"""
+  async def get_kline(self, symbol: str, interval: str, limit: int = 200, force_fresh: bool = False, **kwargs) -> List[
+    List[Any]]:
+    """Получает исторические данные K-line (свечи) с опцией принудительного обновления"""
     endpoint = "/v5/market/kline"
+
+    # ИСПРАВЛЕНИЕ: Добавляем параметры времени для получения свежих данных
+    current_time_ms = int(time.time() * 1000)
+
     params = {
       'category': 'linear',
       'symbol': symbol,
       'interval': interval,
       'limit': limit,
+      'end': current_time_ms,  # Явно указываем конечное время
       **kwargs
     }
-    return (await self._make_request('GET', endpoint, params, use_cache=True) or {}).get('list', [])
+
+    # НОВОЕ: Определяем использование кэша
+    use_cache_setting = not force_fresh  # Если force_fresh=True, то use_cache=False
+
+    # ДИАГНОСТИКА: Логируем запрос
+    logger.info(f"🔍 ДЕТАЛЬНЫЙ API запрос для {symbol}:")
+    logger.info(f"  - Endpoint: {endpoint}")
+    logger.info(f"  - Параметры: {params}")
+    logger.info(f"  - use_cache: {use_cache_setting}")
+    logger.info(f"  - force_fresh: {force_fresh}")
+
+    # НОВОЕ: Если force_fresh, очищаем кэш для этого символа
+    if force_fresh:
+      self.clear_symbol_cache(symbol)
+
+    result = await self._make_request('GET', endpoint, params, use_cache=use_cache_setting)
+
+    # ДЕТАЛЬНАЯ ДИАГНОСТИКА ОТВЕТА API
+    if result:
+      logger.info(f"🔍 ДЕТАЛЬНЫЙ ответ API для {symbol}:")
+      logger.info(f"  - Получен result: {type(result)}")
+
+      if result.get('list'):
+        api_data = result['list']
+        logger.info(f"  - Количество свечей: {len(api_data)}")
+
+        # Анализируем первые и последние свечи
+        if api_data:
+          first_candle = api_data[0]
+          last_candle = api_data[-1]
+
+          first_timestamp = int(first_candle[0])
+          last_timestamp = int(last_candle[0])
+
+          first_time = datetime.fromtimestamp(first_timestamp / 1000)
+          last_time = datetime.fromtimestamp(last_timestamp / 1000)
+
+          logger.info(f"  - ПЕРВАЯ свеча: {first_time} (timestamp: {first_timestamp})")
+          logger.info(f"  - ПОСЛЕДНЯЯ свеча: {last_time} (timestamp: {last_timestamp})")
+
+          # Проверяем логику сортировки - Bybit возвращает от новых к старым
+          if first_timestamp > last_timestamp:
+            logger.info("  - ✅ Данные отсортированы правильно (новые -> старые)")
+            fresh_age = (datetime.now() - first_time).total_seconds() / 3600
+            logger.info(f"  - 🕐 Возраст самых свежих данных: {fresh_age:.1f} часов")
+          else:
+            logger.warning("  - ❌ Данные отсортированы неправильно!")
+      else:
+        logger.warning(f"  - ❌ API вернул result без 'list'")
+    else:
+      logger.error(f"❌ API вернул None для {symbol}")
+
+    return (result or {}).get('list', [])
+
+  def clear_all_cache(self):
+      """Полностью очищает весь кэш"""
+      try:
+        cache_cleared = len(self.request_cache)
+        self.request_cache.clear()
+        logger.info(f"🧹 Очищен request_cache коннектора: {cache_cleared} записей")
+      except Exception as e:
+        logger.error(f"Ошибка очистки кэша коннектора: {e}")
+
+  def clear_symbol_cache(self, symbol: str):
+    """Очищает кэш для конкретного символа"""
+    try:
+      keys_to_remove = []
+      for key in self.request_cache.keys():
+        if symbol in key:
+          keys_to_remove.append(key)
+
+      for key in keys_to_remove:
+        del self.request_cache[key]
+
+      logger.debug(f"🧹 Очищен кэш коннектора для {symbol}: {len(keys_to_remove)} записей")
+    except Exception as e:
+      logger.error(f"Ошибка очистки кэша для {symbol}: {e}")
 
   async def get_kline_batch(self, symbols: List[str], interval: str, limit: int = 200) -> dict[str, BaseException]:
     """Получает свечи для нескольких символов параллельно"""

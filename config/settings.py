@@ -9,10 +9,11 @@ BYBIT_API_URL = "https://api.bybit.com"
 
 # Настройки для подключения к Bybit
 BYBIT_BASE_URL_MAINNET = "https://api.bybit.com"
-BYBIT_BASE_URL_TESTNET = "https://api-testnet.bybit.com" # Для тестирования
+# BYBIT_BASE_URL_TESTNET = "https://api-testnet.bybit.com" # Для тестирования
 # Выбираем, какой URL использовать (например, на основе переменной окружения)
 USE_TESTNET = os.getenv("USE_TESTNET", "true").lower() == "False"
-BYBIT_API_URL = BYBIT_BASE_URL_TESTNET if USE_TESTNET else BYBIT_BASE_URL_MAINNET
+# BYBIT_API_URL = BYBIT_BASE_URL_TESTNET if USE_TESTNET else BYBIT_BASE_URL_MAINNET
+BYBIT_API_URL = BYBIT_BASE_URL_MAINNET if USE_TESTNET else BYBIT_BASE_URL_MAINNET
 
 # Путь к базе данных
 DATABASE_PATH = "trading_data.db"

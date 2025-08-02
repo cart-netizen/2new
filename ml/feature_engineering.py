@@ -1233,10 +1233,22 @@ class AdvancedFeatureEngineer:
         """
         Создает ПОЛНЫЙ набор признаков для основного таймфрейма (1H).
         """
+        logger.debug(f"🔍 _create_primary_features: входные данные shape={data.shape}")
+        if not data.empty:
+            logger.debug(
+                f"🔍 Первый timestamp: {data.index[0] if hasattr(data.index, 'to_timestamp') else data['timestamp'].iloc[0] if 'timestamp' in data.columns else 'нет timestamp'}")
+            logger.debug(f"🔍 Первая цена close: {data['close'].iloc[0]}")
+            logger.debug(f"🔍 Последняя цена close: {data['close'].iloc[-1]}")
         df = self._add_volume_spike_feature(data.copy())
 
         # Сначала вызываем вашу основную функцию расчета
         df_with_indicators = self.calculate_technical_indicators(df)
+
+        if not df_with_indicators.empty:
+            logger.debug(f"🔍 После обработки _create_primary_features:")
+            logger.debug(f"🔍 Форма результата: {df_with_indicators.shape}")
+            logger.debug(f"🔍 Первая цена close после обработки: {df_with_indicators['close'].iloc[0]}")
+            logger.debug(f"🔍 Последняя цена close после обработки: {df_with_indicators['close'].iloc[-1]}")
 
         # --- ДОБАВЛЯЕМ НЕДОСТАЮЩИЙ AROON ---
         try:
@@ -1356,7 +1368,9 @@ class AdvancedFeatureEngineer:
                 return None, None
 
             features['timestamp'] = pd.to_datetime(features['timestamp'], utc=True)
-            features.sort_values('timestamp', inplace=True)
+            features.sort_values('timestamp', ascending=False, inplace=True)
+            logger.debug(
+                f"🔍 После сортировки: первый timestamp = {features['timestamp'].iloc[0]}, последний = {features['timestamp'].iloc[-1]}")
 
             for tf_name, df_other in all_data_dict.items():
                 if tf_name == '1h' or df_other is None or df_other.empty:

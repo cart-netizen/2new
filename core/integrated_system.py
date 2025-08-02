@@ -460,6 +460,32 @@ class IntegratedTradingSystem:
 
     return stats
 
+  async def _force_clear_stale_cache(self, symbol: str):
+    """Принудительно очищает устаревший кэш для символа"""
+    try:
+      logger.info(f"🧹 Принудительная очистка ВСЕХ кэшей для {symbol}")
+
+      # 1. Очищаем кэш в data_fetcher
+      if hasattr(self.data_fetcher, 'candles_cache'):
+        keys_to_remove = [key for key in self.data_fetcher.candles_cache.keys() if symbol in key]
+        for key in keys_to_remove:
+          del self.data_fetcher.candles_cache[key]
+          logger.debug(f"🗑️ Удален candles_cache: {key}")
+
+      # 2. Очищаем кэш в connector
+      if hasattr(self.data_fetcher.connector, 'clear_symbol_cache'):
+        self.data_fetcher.connector.clear_symbol_cache(symbol)
+
+      # 3. НОВОЕ: Принудительно очищаем весь request_cache
+      if hasattr(self.data_fetcher.connector, 'clear_all_cache'):
+        self.data_fetcher.connector.clear_all_cache()
+        logger.info("🧹 Полностью очищен request_cache коннектора")
+
+      logger.info(f"✅ ВСЕ кэши для {symbol} полностью очищены")
+
+    except Exception as e:
+      logger.error(f"Ошибка очистки кэша для {symbol}: {e}")
+
   async def _monitor_symbol_for_entry_enhanced(self, symbol: str):
     """
     УЛУЧШЕННАЯ ВЕРСИЯ с мультистратегийным консенсусом и полной интеграцией
@@ -469,35 +495,79 @@ class IntegratedTradingSystem:
 
     try:
       # --- УРОВЕНЬ 1: ДЕТЕКЦИЯ РЕЖИМА РЫНКА И ВАЛИДАЦИЯ ---
-      htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=300)
+      htf_data = await self.data_fetcher.get_historical_candles(symbol, Timeframe.ONE_HOUR, limit=300, use_cache=False)
       if htf_data.empty or len(htf_data) < 100:
         logger.debug(f"Недостаточно данных для анализа {symbol}")
         signal_logger.info(f"АНАЛИЗ: Пропущено - недостаточно данных.")
         return
 
       # Проверяем свежесть данных и принудительно обновляем если нужно
+      # Проверяем свежесть данных и принудительно обновляем если нужно
       if hasattr(self.enhanced_ml_model, 'temporal_manager'):
         validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
         if not validation['is_fresh']:
           logger.warning(f"🔄 Принудительно обновляем устаревшие данные для {symbol}")
 
+          # НОВОЕ: Сначала полностью очищаем кэш
+          await self._force_clear_stale_cache(symbol)
+
+          # НОВОЕ: Сначала проверяем статус символа
+          logger.info(f"🔍 Проверяем статус символа {symbol} на бирже...")
+          symbol_status = await self.data_fetcher.check_symbol_status(symbol)
+
+          if not symbol_status.get('exists', False):
+            logger.error(f"❌ Символ {symbol} не существует или деактивирован на бирже!")
+            logger.error(f"Статус: {symbol_status}")
+            return  # Пропускаем этот символ
+
+          if symbol_status.get('volume_24h', 0) < 10000:  # Очень низкий объем
+            logger.warning(f"⚠️ Символ {symbol} имеет очень низкий объем: {symbol_status.get('volume_24h', 0)}")
+            logger.warning("Возможно, символ неактивен или делистинован")
+
+          logger.info(f"✅ Символ {symbol} активен, продолжаем обновление данных...")
+
           # Пытаемся получить свежие данные с отключенным кэшем
           try:
-            fresh_data = await self.data_fetcher.get_historical_candles(
-              symbol, Timeframe.ONE_HOUR, limit=200, use_cache=False
-            )
-            if fresh_data is not None and not fresh_data.empty:
-              # Проверяем, стали ли данные свежими
-              fresh_validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(fresh_data, symbol)
-              if fresh_validation['is_fresh']:
-                logger.info(f"✅ Получены свежие данные для {symbol}")
-                data = fresh_data
+            # Несколько попыток получить свежие данные
+            for attempt in range(3):
+              logger.info(f"🔄 Попытка {attempt + 1}/3 получить свежие данные для {symbol}")
+
+              fresh_data = await self.data_fetcher.get_absolutely_fresh_candles(
+                symbol, Timeframe.ONE_HOUR, limit=200
+              )
+
+              if fresh_data is not None and not fresh_data.empty:
+                # Проверяем, стали ли данные свежими
+                fresh_validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(fresh_data, symbol)
+
+                # Логируем последний timestamp полученных данных
+                last_timestamp = fresh_data['timestamp'].iloc[-1] if 'timestamp' in fresh_data.columns else \
+                fresh_data.index[-1]
+                logger.info(f"🔍 Последний timestamp в свежих данных: {last_timestamp}")
+
+                if fresh_validation['is_fresh']:
+                  logger.info(f"✅ Получены свежие данные для {symbol}")
+                  data = fresh_data
+                  break
+                else:
+                  logger.warning(f"❌ Попытка {attempt + 1}: данные все еще устарели для {symbol}")
+                  if attempt < 2:  # Не последняя попытка
+                    await asyncio.sleep(2)  # Пауза перед повторной попыткой
               else:
-                logger.error(f"❌ Даже обновленные данные для {symbol} устарели! Возможна проблема с API биржи.")
+                logger.error(f"❌ Попытка {attempt + 1}: не удалось получить данные для {symbol}")
             else:
-              logger.error(f"❌ Не удалось получить обновленные данные для {symbol}")
+              # Если все попытки провалились
+              logger.error(f"🚨 КРИТИЧЕСКАЯ ПРОБЛЕМА: Не удалось получить свежие данные для {symbol} после 3 попыток!")
+              logger.error("Возможные причины:")
+              logger.error("1. Проблемы с подключением к Bybit API")
+              logger.error("2. Неправильные настройки API (testnet/mainnet)")
+              logger.error("3. Ограничения API или бан IP")
+              logger.error("4. Проблемы с интернет-соединением")
+              return  # Пропускаем этот символ
+
           except Exception as e:
             logger.error(f"Ошибка принудительного обновления данных для {symbol}: {e}")
+            return  # Пропускаем этот символ при ошибке
 
       regime_characteristics = await self.get_market_regime(symbol, force_check=True)
       if not regime_characteristics:
@@ -3875,11 +3945,19 @@ class IntegratedTradingSystem:
         elif recent_movement == 'strong_adverse':  # Сильное неблагоприятное движение
           size_multiplier = 0.5
 
+        current_price_for_signal = ltf_data['close'].iloc[0]  # Берем ПЕРВУЮ (самую свежую) цену
+        logger.debug(f"🔍 ДИАГНОСТИКА ЦЕНЫ СИГНАЛА для {symbol}:")
+        logger.debug(f"  - Цена для сигнала: {current_price_for_signal}")
+        logger.debug(
+          f"  - Первый timestamp в данных: {ltf_data.index[0] if hasattr(ltf_data.index, 'to_timestamp') else ltf_data['timestamp'].iloc[0] if 'timestamp' in ltf_data.columns else 'нет timestamp'}")
+        logger.debug(f"  - Размер данных: {len(ltf_data)}")
+
         # Восстанавливаем полный TradingSignal
         trading_signal = TradingSignal(
           signal_type=signal_type,
           symbol=signal_data['symbol'],
-          price=current_price,  # Используем текущую цену!
+          # price=current_price,  # Используем текущую цену!
+          price=current_price_for_signal,  # Используем текущую цену!
           confidence=signal_data['confidence'],
           strategy_name=signal_data['strategy_name'],
           timestamp=datetime.now(),  # Обновляем время

@@ -16,7 +16,7 @@ from contextlib import suppress
 import json
 import plotly.graph_objects as go
 import plotly.express as px
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import logging
 
 # from shadow_trading.dashboard_extensions import (
@@ -2064,8 +2064,14 @@ with tabs[0]:
     pending_list = []
     for symbol, signal_data in pending_signals.items():
       meta = signal_data.get('metadata', {})
-      signal_time = datetime.fromisoformat(meta.get('signal_time', '1970-01-01T00:00:00'))
-      age_minutes = (datetime.now() - signal_time).total_seconds() / 60
+      signal_time_str = meta.get('signal_time', '1970-01-01T00:00:00')
+      signal_time_naive = datetime.fromisoformat(signal_time_str)
+      # Проверяем, есть ли timezone, если нет - добавляем UTC
+      if signal_time_naive.tzinfo is None:
+        signal_time = signal_time_naive.replace(tzinfo=timezone.utc)
+      else:
+        signal_time = signal_time_naive
+      age_minutes = (datetime.now(timezone.utc) - signal_time).total_seconds() / 60
 
       pending_list.append({
         "Символ": symbol,

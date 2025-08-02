@@ -4196,16 +4196,59 @@ class TemporalDataManager:
         # 1. Ищем временные метки
         if 'timestamp' in data.columns:
           try:
-            last_timestamp = pd.to_datetime(data['timestamp'].iloc[-1])
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: API Bybit возвращает данные от новых к старым
+            # Поэтому берем ПЕРВЫЙ элемент (самый свежий), а не последний
+
+            # Сначала проверяем порядок сортировки
+            if len(data) >= 2:
+              first_ts = pd.to_datetime(data['timestamp'].iloc[0])
+              second_ts = pd.to_datetime(data['timestamp'].iloc[1])
+
+              if first_ts > second_ts:
+                # Данные отсортированы от новых к старым (правильно для Bybit)
+                last_timestamp = first_ts  # Берем первый = самый свежий
+                logger.debug(f"🔍 Данные отсортированы новые→старые, берем первый: {first_ts}")
+              else:
+                # Данные отсортированы от старых к новым
+                last_timestamp = pd.to_datetime(data['timestamp'].iloc[-1])  # Берем последний
+                logger.debug(f"🔍 Данные отсортированы старые→новые, берем последний: {last_timestamp}")
+            else:
+              # Если только одна запись
+              last_timestamp = pd.to_datetime(data['timestamp'].iloc[-1])
+
+            logger.debug(f"🔍 Выбранный timestamp для проверки свежести: {last_timestamp}")
+
           except Exception as e:
             logger.debug(f"Ошибка парсинга timestamp колонки: {e}")
 
         if last_timestamp is None and hasattr(data.index, 'to_pydatetime'):
           try:
-            last_timestamp = data.index[-1]
-            if hasattr(last_timestamp, 'to_pydatetime'):
-              last_timestamp = last_timestamp.to_pydatetime()
+            # КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: проверяем сортировку индекса
+            if len(data) >= 2:
+              first_idx = data.index[0]
+              second_idx = data.index[1]
+
+              # Конвертируем в datetime для сравнения
+              first_dt = pd.to_datetime(first_idx) if not isinstance(first_idx, pd.Timestamp) else first_idx
+              second_dt = pd.to_datetime(second_idx) if not isinstance(second_idx, pd.Timestamp) else second_idx
+
+              if first_dt > second_dt:
+                # Индекс отсортирован от новых к старым
+                target_timestamp = data.index[0]  # Берем первый = самый свежий
+                logger.debug(f"🔍 Индекс отсортирован новые→старые, берем первый: {first_dt}")
+              else:
+                # Индекс отсортирован от старых к новым
+                target_timestamp = data.index[-1]  # Берем последний = самый свежий
+                logger.debug(f"🔍 Индекс отсортирован старые→новые, берем последний: {second_dt}")
+            else:
+              target_timestamp = data.index[-1]
+
+            if hasattr(target_timestamp, 'to_pydatetime'):
+              last_timestamp = target_timestamp.to_pydatetime()
             last_timestamp = pd.Timestamp(last_timestamp)
+
+            logger.debug(f"🔍 Выбранный timestamp из индекса: {last_timestamp}")
+
           except Exception as e:
             logger.debug(f"Ошибка использования индекса как timestamp: {e}")
 

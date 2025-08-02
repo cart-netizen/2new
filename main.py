@@ -2,6 +2,10 @@ import asyncio
 import os
 import signal  # Для корректной остановки
 import sys
+from datetime import datetime
+
+import aiohttp
+
 from utils.logging_config import setup_logging, get_logger, setup_signal_logger
 from config import settings
 from core.integrated_system import IntegratedTradingSystem
@@ -70,13 +74,57 @@ async def generate_shadow_trading_reports(trading_system):
 logger = get_logger(__name__)
 
 
+async def test_api_connectivity():
+  """Тестирует подключение к API и свежесть данных"""
+  try:
+    logger.info("🧪 Тестирование подключения к Bybit API...")
+
+    # Создаем временный connector для теста
+    from core.bybit_connector import BybitConnector
+    test_connector = BybitConnector()
+
+    # Тестируем получение времени сервера
+    server_time_url = test_connector.base_url + "/v5/market/time"
+    async with aiohttp.ClientSession() as session:
+      async with session.get(server_time_url) as response:
+        if response.status == 200:
+          data = await response.json()
+          server_timestamp = int(data['result']['timeNano']) // 1_000_000
+          server_time = datetime.fromtimestamp(server_timestamp / 1000)
+          logger.info(f"✅ Время сервера Bybit: {server_time}")
+        else:
+          logger.error(f"❌ Ошибка получения времени сервера: {response.status}")
+
+    # Тестируем получение свечей для BTCUSDT
+    test_candles = await test_connector.get_kline("BTCUSDT", "60", limit=5)
+    if test_candles:
+      last_candle_timestamp = int(test_candles[0][0])
+      last_candle_time = datetime.fromtimestamp(last_candle_timestamp / 1000)
+      current_time = datetime.now()
+      age_hours = (current_time - last_candle_time).total_seconds() / 3600
+
+      logger.info(f"✅ Последняя свеча BTCUSDT: {last_candle_time}")
+      logger.info(f"✅ Возраст данных: {age_hours:.1f} часов")
+
+      if age_hours > 2:
+        logger.error(f"🚨 API возвращает устаревшие данные! Возраст: {age_hours:.1f} часов")
+      else:
+        logger.info("✅ API возвращает свежие данные")
+    else:
+      logger.error("❌ Не удалось получить тестовые данные")
+
+    await test_connector.close()
+
+  except Exception as e:
+    logger.error(f"Ошибка тестирования API: {e}")
+
 async def main():
   setup_logging(settings.LOG_LEVEL)
   setup_signal_logger()
   logger.info("Запуск торгового бота с оптимизациями...")
 
   trading_system = IntegratedTradingSystem()
-
+  await test_api_connectivity()
   # Обработчик для корректного завершения
   # loop = asyncio.get_event_loop()
   stop_event = asyncio.Event()

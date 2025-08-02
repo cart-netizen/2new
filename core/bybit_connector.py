@@ -6,10 +6,11 @@ import time
 import json
 import asyncio
 from collections import defaultdict
-from datetime import datetime
-from typing import Optional, List, Dict, Any
-
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any, Tuple
+from core.circuit_breaker import circuit_breaker, TradingCircuitBreakers, CircuitBreakerOpenError
 import aiohttp
+import pandas as pd
 from aiolimiter import AsyncLimiter
 
 from config import api_keys, settings
@@ -25,6 +26,7 @@ class RequestBatcher:
     self.batch_window = batch_window  # Окно батчинга в секундах
     self.pending_requests = defaultdict(list)
     self.batch_locks = defaultdict(asyncio.Lock)
+
 
   async def add_request(self, request_type: str, params: Dict) -> Any:
     """Добавляет запрос в батч и возвращает результат"""
@@ -124,6 +126,8 @@ class BybitConnector:
     # Статистика
     self.request_stats = defaultdict(int)
     self.error_stats = defaultdict(int)
+
+    TradingCircuitBreakers.setup_trading_breakers()
 
     if not self.api_key or "YOUR_" in self.api_key:
       logger.warning("API ключ Bybit не настроен или используется ключ-заглушка.")
@@ -284,6 +288,7 @@ class BybitConnector:
   #         logger.error(f"Непредвиденная ошибка в _make_request при запросе к {endpoint}: {e}", exc_info=True)
   #         return None
   #
+
   async def _make_request(
         self,
         method: str,
@@ -446,11 +451,11 @@ class BybitConnector:
     use_cache_setting = not force_fresh  # Если force_fresh=True, то use_cache=False
 
     # ДИАГНОСТИКА: Логируем запрос
-    logger.info(f"🔍 ДЕТАЛЬНЫЙ API запрос для {symbol}:")
-    logger.info(f"  - Endpoint: {endpoint}")
-    logger.info(f"  - Параметры: {params}")
-    logger.info(f"  - use_cache: {use_cache_setting}")
-    logger.info(f"  - force_fresh: {force_fresh}")
+    # logger.info(f"🔍 ДЕТАЛЬНЫЙ API запрос для {symbol}:")
+    # logger.info(f"  - Endpoint: {endpoint}")
+    # logger.info(f"  - Параметры: {params}")
+    # logger.info(f"  - use_cache: {use_cache_setting}")
+    # logger.info(f"  - force_fresh: {force_fresh}")
 
     # НОВОЕ: Если force_fresh, очищаем кэш для этого символа
     if force_fresh:
@@ -460,12 +465,12 @@ class BybitConnector:
 
     # ДЕТАЛЬНАЯ ДИАГНОСТИКА ОТВЕТА API
     if result:
-      logger.info(f"🔍 ДЕТАЛЬНЫЙ ответ API для {symbol}:")
-      logger.info(f"  - Получен result: {type(result)}")
+      # logger.info(f"🔍 ДЕТАЛЬНЫЙ ответ API для {symbol}:")
+      # logger.info(f"  - Получен result: {type(result)}")
 
       if result.get('list'):
         api_data = result['list']
-        logger.info(f"  - Количество свечей: {len(api_data)}")
+        # logger.info(f"  - Количество свечей: {len(api_data)}")
 
         # Анализируем первые и последние свечи
         if api_data:
@@ -477,15 +482,15 @@ class BybitConnector:
 
           first_time = datetime.fromtimestamp(first_timestamp / 1000)
           last_time = datetime.fromtimestamp(last_timestamp / 1000)
-
-          logger.info(f"  - ПЕРВАЯ свеча: {first_time} (timestamp: {first_timestamp})")
-          logger.info(f"  - ПОСЛЕДНЯЯ свеча: {last_time} (timestamp: {last_timestamp})")
+          #Диагностика
+          # logger.info(f"  - ПЕРВАЯ свеча: {first_time} (timestamp: {first_timestamp})")
+          # logger.info(f"  - ПОСЛЕДНЯЯ свеча: {last_time} (timestamp: {last_timestamp})")
 
           # Проверяем логику сортировки - Bybit возвращает от новых к старым
           if first_timestamp > last_timestamp:
-            logger.info("  - ✅ Данные отсортированы правильно (новые -> старые)")
+            # logger.info("  - ✅ Данные отсортированы правильно (новые -> старые)")
             fresh_age = (datetime.now() - first_time).total_seconds() / 3600
-            logger.info(f"  - 🕐 Возраст самых свежих данных: {fresh_age:.1f} часов")
+            # logger.info(f"  - 🕐 Возраст самых свежих данных: {fresh_age:.1f} часов")
           else:
             logger.warning("  - ❌ Данные отсортированы неправильно!")
       else:
@@ -571,7 +576,9 @@ class BybitConnector:
     result = await self._make_request('POST', endpoint, params, treat_as_success=[110043], use_cache=False)
     return result is not None
 
-  async def place_order(self, **kwargs) -> Optional[Dict]:
+
+  async def place_order(self, symbol: str, side: str, order_type: str, quantity: float, price: float = None,
+                        time_in_force: str = "GTC", **kwargs):
     """Размещает ордер"""
     endpoint = "/v5/order/create"
     params = {'category': 'linear', **kwargs}
@@ -662,3 +669,454 @@ class BybitConnector:
       except Exception as e:
         logger.error(f"Ошибка получения тикера {symbol}: {e}")
         return None
+
+  async def get_multiple_tickers(self, symbols: List[str], batch_size: int = 50) -> Dict[str, dict]:
+    """
+    Получает тикеры для нескольких символов батчами
+    Значительно быстрее чем отдельные запросы
+    """
+    results = {}
+
+    # Разбиваем на батчи для обхода лимитов API
+    for i in range(0, len(symbols), batch_size):
+      batch = symbols[i:i + batch_size]
+
+      try:
+        # Bybit позволяет получать до 50 тикеров за раз
+        params = {
+          'category': 'linear',
+          'symbol': ','.join(batch)  # Символы через запятую
+        }
+
+        response = await self._make_request('GET', '/v5/market/tickers', params)
+
+        if response and 'result' in response and 'list' in response['result']:
+          for ticker_data in response['result']['list']:
+            symbol = ticker_data.get('symbol')
+            if symbol:
+              results[symbol] = ticker_data
+
+        # Небольшая пауза между батчами
+        if len(symbols) > batch_size:
+          await asyncio.sleep(0.1)
+
+      except Exception as e:
+        logger.error(f"Ошибка получения батча тикеров: {e}")
+
+        # Fallback: получаем по одному
+        for symbol in batch:
+          try:
+            ticker = await self.get_ticker(symbol)
+            if ticker:
+              results[symbol] = ticker
+            await asyncio.sleep(0.05)
+          except Exception as ex:
+            logger.error(f"Ошибка получения тикера {symbol}: {ex}")
+
+    logger.debug(f"Получено {len(results)} тикеров из {len(symbols)} запрошенных")
+    return results
+
+  async def get_multiple_positions(self, symbols: List[str] = None) -> Dict[str, dict]:
+    """
+    Получает позиции для нескольких символов одним запросом
+    """
+    try:
+      params = {
+        'category': 'linear',
+        'settleCoin': 'USDT'
+      }
+
+      # Если указаны конкретные символы, можем их добавить в фильтр
+      if symbols and len(symbols) <= 200:  # Лимит Bybit
+        params['symbol'] = ','.join(symbols)
+
+      response = await self._make_request('GET', '/v5/position/list', params)
+
+      results = {}
+      if response and 'result' in response and 'list' in response['result']:
+        for position_data in response['result']['list']:
+          symbol = position_data.get('symbol')
+          if symbol:
+            results[symbol] = position_data
+
+      return results
+
+    except Exception as e:
+      logger.error(f"Ошибка получения множественных позиций: {e}")
+      return {}
+
+  async def get_multiple_balances(self, coins: List[str] = None) -> Dict[str, dict]:
+    """
+    Получает балансы для нескольких монет одним запросом
+    """
+    try:
+      params = {
+        'accountType': 'UNIFIED'
+      }
+
+      if coins:
+        params['coin'] = ','.join(coins[:200])  # Лимит API
+
+      response = await self._make_request('GET', '/v5/account/wallet-balance', params)
+
+      results = {}
+      if response and 'result' in response and 'list' in response['result']:
+        for account_data in response['result']['list']:
+          if 'coin' in account_data:
+            for coin_data in account_data['coin']:
+              coin = coin_data.get('coin')
+              if coin:
+                results[coin] = coin_data
+
+      return results
+
+    except Exception as e:
+      logger.error(f"Ошибка получения множественных балансов: {e}")
+      return {}
+
+  async def set_multiple_leverages(self, leverage_settings: Dict[str, float], batch_size: int = 10) -> Dict[str, bool]:
+    """
+    Устанавливает плечо для нескольких символов
+
+    Args:
+        leverage_settings: {symbol: leverage_value}
+        batch_size: размер батча для параллельной обработки
+
+    Returns:
+        {symbol: success_status}
+    """
+    results = {}
+
+    # Разбиваем на батчи для параллельной обработки
+    symbols = list(leverage_settings.keys())
+
+    for i in range(0, len(symbols), batch_size):
+      batch_symbols = symbols[i:i + batch_size]
+      batch_tasks = []
+
+      for symbol in batch_symbols:
+        leverage = leverage_settings[symbol]
+        task = self._set_single_leverage(symbol, leverage)
+        batch_tasks.append(task)
+
+      # Выполняем батч параллельно
+      batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+      # Обрабатываем результаты
+      for idx, result in enumerate(batch_results):
+        symbol = batch_symbols[idx]
+        results[symbol] = not isinstance(result, Exception)
+
+        if isinstance(result, Exception):
+          logger.error(f"Ошибка установки плеча для {symbol}: {result}")
+
+      # Пауза между батчами
+      if i + batch_size < len(symbols):
+        await asyncio.sleep(0.2)
+
+    success_count = sum(results.values())
+    logger.info(f"Плечо установлено для {success_count}/{len(symbols)} символов")
+
+    return results
+
+  async def _set_single_leverage(self, symbol: str, leverage: float) -> bool:
+    """Устанавливает плечо для одного символа"""
+    try:
+      params = {
+        'category': 'linear',
+        'symbol': symbol,
+        'buyLeverage': str(leverage),
+        'sellLeverage': str(leverage)
+      }
+
+      response = await self._make_request('POST', '/v5/position/set-leverage', params)
+      return response is not None
+
+    except Exception as e:
+      logger.error(f"Ошибка установки плеча {leverage}x для {symbol}: {e}")
+      return False
+
+  async def batch_place_orders(self, orders: List[Dict], batch_size: int = 5) -> Dict[str, dict]:
+    """
+    Размещает множественные ордера батчами
+
+    Args:
+        orders: список словарей с параметрами ордеров
+        batch_size: размер батча
+
+    Returns:
+        {order_id: result}
+    """
+    results = {}
+
+    for i in range(0, len(orders), batch_size):
+      batch = orders[i:i + batch_size]
+      batch_tasks = []
+
+      for order_params in batch:
+        task = self.place_order(**order_params)
+        batch_tasks.append(task)
+
+      # Выполняем батч параллельно
+      batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+      # Обрабатываем результаты
+      for idx, result in enumerate(batch_results):
+        order_key = f"order_{i + idx}"
+
+        if isinstance(result, Exception):
+          results[order_key] = {'error': str(result)}
+          logger.error(f"Ошибка размещения ордера {order_key}: {result}")
+        else:
+          results[order_key] = result
+
+      # Пауза между батчами для соблюдения rate limits
+      if i + batch_size < len(orders):
+        await asyncio.sleep(0.3)
+
+    return results
+
+  async def get_symbols_info_batch(self, symbols: List[str], batch_size: int = 50) -> Dict[str, dict]:
+    """
+    Получает информацию об инструментах батчами
+    """
+    results = {}
+
+    # Можем получить всю информацию сразу, а затем отфильтровать
+    try:
+      params = {
+        'category': 'linear'
+      }
+
+      response = await self._make_request('GET', '/v5/market/instruments-info', params)
+
+      if response and 'result' in response and 'list' in response['result']:
+        # Создаем индекс для быстрого поиска
+        all_instruments = {item['symbol']: item for item in response['result']['list']}
+
+        # Возвращаем только запрошенные символы
+        for symbol in symbols:
+          if symbol in all_instruments:
+            results[symbol] = all_instruments[symbol]
+
+      logger.debug(f"Получена информация для {len(results)}/{len(symbols)} символов")
+
+      return results
+
+    except Exception as e:
+      logger.error(f"Ошибка получения информации об инструментах: {e}")
+      return {}
+
+  async def get_batch_klines(self, symbol_timeframe_pairs: List[Tuple[str, str]], limit: int = 200) -> Dict[
+    str, pd.DataFrame]:
+    """
+    Получает исторические данные для множественных пар символ-таймфрейм
+
+    Args:
+        symbol_timeframe_pairs: [(symbol, timeframe), ...]
+        limit: количество свечей
+
+    Returns:
+        {f"{symbol}_{timeframe}": DataFrame}
+    """
+    results = {}
+    batch_size = 3  # Консервативный размер для исторических данных
+
+    for i in range(0, len(symbol_timeframe_pairs), batch_size):
+      batch = symbol_timeframe_pairs[i:i + batch_size]
+      batch_tasks = []
+
+      for symbol, timeframe in batch:
+        task = self._get_single_klines(symbol, timeframe, limit)
+        batch_tasks.append(task)
+
+      # Выполняем батч параллельно
+      batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+      # Обрабатываем результаты
+      for idx, result in enumerate(batch_results):
+        symbol, timeframe = batch[idx]
+        key = f"{symbol}_{timeframe}"
+
+        if isinstance(result, Exception):
+          logger.error(f"Ошибка получения данных для {key}: {result}")
+          results[key] = None
+        else:
+          results[key] = result
+
+      # Пауза между батчами
+      if i + batch_size < len(symbol_timeframe_pairs):
+        await asyncio.sleep(0.5)
+
+    successful = sum(1 for v in results.values() if v is not None)
+    logger.info(f"Получены исторические данные для {successful}/{len(symbol_timeframe_pairs)} пар")
+
+    return results
+
+  async def _get_single_klines(self, symbol: str, timeframe: str, limit: int) -> Optional[pd.DataFrame]:
+    """Получает данные для одной пары символ-таймфрейм"""
+    try:
+      params = {
+        'category': 'linear',
+        'symbol': symbol,
+        'interval': timeframe,
+        'limit': limit
+      }
+
+      response = await self._make_request('GET', '/v5/market/kline', params)
+
+      if not response or 'result' not in response:
+        return None
+
+      data = response['result'].get('list', [])
+      if not data:
+        return None
+
+      # Конвертируем в DataFrame
+      df = pd.DataFrame(data, columns=[
+        'timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'
+      ])
+
+      # Обрабатываем типы данных
+      df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms')
+      for col in ['open', 'high', 'low', 'close', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+
+      df = df.sort_values('timestamp').reset_index(drop=True)
+      return df
+
+    except Exception as e:
+      logger.error(f"Ошибка получения данных {symbol}_{timeframe}: {e}")
+      return None
+
+  # Метод для оптимизации rate limits
+  async def optimize_request_rate(self):
+    """
+    Оптимизирует скорость запросов на основе текущих лимитов
+    """
+    try:
+      # Получаем информацию о rate limits от API
+      response = await self._make_request('GET', '/v5/market/time')
+
+      if response:
+        # Анализируем заголовки ответа для понимания текущих лимитов
+        current_time = datetime.now()
+
+        # Адаптируем семафор на основе доступных лимитов
+        if hasattr(self, 'semaphore'):
+          # Если нет ошибок - можем увеличить параллелизм
+          if not hasattr(self, '_recent_errors'):
+            self._recent_errors = 0
+
+          if self._recent_errors == 0 and self.semaphore._value < 20:
+            # Увеличиваем лимит
+            self.semaphore = asyncio.Semaphore(min(20, self.semaphore._value + 2))
+            logger.debug("Увеличен лимит параллельных запросов")
+
+          elif self._recent_errors > 3 and self.semaphore._value > 5:
+            # Уменьшаем лимит при ошибках
+            self.semaphore = asyncio.Semaphore(max(5, self.semaphore._value - 2))
+            logger.warning("Уменьшен лимит параллельных запросов из-за ошибок")
+
+        # Сбрасываем счетчик ошибок каждые 5 минут
+        if not hasattr(self, '_last_error_reset'):
+          self._last_error_reset = current_time
+
+        if (current_time - self._last_error_reset).seconds > 300:
+          self._recent_errors = 0
+          self._last_error_reset = current_time
+
+    except Exception as e:
+      logger.error(f"Ошибка оптимизации rate limits: {e}")
+
+  # Обертка для добавления метрик к существующим методам
+  async def _make_request_with_metrics(self, method: str, endpoint: str, params: dict = None, data: dict = None):
+    """
+    Обертка для _make_request с добавлением метрик производительности
+    """
+    start_time = time.time()
+
+    try:
+      result = await self._make_request(method, endpoint, params, data)
+
+      # Записываем успешный запрос
+      response_time = (time.time() - start_time) * 1000  # в миллисекундах
+
+      if not hasattr(self, 'request_stats'):
+        self.request_stats = {
+          'total_requests': 0,
+          'successful_requests': 0,
+          'failed_requests': 0,
+          'avg_response_time_ms': 0,
+          'last_24h_requests': []
+        }
+
+      self.request_stats['total_requests'] += 1
+      self.request_stats['successful_requests'] += 1
+
+      # Обновляем среднее время ответа
+      current_avg = self.request_stats['avg_response_time_ms']
+      total = self.request_stats['total_requests']
+      self.request_stats['avg_response_time_ms'] = (current_avg * (total - 1) + response_time) / total
+
+      # Добавляем в статистику за 24 часа
+      self.request_stats['last_24h_requests'].append({
+        'timestamp': datetime.now(),
+        'endpoint': endpoint,
+        'response_time_ms': response_time,
+        'success': True
+      })
+
+      # Очищаем старые записи (старше 24 часов)
+      cutoff_time = datetime.now() - timedelta(hours=24)
+      self.request_stats['last_24h_requests'] = [
+        req for req in self.request_stats['last_24h_requests']
+        if req['timestamp'] > cutoff_time
+      ]
+
+      return result
+
+    except Exception as e:
+      # Записываем неудачный запрос
+      if hasattr(self, 'request_stats'):
+        self.request_stats['failed_requests'] += 1
+
+      if hasattr(self, '_recent_errors'):
+        self._recent_errors += 1
+
+      logger.error(f"Ошибка запроса {method} {endpoint}: {e}")
+      raise
+
+  def get_performance_stats(self) -> Dict:
+    """
+    Возвращает статистику производительности коннектора
+    """
+    if not hasattr(self, 'request_stats'):
+      return {}
+
+    stats = self.request_stats.copy()
+
+    # Добавляем дополнительную аналитику
+    if stats['last_24h_requests']:
+      recent_requests = stats['last_24h_requests']
+
+      # Группируем по часам
+      hourly_stats = defaultdict(int)
+      for req in recent_requests:
+        hour = req['timestamp'].replace(minute=0, second=0, microsecond=0)
+        hourly_stats[hour] += 1
+
+      stats['hourly_distribution'] = dict(hourly_stats)
+
+      # Статистика успешности
+      successful = sum(1 for req in recent_requests if req.get('success', False))
+      stats['success_rate_24h'] = (successful / len(recent_requests)) * 100
+
+      # Топ эндпоинты
+      endpoint_counts = defaultdict(int)
+      for req in recent_requests:
+        endpoint_counts[req['endpoint']] += 1
+
+      stats['top_endpoints'] = sorted(endpoint_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    return stats

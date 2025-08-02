@@ -41,7 +41,7 @@ class MeanReversionStrategy(BaseStrategy):
       last_price = data['close'].iloc[-1]  # Fallback для одной записи
 
 
-    last_price = data['close'].iloc[-1]
+
     lower_band = bbands.iloc[-1, 0]  # BBL_20_2.0
     upper_band = bbands.iloc[-1, 2]  # BBU_20_2.0
 

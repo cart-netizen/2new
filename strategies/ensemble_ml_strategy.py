@@ -142,7 +142,24 @@ class EnsembleMLStrategy(BaseStrategy):
 
       # --- КОРРЕКТНЫЙ РАСЧЕТ STOP-LOSS И TAKE-PROFIT ---
       # --- ФИНАЛЬНЫЙ БЛОК РАСЧЕТА STOP-LOSS И TAKE-PROFIT НА ОСНОВЕ ROI ---
-      current_price = float(data['close'].iloc[-1])
+      if len(data) >= 2:
+        # Проверяем порядок сортировки данных
+        if 'timestamp' in data.columns:
+          first_ts = data['timestamp'].iloc[0]
+          second_ts = data['timestamp'].iloc[1]
+          is_desc_order = first_ts > second_ts
+        elif hasattr(data.index, 'to_timestamp'):
+          first_idx = data.index[0]
+          second_idx = data.index[1]
+          is_desc_order = first_idx > second_idx
+        else:
+          is_desc_order = False
+
+        # Берем правильную цену
+        current_price = float(data['close'].iloc[0] if is_desc_order else data['close'].iloc[-1])
+        logger.debug(f"🔍 Ensemble ML: цена для сигнала = {current_price}, порядок desc = {is_desc_order}")
+      else:
+        current_price = float(data['close'].iloc[-1])
       stop_loss, take_profit = 0.0, 0.0
 
 

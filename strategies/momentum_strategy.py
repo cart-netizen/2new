@@ -44,7 +44,7 @@ class MomentumStrategy(BaseStrategy):
     else:
       last_price = data['close'].iloc[-1]  # Fallback для одной записи
 
-    last_price = data['close'].iloc[-1]
+
 
     signal_type = SignalType.HOLD
 

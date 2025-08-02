@@ -54,7 +54,7 @@ class AdvancedFeatureEngineer:
     ДИАГНОСТИЧЕСКАЯ ВЕРСИЯ: Ищет, какая из вспомогательных функций
     возвращает DataFrame неправильного размера.
     """
-    logger.info("=" * 20 + " ЗАПУСК ДИАГНОСТИЧЕСКОЙ ВЕРСИИ " + "=" * 20)
+    # logger.info("=" * 20 + " ЗАПУСК ДИАГНОСТИЧЕСКОЙ ВЕРСИИ " + "=" * 20)
 
     # --- Шаг 0: Дедупликация индекса (оставляем как лучшую практику) ---
     if not data.index.is_unique:
@@ -64,18 +64,19 @@ class AdvancedFeatureEngineer:
 
     original_index = data.index.copy()
     original_length = len(data)
-    logger.info(f"Ожидаемый размер для всех наборов признаков: {original_length} строк.")
+    # logger.info(f"Ожидаемый размер для всех наборов признаков: {original_length} строк.")
 
     base_columns = ['open', 'high', 'low', 'close', 'volume']
     available_base = [col for col in base_columns if col in data.columns]
     base_data = data[available_base].copy() if available_base else None
-    if base_data is not None:
-      logger.info(f"Проверка базовых данных: shape={base_data.shape}. ✅")
+    # if base_data is not None:
+    #   pass
+      # logger.info(f"Проверка базовых данных: shape={base_data.shape}. ✅")
 
     # --- Вспомогательная функция для проверки и логирования ---
     def check_and_add(feature_df, name, collection):
       if feature_df is not None and not feature_df.empty:
-        logger.info(f"--> Проверка набора '{name}': shape={feature_df.shape}")
+        # logger.info(f"--> Проверка набора '{name}': shape={feature_df.shape}")
         if len(feature_df) != original_length:
           logger.error(f"!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
           logger.error(f"!!! НАЙДЕНА ПРОБЛЕМА: НЕПРАВИЛЬНЫЙ РАЗМЕР В '{name}' !!!")
@@ -104,7 +105,7 @@ class AdvancedFeatureEngineer:
       check_and_add(self._create_memory_features(data), 'memory', all_features_list)
 
       # --- Финальное объединение ---
-      logger.info("Все наборы признаков сгенерированы. Начинаю финальное объединение...")
+      # logger.info("Все наборы признаков сгенерированы. Начинаю финальное объединение...")
       all_parts = [base_data] + all_features_list if base_data is not None else all_features_list
 
       if all_parts:
@@ -112,7 +113,7 @@ class AdvancedFeatureEngineer:
       else:
         features = pd.DataFrame(index=original_index)
 
-      logger.info(f"Финальный размер DataFrame после concat: {features.shape}")
+      # logger.info(f"Финальный размер DataFrame после concat: {features.shape}")
       return features
 
     except Exception as e:

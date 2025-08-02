@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 import asyncio
 from collections import defaultdict
-
+from core.adaptive_cache import get_cache_manager
 from core.bybit_connector import BybitConnector
 from utils.logging_config import get_logger
 from config import trading_params
@@ -429,6 +429,11 @@ class DataFetcher:
 
     self.cache_misses += 1
 
+    cache_manager = get_cache_manager()
+    cached_data = await cache_manager.get(symbol, 'candles', timeframe=timeframe.value, limit=limit)
+    if cached_data is not None:
+      return cached_data
+
     # Используем блокировку для предотвращения дублирующих запросов
     async with self.fetch_locks[cache_key]:
       # Проверяем еще раз после получения блокировки
@@ -455,27 +460,27 @@ class DataFetcher:
         logger.debug(f"Запрос свечей {symbol} {timeframe.value} с биржи")
 
         # ДИАГНОСТИЧЕСКИЙ БЛОК - выявляем источник старых данных
-        logger.info(f"🔍 ДИАГНОСТИКА: Запрос свечей для {symbol} {timeframe.value}")
-        logger.info(f"  - Использование кэша: {use_cache}")
-        logger.info(f"  - Ключ кэша: {cache_key}")
-        logger.info(f"  - Лимит свечей: {limit}")
+        # logger.info(f"🔍 ДИАГНОСТИКА: Запрос свечей для {symbol} {timeframe.value}")
+        # logger.info(f"  - Использование кэша: {use_cache}")
+        # logger.info(f"  - Ключ кэша: {cache_key}")
+        # logger.info(f"  - Лимит свечей: {limit}")
 
         # Принудительно очищаем кэш для этого символа если данные устарели
         if use_cache and cache_key in self.candles_cache:
           cached_data = self.candles_cache[cache_key]
           if not cached_data.is_valid():
-            logger.info(f"🗑️ Удаляем устаревший кэш для {symbol}")
+            # logger.info(f"🗑️ Удаляем устаревший кэш для {symbol}")
             del self.candles_cache[cache_key]
           else:
             last_cached_time = cached_data.data['timestamp'].iloc[-1] if not cached_data.data.empty else None
             logger.info(f"📦 Последнее время в кэше: {last_cached_time}")
 
         # Логируем параметры для API
-        logger.info(f"📡 Параметры API запроса: symbol={symbol}, interval={interval}, limit={limit}")
+        # logger.info(f"📡 Параметры API запроса: symbol={symbol}, interval={interval}, limit={limit}")
 
         force_fresh = not use_cache  # Если кэш отключен, принуждаем к свежим данным
 
-        logger.debug(f"🔍 Запрос к API: force_fresh={force_fresh}, use_cache={use_cache}")
+        # logger.debug(f"🔍 Запрос к API: force_fresh={force_fresh}, use_cache={use_cache}")
 
         raw_candles = await self.connector.get_kline(symbol, interval, limit=limit, force_fresh=force_fresh)
 
@@ -509,6 +514,9 @@ class DataFetcher:
         # Периодически чистим устаревший кэш
         if self.total_requests % 100 == 0:
           asyncio.create_task(asyncio.to_thread(self._clean_expired_cache))
+
+        if df is not None and not df.empty:
+          await cache_manager.set(symbol, 'candles', df, timeframe=timeframe.value, limit=limit)
 
         return df
 

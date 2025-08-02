@@ -9,6 +9,7 @@ import pandas as pd
 import pandas_ta as ta
 import sys
 from core.adaptive_strategy_selector import AdaptiveStrategySelector
+from core.circuit_breaker import get_circuit_breaker_manager
 from core.indicators import crossover_series, crossunder_series
 from core.market_regime_detector import MarketRegimeDetector, RegimeCharacteristics, MarketRegime
 from core.signal_processor import SignalProcessor
@@ -24,8 +25,8 @@ from strategies.GridStrategy import GridStrategy
 from shadow_trading.shadow_trading_manager import ShadowTradingManager, FilterReason
 from ml.feature_engineering import AdvancedFeatureEngineer # Добавить импорт
 # from strategies.rl_strategy import RLStrategy # Добавить импорт
-
-
+from connectors.bybit_websocket import BybitWebSocketClient, WebSocketDataManager
+from core.adaptive_cache import get_cache_manager
 from strategies.dual_thrust_strategy import DualThrustStrategy
 from strategies.ensemble_ml_strategy import EnsembleMLStrategy
 from strategies.ichimoku_strategy import IchimokuStrategy
@@ -324,6 +325,10 @@ class IntegratedTradingSystem:
         logger.info("✅ Все ожидаемые стратегии зарегистрированы")
     else:
       logger.error("❌ Strategy manager не инициализирован!")
+
+    self.ws_client = None
+    self.ws_data_manager = None
+    self.ws_enabled = self.config.get('general_settings', {}).get('enable_websocket', True)
 
     # if self.config.get('rl_trading', {}).get('enabled', False):
     #   logger.info("Инициализация RL Trading компонентов...")
@@ -718,7 +723,7 @@ class IntegratedTradingSystem:
       if hasattr(self.enhanced_ml_model, 'temporal_manager'):
         validation = self.enhanced_ml_model.temporal_manager.validate_data_freshness(htf_data, symbol)
         if not validation['is_fresh']:
-          logger.warning(f"Принудительно обновляем устаревшие данные для {symbol}")
+          # logger.warning(f"Принудительно обновляем устаревшие данные для {symbol}")
           fresh_data = await self.data_fetcher.get_historical_candles(
             symbol, Timeframe.ONE_HOUR, limit=200, use_cache=False
           )
@@ -1539,6 +1544,41 @@ class IntegratedTradingSystem:
     # Загружаем конфиг
     config_manager = ConfigManager()  # Убедитесь, что ConfigManager импортирован
     self.config = config_manager.load_config()
+
+    self.cache_manager = get_cache_manager()
+    logger.info("Адаптивный кэш инициализирован")
+
+    # Инициализируем WebSocket если включен
+    if self.ws_enabled:
+      try:
+        self.ws_client = BybitWebSocketClient(
+          api_key=self.connector.api_key,
+          api_secret=self.connector.api_secret,
+          testnet=self.config.get('testnet', False)
+        )
+
+        self.ws_data_manager = WebSocketDataManager(self.ws_client)
+
+        # Подключаемся к WebSocket
+        await self.ws_client.connect()
+
+        # Подписываемся на данные focus символов
+        if self.focus_list_symbols:
+          await self.ws_client.subscribe_tickers(self.focus_list_symbols[:20])  # Ограничиваем для начала
+
+        # Подписываемся на приватные данные
+        await self.ws_client.subscribe_positions()
+        await self.ws_client.subscribe_orders()
+        await self.ws_client.subscribe_executions()
+
+        # Запускаем heartbeat
+        asyncio.create_task(self.ws_client.start_heartbeat())
+
+        logger.info("✅ WebSocket интеграция завершена")
+
+      except Exception as e:
+        logger.error(f"Ошибка инициализации WebSocket: {e}")
+        self.ws_enabled = False
 
     mode = self.config.get('general_settings', {}).get('symbol_selection_mode', 'dynamic')
     blacklist = self.config.get('general_settings', {}).get('symbol_blacklist', [])
@@ -3395,6 +3435,12 @@ class IntegratedTradingSystem:
         }
       })
 
+      if hasattr(self, 'cache_manager'):
+        self.cache_manager.update_focus_symbols(self.focus_list_symbols)
+
+      if self.ws_enabled:
+        await self.update_websocket_subscriptions()
+
       logger.info(f"✅ Focus list обновлен: {len(self.focus_list_symbols)} символов")
 
     except Exception as e:
@@ -3407,7 +3453,9 @@ class IntegratedTradingSystem:
     logger.info("Запуск оптимизированного цикла мониторинга...")
 
     monitoring_interval = self.config.get('general_settings', {}).get('monitoring_interval_seconds', 45)
-    batch_size = 5  # Обрабатываем символы батчами
+    batch_size = 15  # Увеличиваем размер батча для лучшей производительности
+    focus_interval = monitoring_interval // 3  # Приоритетные символы проверяем в 3 раза чаще
+    full_scan_cycles = 0  # Счетчик для полного сканирования
 
     # Счетчики для отслеживания
     cycle_count = 0
@@ -3486,17 +3534,29 @@ class IntegratedTradingSystem:
           if (datetime.now() - self.last_focus_update).total_seconds() > update_interval * 60:
             await self.update_focus_list()
 
-        # Проверяем приоритетные символы чаще
-        if self.focus_list_symbols and cycle_count % 3 == 1:  # Каждый 3-й цикл
-          logger.debug(f"🎯 Быстрая проверка {len(self.focus_list_symbols)} приоритетных символов")
+        # ПРИОРИТЕТНАЯ ОБРАБОТКА: focus_list каждый цикл, но с батчингом
+        if self.focus_list_symbols:
+          logger.debug(f"🎯 Приоритетная обработка {len(self.focus_list_symbols)} символов")
 
-          # Обрабатываем focus list символы
-          for symbol in self.focus_list_symbols:
-            if not self.is_running:
-              break
+          # Обрабатываем focus list батчами
+          focus_batch_size = 8
+          focus_tasks = []
 
-            await self._monitor_symbol_for_entry_enhanced(symbol)
-            await asyncio.sleep(1)
+          for i in range(0, len(self.focus_list_symbols), focus_batch_size):
+            batch = self.focus_list_symbols[i:i + focus_batch_size]
+
+            for symbol in batch:
+              if not self.is_running:
+                break
+
+              task = self._monitor_symbol_for_entry_enhanced(symbol)
+              focus_tasks.append(task)
+
+            # Выполняем батч параллельно
+            if focus_tasks:
+              await asyncio.gather(*focus_tasks, return_exceptions=True)
+              focus_tasks = []
+              await asyncio.sleep(0.5)  # Короткая пауза между батчами
 
         # Обновляем баланс один раз за цикл
         await self.update_account_balance()
@@ -3514,46 +3574,51 @@ class IntegratedTradingSystem:
         if cycle_count % 3 == 0:
           await self.position_manager.monitor_sar_indicators()
 
+        # ОПТИМИЗИРОВАННОЕ СКАНИРОВАНИЕ: полный список только каждые 5 циклов
+        full_scan_cycles += 1
+        if full_scan_cycles >= 5:  # Полное сканирование каждые 5 циклов (примерно раз в 4 минуты)
+          full_scan_cycles = 0
+          logger.info(f"🔍 Полное сканирование {len(self.active_symbols)} символов")
 
-        # Разбиваем символы на батчи для параллельной обработки
-        for i in range(0, len(self.active_symbols), batch_size):
-          if not self.is_running:
-            break
+          # Разбиваем символы на увеличенные батчи
+          for i in range(0, len(self.active_symbols), batch_size):
+            if not self.is_running:
+              break
 
-          batch = self.active_symbols[i:i + batch_size]
+            batch = self.active_symbols[i:i + batch_size]
 
-          # Параллельная обработка батча символов
-          tasks = []
+            # Параллельная обработка батча символов
+            tasks = []
 
-          # 1. Проверяем ожидающие сигналы
-          for symbol in batch:
-            if symbol in self.state_manager.get_pending_signals():
-              tasks.append(self._check_pending_signal_for_entry(symbol))
+            # 1. Проверяем ожидающие сигналы
+            for symbol in batch:
+              if symbol in self.state_manager.get_pending_signals():
+                tasks.append(self._check_pending_signal_for_entry(symbol))
 
-          # 2. Мониторим открытые позиции
-          for symbol in batch:
-            if symbol in self.position_manager.open_positions:
-              tasks.append(self.position_manager.monitor_single_position(symbol))
+            # 2. Мониторим открытые позиции
+            for symbol in batch:
+              if symbol in self.position_manager.open_positions:
+                tasks.append(self.position_manager.monitor_single_position(symbol))
 
-          # 3. Ищем новые сигналы для символов без позиций
-          for symbol in batch:
-            if (symbol not in self.position_manager.open_positions and
-                symbol not in self.state_manager.get_pending_signals()):
-              # Используем enhanced версию если модели загружены
-              if self.enhanced_ml_model and self.anomaly_detector:
-                tasks.append(self._monitor_symbol_for_entry_enhanced(symbol))
-              # else:
-              #   tasks.append(self._monitor_symbol_for_entry(symbol))
+            # 3. Ищем новые сигналы для символов без позиций
+            for symbol in batch:
+              if (symbol not in self.position_manager.open_positions and
+                  symbol not in self.state_manager.get_pending_signals()):
+                # Используем enhanced версию если модели загружены
+                if self.enhanced_ml_model and self.anomaly_detector:
+                  tasks.append(self._monitor_symbol_for_entry_enhanced(symbol))
+                # else:
+                #   tasks.append(self._monitor_symbol_for_entry(symbol))
 
 
-          # Выполняем все задачи батча параллельно
-          if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Выполняем все задачи батча параллельно
+            if tasks:
+              results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Логируем ошибки, если есть
-            for result in results:
-              if isinstance(result, Exception):
-                logger.error(f"Ошибка в мониторинге: {result}")
+              # Логируем ошибки, если есть
+              for result in results:
+                if isinstance(result, Exception):
+                  logger.error(f"Ошибка в мониторинге: {result}")
 
         # # Управляем открытыми позициями
         await self.position_manager.manage_open_positions(self.account_balance)
@@ -3694,6 +3759,13 @@ class IntegratedTradingSystem:
 
         # Ожидание перед следующим циклом
         await asyncio.sleep(monitoring_interval)
+
+        # Обрабатываем команды производительности
+        await self.handle_performance_commands()
+
+        # Обновляем статистику производительности для dashboard
+        if cycle_count % 10 == 0:  # Каждые 10 циклов
+          await self._update_performance_stats()
 
       except asyncio.CancelledError:
         logger.info("Мониторинг остановлен по запросу")
@@ -4393,7 +4465,7 @@ class IntegratedTradingSystem:
             age_hours = (datetime.now(timezone.utc) - signal_time).total_seconds() / 3600
 
             # Если старше 4 часов - удаляем
-            if age_hours > 2:
+            if age_hours > 1:
               logger.warning(f"❌ Удаляем устаревший сигнал {symbol} (возраст: {age_hours:.1f}ч)")
               del pending_signals[symbol]
               continue
@@ -5105,3 +5177,92 @@ class IntegratedTradingSystem:
     except Exception as e:
       logger.error(f"Ошибка принудительного обновления данных для {symbol}: {e}")
       return None
+
+  async def update_websocket_subscriptions(self):
+    """Обновляет WebSocket подписки для focus символов"""
+    if not self.ws_client or not self.focus_list_symbols:
+      return
+
+    try:
+      # Подписываемся на новые focus символы
+      await self.ws_client.subscribe_tickers(self.focus_list_symbols[:30])
+      logger.info(f"Обновлены WebSocket подписки для {len(self.focus_list_symbols)} focus символов")
+
+    except Exception as e:
+      logger.error(f"Ошибка обновления WebSocket подписок: {e}")
+
+  async def handle_performance_commands(self):
+      """Обрабатывает команды управления производительностью"""
+      try:
+        command = self.state_manager.get_command()
+        if not command:
+          return
+
+        if command == "clear_cache":
+          if hasattr(self, 'cache_manager'):
+            # Очищаем кэш
+            self.cache_manager.cache.clear()
+            self.cache_manager.stats = CacheStats()
+            logger.info("Кэш очищен по команде dashboard")
+
+        elif command == "reset_circuit_breakers":
+          from core.circuit_breaker import get_circuit_breaker_manager
+          circuit_manager = get_circuit_breaker_manager()
+
+          # Сбрасываем все Circuit Breakers
+          for breaker in circuit_manager.breakers.values():
+            breaker.state = CircuitState.CLOSED
+            breaker.consecutive_failures = 0
+            breaker.consecutive_successes = 0
+            breaker.last_failure_time = None
+
+          logger.info("Circuit Breakers сброшены по команде dashboard")
+
+        elif command == "generate_performance_report":
+          await self._generate_performance_report()
+
+        elif command == "update_ml_models":
+          await self._update_ml_models_config()
+
+        # Очищаем команду после обработки
+        self.state_manager.clear_command()
+
+      except Exception as e:
+        logger.error(f"Ошибка обработки команды производительности: {e}")
+
+  async def _generate_performance_report(self):
+    """Генерирует отчет о производительности"""
+    try:
+      report = {
+        'timestamp': datetime.now().isoformat(),
+        'cache_stats': self.cache_manager.get_stats() if hasattr(self, 'cache_manager') else {},
+        'circuit_breaker_stats': get_circuit_breaker_manager().get_all_stats(),
+        'focus_list': {
+          'size': len(self.focus_list_symbols),
+          'symbols': self.focus_list_symbols[:10]  # Топ 10
+        },
+        'system_health': await self.get_system_health()
+      }
+
+      # Сохраняем отчет
+      self.state_manager.set_custom_data('performance_report', report)
+      logger.info("Отчет о производительности сгенерирован")
+
+    except Exception as e:
+      logger.error(f"Ошибка генерации отчета производительности: {e}")
+
+  async def _update_performance_stats(self):
+    """Обновляет статистику производительности для dashboard"""
+    try:
+      # WebSocket статистика
+      if self.ws_client:
+        ws_stats = self.ws_client.get_stats()
+        self.state_manager.set_custom_data('websocket_stats', ws_stats)
+
+      # API статистика из коннектора
+      if hasattr(self.connector, 'get_performance_stats'):
+        api_stats = self.connector.get_performance_stats()
+        self.state_manager.set_custom_data('api_performance', api_stats)
+
+    except Exception as e:
+      logger.error(f"Ошибка обновления статистики производительности: {e}")

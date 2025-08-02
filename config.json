@@ -161,6 +161,22 @@
         "static_symbol_list": [],
         "symbol_blacklist": [],
         "min_24h_volume_usdt": 1000000,
+            "enable_websocket": true,
+            "priority_monitoring": {
+              "enabled": true,
+              "focus_list_size": 40,
+              "update_interval_minutes": 15,
+              "volatility_threshold_percent": 3.0,
+              "volume_spike_ratio": 2.0,
+              "atr_spike_ratio": 2.0
+            },
+            "performance_optimization": {
+              "use_adaptive_cache": true,
+              "enable_circuit_breakers": true,
+              "batch_size": 15,
+              "parallel_processing": true,
+              "preload_focus_data": true
+            },
         "monitoring_interval_seconds": 30
     },
     "feature_weights": {

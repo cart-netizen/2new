@@ -7,6 +7,7 @@ import ccxt
 
 import config
 from core.bybit_connector import BybitConnector
+from core.circuit_breaker import get_circuit_breaker_manager, CircuitBreakerOpenError
 from core.enums import Timeframe, SignalType
 # from core.integrated_system import IntegratedTradingSystem
 from core.schemas import TradingSignal, GridSignal
@@ -280,7 +281,45 @@ class TradeExecutor:
       if not hasattr(signal, 'strategy_name') or not signal.strategy_name:
         signal.strategy_name = 'Unknown_new'
 
-      order_response = await self.connector.place_order(**params)
+      # Правильные параметры для bybit_connector.place_order
+      order_params = {
+        'symbol': symbol,
+        'side': 'Buy' if signal.signal_type == SignalType.BUY else 'Sell',
+        'order_type': 'Market',
+        'quantity': quantity,
+        'price': None,  # Для рыночных ордеров
+        'time_in_force': 'GTC'
+      }
+
+      # Добавляем SL/TP если указаны
+      if signal.stop_loss and signal.stop_loss != 0:
+        order_params['stopLoss'] = signal.stop_loss
+      if signal.take_profit and signal.take_profit != 0:
+        order_params['takeProfit'] = signal.take_profit
+
+      logger.info(f"Отправка ордера на открытие: {order_params}")
+
+      from core.circuit_breaker import get_circuit_breaker_manager, CircuitBreakerOpenError
+
+      # Получаем circuit breaker
+      circuit_manager = get_circuit_breaker_manager()
+      order_breaker = circuit_manager.get_breaker('order_execution')
+
+      try:
+        order_response = await order_breaker.call(
+          self.connector.place_order,
+          symbol=order_params['symbol'],
+          side=order_params['side'],
+          order_type=order_params['order_type'],
+          quantity=order_params['quantity'],
+          price=order_params.get('price'),
+          time_in_force=order_params.get('time_in_force', 'GTC'),
+          **{k: v for k, v in order_params.items() if
+             k not in ['symbol', 'side', 'order_type', 'quantity', 'price', 'time_in_force']}
+        )
+      except CircuitBreakerOpenError as e:
+        logger.error(f"Circuit breaker блокирует исполнение ордера для {symbol}: {e}")
+        return False, None
 
       # 3. Обрабатываем ответ
       if order_response and order_response.get('orderId'):
@@ -489,7 +528,45 @@ class TradeExecutor:
         'positionIdx': 0
       }
       # 4. Отправляем ордер
-      order_response = await self.connector.place_order(**params)
+      # Правильные параметры для bybit_connector.place_order
+      order_params = {
+        'symbol': symbol,
+        'side': 'Buy' if signal.signal_type == SignalType.BUY else 'Sell',
+        'order_type': 'Market',
+        'quantity': quantity,
+        'price': None,  # Для рыночных ордеров
+        'time_in_force': 'GTC'
+      }
+
+      # Добавляем SL/TP если указаны
+      if signal.stop_loss and signal.stop_loss != 0:
+        order_params['stopLoss'] = signal.stop_loss
+      if signal.take_profit and signal.take_profit != 0:
+        order_params['takeProfit'] = signal.take_profit
+
+      logger.info(f"Отправка ордера на открытие: {order_params}")
+
+      from core.circuit_breaker import get_circuit_breaker_manager, CircuitBreakerOpenError
+
+      # Получаем circuit breaker
+      circuit_manager = get_circuit_breaker_manager()
+      order_breaker = circuit_manager.get_breaker('order_execution')
+
+      try:
+        order_response = await order_breaker.call(
+          self.connector.place_order,
+          symbol=order_params['symbol'],
+          side=order_params['side'],
+          order_type=order_params['order_type'],
+          quantity=order_params['quantity'],
+          price=order_params.get('price'),
+          time_in_force=order_params.get('time_in_force', 'GTC'),
+          **{k: v for k, v in order_params.items() if
+             k not in ['symbol', 'side', 'order_type', 'quantity', 'price', 'time_in_force']}
+        )
+      except CircuitBreakerOpenError as e:
+        logger.error(f"Circuit breaker блокирует исполнение ордера для {symbol}: {e}")
+        return False, None
 
       # 5. Проверяем результат
       if order_response and order_response.get('orderId'):
@@ -994,7 +1071,14 @@ class TradeExecutor:
           params['takeProfit'] = str(sl_tp_levels['take_profit'])
 
         # Отправляем ордер
-        order_response = await self.connector.place_order(**params)
+        circuit_manager = get_circuit_breaker_manager()
+        order_breaker = circuit_manager.get_breaker('order_execution')
+
+        try:
+          order_response = await order_breaker.call(self.connector.place_order, **params)
+        except CircuitBreakerOpenError as e:
+          logger.error(f"Circuit breaker блокирует исполнение ордера: {e}")
+          return None
 
         if order_response and order_response.get('orderId'):
           order_id = order_response['orderId']

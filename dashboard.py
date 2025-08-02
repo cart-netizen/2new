@@ -31,7 +31,8 @@ from config.config_manager import ConfigManager
 from streamlit_autorefresh import st_autorefresh
 
 from shadow_trading.dashboard_extensions import setup_shadow_dashboard_integration
-
+from core.adaptive_cache import get_cache_manager
+from core.circuit_breaker import get_circuit_breaker_manager
 # --- Настройка страницы ---
 st.set_page_config(
   page_title="Панель управления торговым ботом",
@@ -1120,7 +1121,7 @@ if st.sidebar.button("🔄 Обновить данные"):
   st.rerun()
 
 # Вкладки
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Общая статистика", "📈 Сделки", "🎯 Shadow Trading", "⚙️ Настройки"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📊 Общая статистика", "📈 Сделки", "🎯 Shadow Trading", "⚙️ Настройки", "⚡ Производительность"])
 
 with tab1:
   st.header("📊 Общая статистика")
@@ -1695,6 +1696,267 @@ with tab4:
 
   except Exception as e:
     st.error(f"Ошибка проверки базы данных: {e}")
+
+with tab5:
+  st.header("⚡ Производительность системы")
+
+  # Получаем статистику производительности
+  try:
+    # Статистика кэша
+    if 'cache_manager' in globals():
+      cache_manager = get_cache_manager()
+      cache_stats = cache_manager.get_stats()
+
+      st.subheader("💾 Статистика кэша")
+
+      col1, col2, col3, col4 = st.columns(4)
+      with col1:
+        st.metric("Hit Rate", f"{cache_stats['cache_stats']['hit_rate']}")
+      with col2:
+        st.metric("Записей в кэше", cache_stats['cache_stats']['entries'])
+      with col3:
+        st.metric("Попаданий", cache_stats['cache_stats']['hits'])
+      with col4:
+        st.metric("Промахов", cache_stats['cache_stats']['misses'])
+
+      # Топ символов по запросам
+      if cache_stats.get('top_symbols'):
+        st.write("**Топ символов по запросам:**")
+        top_symbols_df = pd.DataFrame(
+          cache_stats['top_symbols'][:10],
+          columns=['Символ', 'Запросы']
+        )
+        st.dataframe(top_symbols_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # Статистика Circuit Breakers
+    try:
+      circuit_manager = get_circuit_breaker_manager()
+      cb_stats = circuit_manager.get_all_stats()
+
+      if cb_stats:
+        st.subheader("🔧 Circuit Breakers")
+
+        # Создаем DataFrame для отображения
+        cb_data = []
+        for name, stats in cb_stats.items():
+          cb_data.append({
+            'Компонент': name.replace('_', ' ').title(),
+            'Состояние': stats['state'].upper(),
+            'Запросов': stats['total_requests'],
+            'Успешность': f"{stats['success_rate']:.1f}%",
+            'Среднее время': f"{stats['avg_response_time_ms']:.1f}ms",
+            'Ошибок подряд': stats['consecutive_failures']
+          })
+
+        cb_df = pd.DataFrame(cb_data)
+
+
+        # Цветовая схема для состояний
+        def color_state(val):
+          if val == 'CLOSED':
+            return 'background-color: #d4edda'  # Зеленый
+          elif val == 'OPEN':
+            return 'background-color: #f8d7da'  # Красный
+          elif val == 'HALF_OPEN':
+            return 'background-color: #fff3cd'  # Желтый
+          return ''
+
+
+        styled_cb = cb_df.style.map(color_state, subset=['Состояние'])
+        st.dataframe(styled_cb, use_container_width=True, hide_index=True)
+
+        # Здоровье системы
+        health = circuit_manager.health_check()
+        if isinstance(health, dict):
+          col1, col2 = st.columns(2)
+          with col1:
+            st.metric("Здоровых компонентов", f"{health.get('healthy_breakers', 0)}/{health.get('total_breakers', 0)}")
+          with col2:
+            st.metric("Общее здоровье", f"{health.get('health_percentage', 0):.1f}%")
+
+          if health.get('unhealthy_breakers'):
+            st.warning(f"Проблемные компоненты: {', '.join(health['unhealthy_breakers'])}")
+
+    except Exception as e:
+      st.error(f"Ошибка получения статистики Circuit Breakers: {e}")
+
+    st.divider()
+
+    # WebSocket статистика
+    ws_stats = state_manager.get_custom_data('websocket_stats')
+    if ws_stats:
+      st.subheader("🌐 WebSocket статистика")
+
+      col1, col2, col3 = st.columns(3)
+      with col1:
+        st.metric("Сообщений получено", ws_stats.get('messages_received', 0))
+      with col2:
+        uptime = ws_stats.get('uptime_seconds', 0)
+        if uptime > 0:
+          uptime_str = f"{uptime // 3600:.0f}ч {(uptime % 3600) // 60:.0f}м"
+        else:
+          uptime_str = "Нет данных"
+        st.metric("Время работы", uptime_str)
+      with col3:
+        st.metric("Переподключений", ws_stats.get('reconnections', 0))
+
+      # Статус соединений
+      connections = ws_stats.get('connections', {})
+      if connections:
+        st.write("**Статус соединений:**")
+        conn_data = []
+        for conn_type, status in connections.items():
+          conn_data.append({
+            'Тип': conn_type.title(),
+            'Статус': '✅ Подключен' if status else '❌ Отключен'
+          })
+
+        if conn_data:
+          conn_df = pd.DataFrame(conn_data)
+          st.dataframe(conn_df, use_container_width=True, hide_index=True)
+
+      # Активные подписки
+      subscriptions = ws_stats.get('subscriptions', {})
+      if subscriptions:
+        st.write("**Активные подписки:**")
+        sub_data = []
+        for topic, sub_info in subscriptions.items():
+          sub_data.append({
+            'Топик': topic,
+            'Символов': sub_info.get('symbols_count', 0),
+            'Сообщений': sub_info.get('message_count', 0),
+            'Последнее обновление': sub_info.get('last_update', 'Нет данных')
+          })
+
+        if sub_data:
+          sub_df = pd.DataFrame(sub_data)
+          st.dataframe(sub_df, use_container_width=True, hide_index=True)
+
+    else:
+      st.info("WebSocket статистика недоступна")
+
+    st.divider()
+
+    # Статистика API запросов
+    api_stats = state_manager.get_custom_data('api_performance')
+    if api_stats:
+      st.subheader("🔗 API производительность")
+
+      col1, col2, col3, col4 = st.columns(4)
+      with col1:
+        st.metric("Всего запросов", api_stats.get('total_requests', 0))
+      with col2:
+        st.metric("Успешных", api_stats.get('successful_requests', 0))
+      with col3:
+        st.metric("Неудачных", api_stats.get('failed_requests', 0))
+      with col4:
+        success_rate = 0
+        total = api_stats.get('total_requests', 0)
+        if total > 0:
+          success_rate = (api_stats.get('successful_requests', 0) / total) * 100
+        st.metric("Успешность", f"{success_rate:.1f}%")
+
+      # Среднее время ответа
+      avg_time = api_stats.get('avg_response_time_ms', 0)
+      st.metric("Среднее время ответа", f"{avg_time:.1f} мс")
+
+      # Топ эндпоинты
+      if api_stats.get('top_endpoints'):
+        st.write("**Топ API эндпоинты:**")
+        endpoint_data = []
+        for endpoint, count in api_stats['top_endpoints'][:10]:
+          endpoint_data.append({
+            'Эндпоинт': endpoint,
+            'Запросов': count
+          })
+
+        if endpoint_data:
+          endpoint_df = pd.DataFrame(endpoint_data)
+          st.dataframe(endpoint_df, use_container_width=True, hide_index=True)
+
+    else:
+      st.info("Статистика API недоступна")
+
+    st.divider()
+
+    # Focus List статистика
+    focus_data = state_manager.get_custom_data('focus_list')
+    if focus_data:
+      st.subheader("🎯 Focus List статистика")
+
+      col1, col2 = st.columns(2)
+      with col1:
+        st.metric("Символов в приоритете", focus_data['stats']['total'])
+      with col2:
+        last_update = focus_data.get('updated')
+        if last_update:
+          update_time = datetime.fromisoformat(last_update)
+          time_ago = datetime.now() - update_time
+          minutes_ago = time_ago.total_seconds() / 60
+          st.metric("Обновлен", f"{minutes_ago:.0f} мин назад")
+
+      # Топ движения
+      if focus_data['stats'].get('top_movers'):
+        st.write("**Топ движения в приоритете:**")
+        movers_data = []
+        for mover in focus_data['stats']['top_movers'][:10]:
+          movers_data.append({
+            'Символ': mover['symbol'],
+            'Изменение 24ч': f"{mover['price_change_24h']:+.2f}%",
+            'ATR': f"{mover['atr_percent']:.2f}%",
+            'Волатильность': f"{mover['volatility_score']:.2f}"
+          })
+
+        if movers_data:
+          movers_df = pd.DataFrame(movers_data)
+
+
+          # Цветовая схема для изменений
+          def color_change(val):
+            if '+' in str(val):
+              return 'background-color: #d4edda'  # Зеленый для роста
+            elif '-' in str(val):
+              return 'background-color: #f8d7da'  # Красный для падения
+            return ''
+
+
+          styled_movers = movers_df.style.map(color_change, subset=['Изменение 24ч'])
+          st.dataframe(styled_movers, use_container_width=True, hide_index=True)
+
+    else:
+      st.info("Focus List статистика недоступна")
+
+    # Кнопки управления
+    st.divider()
+    st.subheader("🔧 Управление производительностью")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+      if st.button("🧹 Очистить кэш", use_container_width=True):
+        state_manager.set_command("clear_cache")
+        st.success("Команда отправлена!")
+
+    with col2:
+      if st.button("🔄 Сбросить Circuit Breakers", use_container_width=True):
+        state_manager.set_command("reset_circuit_breakers")
+        st.success("Команда отправлена!")
+
+    with col3:
+      if st.button("📊 Генерировать отчет", use_container_width=True):
+        state_manager.set_command("generate_performance_report")
+        st.success("Команда отправлена!")
+
+    # Автообновление для этой вкладки
+    if st.checkbox("🔄 Автообновление производительности (15 сек)", value=False, key="auto_refresh_performance"):
+      time.sleep(15)
+      st.rerun()
+
+  except Exception as e:
+    st.error(f"Ошибка загрузки статистики производительности: {e}")
+    st.info("Убедитесь, что бот запущен и все компоненты инициализированы.")
 
 # --- АВТООБНОВЛЕНИЕ ---
 # Автоматическое обновление каждые 30 секунд

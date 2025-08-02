@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -117,8 +118,30 @@ class PositionManager:
               }
 
               # Добавляем в БД
-              await self.db_manager.add_trade_with_signal(trade_data, None)
-              logger.info(f"Создана запись в БД для восстановленной позиции {symbol}")
+              # await self.db_manager.add_trade_with_signal(trade_data, None)
+              # logger.info(f"Создана запись в БД для восстановленной позиции {symbol}")
+              # Правильный вызов с необходимыми параметрами
+              try:
+                # Создаем минимальный TradingSignal для совместимости
+                from core.schemas import TradingSignal, SignalType
+
+                mock_signal = TradingSignal(
+                  signal_type=SignalType.BUY if trade_data['side'].upper() == 'BUY' else SignalType.SELL,
+                  symbol=trade_data['symbol'],
+                  price=trade_data['price'],
+                  confidence=0.5,  # Нейтральная уверенность для позиций с биржи
+                  strategy_name='ExchangeSync'  # Указываем, что это синхронизация с биржей
+                )
+
+                await self.db_manager.add_trade_with_signal(
+                  signal=mock_signal,
+                  order_id=trade_data['order_id'],
+                  quantity=trade_data['quantity'],
+                  leverage=trade_data.get('leverage', 1)
+                )
+
+              except Exception as e:
+                logger.error(f"Ошибка добавления синхронизированной сделки: {e}")
 
               # Теперь загружаем из БД
               local_trade_data = await self.db_manager.get_open_trade_by_symbol(symbol)
@@ -1497,6 +1520,39 @@ class PositionManager:
       # Обновляем экстремумы
       position['highest_since_entry'] = max(position['highest_since_entry'], high)
       position['lowest_since_entry'] = min(position['lowest_since_entry'], low)
+
+  async def add_trade_from_exchange(self, trade_data: dict) -> Optional[Dict]:
+    """Добавляет сделку из данных биржи без TradingSignal"""
+    #await self.db_manager.add_trade_from_exchange(trade_data) - использовать
+    query = '''
+        INSERT INTO trades (
+            symbol, order_id, strategy, strategy_name, side, open_timestamp, open_price,
+            quantity, leverage, confidence, status, metadata
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+    '''
+
+    metadata = json.dumps({'source': 'exchange_sync', 'synced_at': datetime.now().isoformat()})
+    params = (
+      trade_data['symbol'],
+      trade_data['order_id'],
+      'ExchangeSync',
+      'ExchangeSync',
+      trade_data['side'],
+      datetime.now(),
+      trade_data['price'],
+      trade_data['quantity'],
+      trade_data.get('leverage', 1),
+      0.5,  # Нейтральная уверенность
+      metadata
+    )
+
+    trade_id = await self._execute(query, params)
+
+    if trade_id and trade_id > 0:
+      select_query = "SELECT * FROM trades WHERE id = ?"
+      return await self._execute(select_query, (trade_id,), fetch='one')
+
+    return None
 
   async def monitor_single_position(self, symbol: str) -> bool:
     """Мониторит одну конкретную позицию"""

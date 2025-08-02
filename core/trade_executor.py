@@ -192,8 +192,17 @@ class TradeExecutor:
           # Сортируем сигналы по приоритету (уверенность * возраст)
           signal_priorities = []
           for sym, sig_data in pending_signals.items():
-            sig_age = (datetime.now() - datetime.fromisoformat(
-              sig_data['metadata']['signal_time'])).total_seconds() / 3600
+            # Правильная работа с timezone
+            signal_time_str = sig_data['metadata']['signal_time']
+            if signal_time_str.endswith('Z'):
+              signal_time = datetime.fromisoformat(signal_time_str.replace('Z', '+00:00'))
+            elif '+' in signal_time_str or signal_time_str.count('-') > 2:
+              signal_time = datetime.fromisoformat(signal_time_str)
+            else:
+              # Если нет timezone info, добавляем UTC
+              signal_time = datetime.fromisoformat(signal_time_str).replace(tzinfo=timezone.utc)
+
+            sig_age = (datetime.now(timezone.utc) - signal_time).total_seconds() / 3600
             priority = sig_data['confidence'] * (1 + sig_age * 0.1)  # Старые сигналы получают небольшой бонус
             signal_priorities.append((sym, priority))
 
@@ -285,10 +294,10 @@ class TradeExecutor:
       order_params = {
         'symbol': symbol,
         'side': 'Buy' if signal.signal_type == SignalType.BUY else 'Sell',
-        'order_type': 'Market',
-        'quantity': quantity,
-        'price': None,  # Для рыночных ордеров
-        'time_in_force': 'GTC'
+        'orderType': 'Market',  # Bybit использует orderType, не order_type
+        'qty': str(quantity),  # Bybit требует строку для qty
+        'category': 'linear',  # Обязательный параметр для v5
+        'positionIdx': 0  # Для one-way mode
       }
 
       # Добавляем SL/TP если указаны
@@ -310,12 +319,10 @@ class TradeExecutor:
           self.connector.place_order,
           symbol=order_params['symbol'],
           side=order_params['side'],
-          order_type=order_params['order_type'],
-          quantity=order_params['quantity'],
-          price=order_params.get('price'),
-          time_in_force=order_params.get('time_in_force', 'GTC'),
-          **{k: v for k, v in order_params.items() if
-             k not in ['symbol', 'side', 'order_type', 'quantity', 'price', 'time_in_force']}
+          order_type='Market',  # Передаем строку напрямую
+          quantity=float(order_params['qty']),  # Конвертируем обратно в float
+          category=order_params.get('category', 'linear'),
+          positionIdx=order_params.get('positionIdx', 0)
         )
       except CircuitBreakerOpenError as e:
         logger.error(f"Circuit breaker блокирует исполнение ордера для {symbol}: {e}")

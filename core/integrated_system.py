@@ -1048,6 +1048,20 @@ class IntegratedTradingSystem:
     pending_signals[symbol] = signal_dict
     self.state_manager.update_pending_signals(pending_signals)
 
+    # ВРЕМЕННО: исполняем сразу без ожидания LTF подтверждения
+    logger.info(f"🚀 НЕМЕДЛЕННОЕ исполнение сигнала для {symbol}")
+    success, result = await self.trade_executor.execute_trade(signal, symbol, final_size)
+
+    if success:
+      logger.info(f"✅ Сделка {symbol} успешно открыта напрямую!")
+      # Удаляем из pending после исполнения
+      pending_signals = self.state_manager.get_pending_signals()
+      if symbol in pending_signals:
+        del pending_signals[symbol]
+        self.state_manager.update_pending_signals(pending_signals)
+    else:
+      logger.error(f"❌ Ошибка немедленного исполнения {symbol}: {result}")
+
     logger.info(f"✅ Enhanced сигнал для {symbol} одобрен и поставлен в очередь")
     signal_logger.info(f"====== ENHANCED СИГНАЛ ДЛЯ {symbol} ПОСТАВЛЕН В ОЧЕРЕДЬ ======")
 
@@ -3764,7 +3778,7 @@ class IntegratedTradingSystem:
         await self.handle_performance_commands()
 
         # Обновляем статистику производительности для dashboard
-        if cycle_count % 10 == 0:  # Каждые 10 циклов
+        if cycle_count % 5 == 0:  # Каждые 10 циклов
           await self._update_performance_stats()
 
       except asyncio.CancelledError:
@@ -4352,6 +4366,8 @@ class IntegratedTradingSystem:
       # 1. Основной оптимизированный мониторинг
       self._monitoring_task = asyncio.create_task(self._monitoring_loop_optimized())
       logger.info("✅ Запущен основной цикл мониторинга")
+
+      # self._quick_pending_signals_check()
 
       # 2. Быстрый мониторинг позиций
       self._fast_monitoring_task = asyncio.create_task(self._fast_position_monitoring_loop())
@@ -5255,14 +5271,62 @@ class IntegratedTradingSystem:
     """Обновляет статистику производительности для dashboard"""
     try:
       # WebSocket статистика
-      if self.ws_client:
+      if hasattr(self, 'ws_client') and self.ws_client:
         ws_stats = self.ws_client.get_stats()
         self.state_manager.set_custom_data('websocket_stats', ws_stats)
+        logger.debug(f"WebSocket статистика обновлена: {len(ws_stats)} метрик")
+      else:
+        logger.debug("WebSocket клиент недоступен")
+      if not hasattr(self, 'ws_client') or not self.ws_client:
+        # Создаем базовую статистику
+        fallback_ws_stats = {
+          'messages_received': 0,
+          'uptime_seconds': 0,
+          'reconnections': 0,
+          'active_subscriptions': 0,
+          'connections': {
+            'public': False,
+            'private': False
+          }
+        }
+        self.state_manager.set_custom_data('websocket_stats', fallback_ws_stats)
 
       # API статистика из коннектора
       if hasattr(self.connector, 'get_performance_stats'):
         api_stats = self.connector.get_performance_stats()
         self.state_manager.set_custom_data('api_performance', api_stats)
+        logger.debug(f"API статистика обновлена: {len(api_stats)} метрик")
+      elif hasattr(self.connector, 'request_stats'):
+        # Альтернативный способ получения статистики
+        api_stats = {
+          'total_requests': getattr(self.connector, 'total_requests', 0),
+          'successful_requests': getattr(self.connector, 'successful_requests', 0),
+          'failed_requests': getattr(self.connector, 'failed_requests', 0),
+          'avg_response_time_ms': getattr(self.connector, 'avg_response_time', 0)
+        }
+        self.state_manager.set_custom_data('api_performance', api_stats)
+        logger.debug("API статистика обновлена (альтернативный метод)")
+      else:
+        logger.debug("API статистика недоступна в коннекторе")
+
+      # Добавляем статистику кэша если доступна
+      if hasattr(self, 'cache_manager'):
+        cache_stats = self.cache_manager.get_stats()
+        self.state_manager.set_custom_data('cache_performance', cache_stats)
+
+      # Добавляем статистику Circuit Breakers
+      try:
+        from core.circuit_breaker import get_circuit_breaker_manager
+        circuit_manager = get_circuit_breaker_manager()
+        cb_health = await circuit_manager.health_check()
+        self.state_manager.set_custom_data('circuit_breaker_health', cb_health)
+      except Exception as e:
+        logger.debug(f"Circuit Breaker статистика недоступна: {e}")
 
     except Exception as e:
       logger.error(f"Ошибка обновления статистики производительности: {e}")
+
+    logger.info("📊 Статистика производительности обновлена:")
+    logger.info(f"  - WebSocket: {'✅' if hasattr(self, 'ws_client') and self.ws_client else '❌'}")
+    logger.info(f"  - API: {'✅' if hasattr(self.connector, 'get_performance_stats') else '❌'}")
+    logger.info(f"  - Cache: {'✅' if hasattr(self, 'cache_manager') else '❌'}")

@@ -301,6 +301,9 @@ class BybitConnector:
       """
       Оптимизированная версия с кэшированием и батчингом
       """
+      import time
+      start_time = time.time()
+
       if treat_as_success is None:
         treat_as_success = []
 
@@ -386,6 +389,10 @@ class BybitConnector:
                 if cache_key and use_cache:
                   self._set_cache(cache_key, result)
 
+                # Собираем статистику
+                response_time_ms = (time.time() - start_time) * 1000
+                self._increment_request_stats(success=True, response_time_ms=response_time_ms)
+
                 return result
 
               # Обработка ошибок
@@ -420,6 +427,9 @@ class BybitConnector:
             except Exception as e:
               self.error_stats["Unknown Error"] += 1
               logger.error(f"Непредвиденная ошибка в _make_request при запросе к {endpoint}: {e}", exc_info=True)
+
+              response_time_ms = (time.time() - start_time) * 1000
+              self._increment_request_stats(success=False, response_time_ms=response_time_ms)
               return None
 
       return None  # Возврат None, если все попытки провалились
@@ -576,12 +586,36 @@ class BybitConnector:
     result = await self._make_request('POST', endpoint, params, treat_as_success=[110043], use_cache=False)
     return result is not None
 
-
-  async def place_order(self, symbol: str, side: str, order_type: str, quantity: float, price: float = None,
-                        time_in_force: str = "GTC", **kwargs):
-    """Размещает ордер"""
+  async def place_order(self, symbol: str, side: str, order_type: str, quantity: float,
+                        price: float = None, time_in_force: str = "GTC",
+                        category: str = "linear", positionIdx: int = 0, **kwargs) -> Optional[Dict]:
+    """
+    Размещает ордер с правильными параметрами для Bybit API v5
+    """
     endpoint = "/v5/order/create"
-    params = {'category': 'linear', **kwargs}
+
+    # Формируем правильные параметры
+    params = {
+      'category': category,
+      'symbol': symbol,
+      'side': side,  # Buy/Sell
+      'orderType': order_type,  # Market/Limit
+      'qty': str(quantity),  # Всегда строка
+      'positionIdx': positionIdx  # 0 для one-way mode
+    }
+
+    # Добавляем цену только для лимитных ордеров
+    if order_type.lower() == 'limit' and price is not None:
+      params['price'] = str(price)
+      params['timeInForce'] = time_in_force
+
+    # Добавляем дополнительные параметры
+    for key, value in kwargs.items():
+      if key not in params and value is not None:
+        params[key] = str(value) if isinstance(value, (int, float)) else value
+
+    logger.debug(f"Отправка ордера: {params}")
+
     return await self._make_request('POST', endpoint, params, use_cache=False)
 
   async def fetch_order_book(self, symbol: str, depth: int) -> Optional[Dict]:
@@ -1087,36 +1121,47 @@ class BybitConnector:
       logger.error(f"Ошибка запроса {method} {endpoint}: {e}")
       raise
 
-  def get_performance_stats(self) -> Dict:
-    """
-    Возвращает статистику производительности коннектора
-    """
+  def get_performance_stats(self) -> dict:
+      """Возвращает статистику производительности коннектора"""
+      if not hasattr(self, 'request_stats'):
+        self.request_stats = {
+          'total_requests': 0,
+          'successful_requests': 0,
+          'failed_requests': 0,
+          'avg_response_time_ms': 0,
+          'last_24h_requests': []
+        }
+
+      stats = self.request_stats.copy()
+
+      # Добавляем базовую статистику
+      if hasattr(self, '_total_requests'):
+        stats['total_requests'] = self._total_requests
+      if hasattr(self, '_successful_requests'):
+        stats['successful_requests'] = self._successful_requests
+      if hasattr(self, '_failed_requests'):
+        stats['failed_requests'] = self._failed_requests
+
+      return stats
+
+  def _increment_request_stats(self, success: bool = True, response_time_ms: float = 0):
+    """Увеличивает счетчики статистики"""
     if not hasattr(self, 'request_stats'):
-      return {}
+      self.request_stats = {
+        'total_requests': 0,
+        'successful_requests': 0,
+        'failed_requests': 0,
+        'avg_response_time_ms': 0,
+        'last_24h_requests': []
+      }
 
-    stats = self.request_stats.copy()
+    self.request_stats['total_requests'] += 1
+    if success:
+      self.request_stats['successful_requests'] += 1
+    else:
+      self.request_stats['failed_requests'] += 1
 
-    # Добавляем дополнительную аналитику
-    if stats['last_24h_requests']:
-      recent_requests = stats['last_24h_requests']
-
-      # Группируем по часам
-      hourly_stats = defaultdict(int)
-      for req in recent_requests:
-        hour = req['timestamp'].replace(minute=0, second=0, microsecond=0)
-        hourly_stats[hour] += 1
-
-      stats['hourly_distribution'] = dict(hourly_stats)
-
-      # Статистика успешности
-      successful = sum(1 for req in recent_requests if req.get('success', False))
-      stats['success_rate_24h'] = (successful / len(recent_requests)) * 100
-
-      # Топ эндпоинты
-      endpoint_counts = defaultdict(int)
-      for req in recent_requests:
-        endpoint_counts[req['endpoint']] += 1
-
-      stats['top_endpoints'] = sorted(endpoint_counts.items(), key=lambda x: x[1], reverse=True)[:10]
-
-    return stats
+    # Обновляем среднее время ответа
+    current_avg = self.request_stats['avg_response_time_ms']
+    total = self.request_stats['total_requests']
+    self.request_stats['avg_response_time_ms'] = (current_avg * (total - 1) + response_time_ms) / total

@@ -1175,7 +1175,47 @@ with tab2:
     display_columns = ['symbol', 'side', 'open_price', 'quantity', 'status', 'profit_loss', 'open_timestamp']
     if all(col in df.columns for col in display_columns):
       df_display = df[display_columns].copy()
-      df_display['open_timestamp'] = pd.to_datetime(df_display['open_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+      # df_display['open_timestamp'] = pd.to_datetime(df_display['open_timestamp']).dt.strftime('%Y-%m-%d %H:%M:%S')
+    # Безопасная обработка timestamp с проверкой формата
+      try:
+        # Сначала проверяем, есть ли данные
+        if not df_display.empty and 'open_timestamp' in df_display.columns:
+          # Пробуем разные форматы timestamp
+          def safe_convert_timestamp(timestamp_value):
+            if pd.isna(timestamp_value):
+              return 'Нет данных'
+
+            try:
+              # Пробуем как datetime объект
+              if isinstance(timestamp_value, (pd.Timestamp, datetime)):
+                return timestamp_value.strftime('%Y-%m-%d %H:%M:%S')
+
+              # Пробуем как строку ISO формата
+              if isinstance(timestamp_value, str):
+                if 'T' in timestamp_value:  # ISO формат
+                  dt = pd.to_datetime(timestamp_value, format='%Y-%m-%dT%H:%M:%S')
+                else:  # Обычный формат
+                  dt = pd.to_datetime(timestamp_value)
+                return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+              # Пробуем как timestamp
+              dt = pd.to_datetime(timestamp_value, unit='s' if timestamp_value < 1e10 else 'ms')
+              return dt.strftime('%Y-%m-%d %H:%M:%S')
+
+            except Exception as e:
+              logger.debug(f"Ошибка конвертации timestamp {timestamp_value}: {e}")
+              return str(timestamp_value)
+
+
+          # Применяем безопасную конвертацию
+          df_display['open_timestamp'] = df_display['open_timestamp'].apply(safe_convert_timestamp)
+
+      except Exception as e:
+        logger.error(f"Ошибка обработки timestamp в dashboard: {e}")
+        # Fallback - показываем как есть
+        if not df_display.empty and 'open_timestamp' in df_display.columns:
+          df_display['open_timestamp'] = df_display['open_timestamp'].astype(str)
+
       df_display = df_display.rename(columns={
         'symbol': 'Символ',
         'side': 'Сторона',

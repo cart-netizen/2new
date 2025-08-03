@@ -294,9 +294,9 @@
             "ml_confidence_threshold": 0.6
         },
         "timeframe_settings": {
-            "primary_timeframe": "15m",
+            "primary_timeframe": "5m",
             "confirmation_timeframes": [
-                "5m",
+                "15m",
                 "30m",
                 "1H"
             ],
@@ -337,11 +337,18 @@
       "enabled": true,
       "strategy_type": "LorentzianStrategy",
 
+
       "strategy_settings": {
         "// Основные параметры модели": "",
         "neighbors_count": 8,
         "max_bars_back": 2000,
         "feature_count": 5,
+        "min_history_size": 200,
+        "force_training": true,
+        "initial_data_limit": 1000,
+        "save_models": true,
+        "update_frequency": 20,
+        "use_online_learning": true,
 
         "// Конфигурация признаков (как в оригинале)": "",
         "feature_1": {
@@ -397,7 +404,7 @@
         "take_profit_atr_multiplier": 3.0,
 
         "// Дополнительные параметры": "",
-        "min_history_size": 500,
+
         "retrain_interval": 1000,
         "use_ema_filter": false,
         "ema_period": 200,

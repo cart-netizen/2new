@@ -151,11 +151,18 @@ class IntegratedTradingSystem:
         lorentzian_config = self.config.get('strategies', {}).get('lorentzian', {})
         lorentzian_strategy = LorentzianStrategy(config=lorentzian_config)
         self.strategy_manager.add_strategy(lorentzian_strategy)
+
+        # Передаем data_fetcher в Lorentzian стратегию
+        if hasattr(lorentzian_strategy, 'set_data_fetcher'):
+          lorentzian_strategy.set_data_fetcher(self.data_fetcher)
+
         logger.info("✅ Lorentzian Classification стратегия зарегистрирована")
       except Exception as e:
         logger.error(f"Ошибка инициализации Lorentzian стратегии: {e}")
     else:
       logger.info("ℹ️ Lorentzian Classification стратегия отключена в конфиге.")
+
+
 
     try:
 
@@ -730,6 +737,49 @@ class IntegratedTradingSystem:
 
       signal_logger.info(
         f"📈 Собрано {len(candidate_signals)} кандидатов сигналов для {symbol}: {list(candidate_signals.keys())}")
+
+      if candidate_signals and self.enhanced_ml_model and self.use_enhanced_ml:
+        signal_logger.info(f"🤖 ML оценка {len(candidate_signals)} сигналов...")
+
+        for strategy_name, signal in candidate_signals.items():
+          try:
+            # Получаем ML оценку
+            _, ml_evaluation = self.enhanced_ml_model.predict_proba(
+              htf_data,
+              external_data=None
+            )
+
+            original_confidence = signal.confidence
+
+            # Корректируем уверенность на основе ML
+            if (signal.signal_type == SignalType.BUY and ml_evaluation.signal_type == SignalType.BUY) or \
+                (signal.signal_type == SignalType.SELL and ml_evaluation.signal_type == SignalType.SELL):
+              # ML согласен - усиливаем
+              adjustment = min(0.3, ml_evaluation.confidence * 0.4)
+              signal.confidence = min(0.95, signal.confidence + adjustment)
+              signal_logger.info(
+                f"✅ ML усиливает {strategy_name}: {original_confidence:.3f} -> {signal.confidence:.3f}")
+            elif ml_evaluation.signal_type != SignalType.HOLD:
+              # ML не согласен - ослабляем
+              reduction = min(0.5, ml_evaluation.confidence * 0.6)
+              signal.confidence = max(0.1, signal.confidence * (1 - reduction))
+              signal_logger.warning(
+                f"⚠️ ML ослабляет {strategy_name}: {original_confidence:.3f} -> {signal.confidence:.3f}")
+
+            # Добавляем метаданные
+            if not hasattr(signal, 'metadata') or signal.metadata is None:
+              signal.metadata = {}
+
+            signal.metadata['ml_evaluation'] = {
+              'ml_signal': ml_evaluation.signal_type.value,
+              'ml_confidence': ml_evaluation.confidence,
+              'model_agreement': ml_evaluation.model_agreement,
+              'adjustment': signal.confidence - original_confidence,
+              'risk_assessment': ml_evaluation.risk_assessment
+            }
+
+          except Exception as e:
+            logger.error(f"Ошибка ML оценки для {strategy_name}: {e}")
 
       # --- УРОВЕНЬ 3: ML МЕТА-АНАЛИЗ ---
       ml_prediction = None
@@ -4962,6 +5012,41 @@ class IntegratedTradingSystem:
         # # 2. Сохраняем данные для переобучения ML
         if self.retraining_manager:
           await self.retraining_manager.record_trade_result(symbol, trade_result)
+
+        strategy_name = trade_result.get('strategy_name', '')
+        if 'lorentzian' in strategy_name.lower():
+          try:
+            # Получаем стратегию
+            lorentzian_strategy = None
+            for strategy in self.strategies.values():
+              if hasattr(strategy, 'strategy_name') and 'lorentzian' in strategy.strategy_name.lower():
+                lorentzian_strategy = strategy
+                break
+
+            if lorentzian_strategy and hasattr(lorentzian_strategy, 'update_model'):
+              # Получаем последние данные
+              recent_data = await self.data_fetcher.get_historical_candles(
+                symbol,
+                Timeframe.FIVE_MINUTES,
+                limit=10
+              )
+
+              if not recent_data.empty:
+                # Определяем фактический результат
+                profit_loss = trade_result.get('profit_loss', 0)
+                if profit_loss > 0:
+                  actual_outcome = 1  # BUY был правильным
+                elif profit_loss < 0:
+                  actual_outcome = -1  # SELL был правильным
+                else:
+                  actual_outcome = 0  # HOLD
+
+                # Обновляем модель
+                lorentzian_strategy.update_model(symbol, recent_data, actual_outcome)
+                logger.info(f"Обновлена Lorentzian модель для {symbol} с результатом {actual_outcome}")
+
+          except Exception as e:
+            logger.error(f"Ошибка обновления Lorentzian модели: {e}")
 
         # 3. Обновляем веса в Enhanced ML (если используется)
         if self.use_enhanced_ml and self.enhanced_ml_model:

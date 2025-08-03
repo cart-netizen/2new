@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 from strategies.base_strategy import BaseStrategy
 from core.schemas import TradingSignal
-from core.enums import SignalType
+from core.enums import SignalType, Timeframe
 from utils.logging_config import get_logger
 
 # Импортируем наши новые компоненты
@@ -66,17 +66,54 @@ class LorentzianStrategy(BaseStrategy):
     self.classifier = None
     self.is_trained = False
 
-    # История для обучения
+    # # История для обучения
+    # self.training_history = []
+    # self.min_history_size = 500  # Минимум данных для обучения
+
+    # История для обучения - ИЗМЕНЕНО
     self.training_history = []
-    self.min_history_size = 500  # Минимум данных для обучения
+    # Адаптивный минимум данных в зависимости от таймфрейма
+    self.min_history_size = self.settings.get('min_history_size', 200)  # Уменьшили с 500
+    self.force_training = self.settings.get('force_training', True)  # Принудительное обучение
+
+    # Кеш для моделей по символам
+    self.models_cache = {}  # {symbol: classifier}
+    self.training_data_cache = {}  # {symbol: (features, labels)}
+    self.data_fetcher = None  # Будет установлен позже
+
+  def set_data_fetcher(self, data_fetcher):
+    """Устанавливает data_fetcher после инициализации"""
+    self.data_fetcher = data_fetcher
 
   async def generate_signal(self, symbol: str, data: pd.DataFrame) -> Optional[TradingSignal]:
     """
     Генерация торгового сигнала на основе Lorentzian Classification
     """
     try:
-      # Минимальная проверка данных
-      if len(data) < 50:
+      # # Минимальная проверка данных
+      # if len(data) < 50:
+      #   return None
+
+      # Проверяем кеш моделей для символа
+      if len(data) < self.min_history_size and self.data_fetcher:
+        logger.info(f"Загружаем дополнительные данные для {symbol}: текущее количество {len(data)}")
+        try:
+          # Загружаем больше исторических данных
+          extended_data = await self.data_fetcher.get_historical_candles(
+            symbol,
+            Timeframe.FIVE_MINUTES,
+            limit=2000  # Загружаем 1000 свечей
+          )
+
+          if not extended_data.empty and len(extended_data) > len(data):
+            data = extended_data
+            logger.info(f"Загружено {len(data)} свечей для {symbol}")
+        except Exception as e:
+          logger.error(f"Ошибка загрузки дополнительных данных: {e}")
+
+      # Проверяем минимум после попытки загрузки
+      if len(data) < 100:  # Абсолютный минимум
+        logger.warning(f"Недостаточно данных для {symbol}: {len(data)} < 100")
         return None
 
       # 1. Рассчитываем признаки
@@ -190,8 +227,11 @@ class LorentzianStrategy(BaseStrategy):
       labels_train = labels.loc[common_index]
 
       if len(features_train) < self.min_history_size:
-        logger.warning(f"Недостаточно данных для обучения: {len(features_train)} < {self.min_history_size}")
-        return False
+        if self.force_training and len(features_train) >= 100:
+          logger.warning(f"Принудительное обучение с {len(features_train)} примерами")
+        else:
+          logger.warning(f"Недостаточно данных для обучения: {len(features_train)} < {self.min_history_size}")
+          return False
 
       # Создаем и обучаем классификатор
       self.classifier = EnhancedLorentzianClassifier(
@@ -247,15 +287,135 @@ class LorentzianStrategy(BaseStrategy):
 
     return results
 
-  def update_model(self, new_data: pd.DataFrame, new_label: int):
+  def update_model(self, symbol: str, new_data: pd.DataFrame, actual_outcome: int):
     """
-    Обновление модели новыми данными (для онлайн обучения)
-    """
-    if self.is_trained and self.classifier:
-      # Добавляем в историю
-      self.training_history.append((new_data, new_label))
+    Полноценное инкрементальное обучение модели
 
-      # Переобучаем периодически
-      if len(self.training_history) % 100 == 0:
-        logger.info("Переобучение модели с новыми данными...")
-        # Здесь можно реализовать инкрементальное обучение
+    Args:
+        symbol: Торговый символ
+        new_data: DataFrame с новым баром (OHLCV)
+        actual_outcome: Фактический результат (-1=SELL, 0=HOLD, 1=BUY)
+    """
+    if symbol not in self.models_cache:
+      logger.warning(f"Модель для {symbol} не найдена в кеше")
+      return
+
+    try:
+      # Рассчитываем признаки для нового бара
+      new_features = self.indicators.calculate_features(
+        new_data,
+        self.feature_configs['f1'],
+        self.feature_configs['f2'],
+        self.feature_configs['f3'],
+        self.feature_configs['f4'],
+        self.feature_configs['f5']
+      )
+
+      if new_features.empty:
+        return
+
+      # Получаем вектор признаков
+      feature_vector = new_features.iloc[-1].values
+
+      # Инкрементально обновляем модель
+      classifier = self.models_cache[symbol]
+      classifier.incremental_update(feature_vector, actual_outcome, symbol)
+
+      # Обновляем кеш данных
+      if symbol not in self.training_data_cache:
+        self.training_data_cache[symbol] = {
+          'features': [],
+          'labels': [],
+          'update_count': 0,
+          'last_accuracy': 0.0
+        }
+
+      cache = self.training_data_cache[symbol]
+      cache['features'].append(feature_vector)
+      cache['labels'].append(actual_outcome)
+      cache['update_count'] += 1
+
+      # Ограничиваем размер кеша
+      if len(cache['features']) > self.max_bars_back:
+        cache['features'].pop(0)
+        cache['labels'].pop(0)
+
+      # Периодическая оценка качества
+      if cache['update_count'] % 20 == 0:
+        self._evaluate_model_performance(symbol)
+
+      # Сохранение модели каждые 100 обновлений
+      if cache['update_count'] % 100 == 0 and self.settings.get('save_models', True):
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        model_path = f"ml_models/lorentzian_{symbol}_{timestamp}.pkl"
+        classifier.save_model(model_path)
+        logger.info(f"Модель {symbol} сохранена после {cache['update_count']} обновлений")
+
+      logger.debug(f"Модель {symbol} обновлена. Всего обновлений: {cache['update_count']}")
+
+    except Exception as e:
+      logger.error(f"Ошибка инкрементального обновления для {symbol}: {e}", exc_info=True)
+
+  def _evaluate_model_performance(self, symbol: str):
+    """Оценивает текущую производительность модели"""
+    try:
+      cache = self.training_data_cache.get(symbol)
+      if not cache or len(cache['features']) < 50:
+        return
+
+      classifier = self.models_cache.get(symbol)
+      if not classifier:
+        return
+
+      # Берем последние 50 примеров для оценки
+      test_features = np.array(cache['features'][-50:])
+      test_labels = np.array(cache['labels'][-50:])
+
+      # Создаем DataFrame для предсказания
+      feature_names = [f'f{i + 1}' for i in range(self.feature_count)]
+      test_df = pd.DataFrame(test_features, columns=feature_names)
+
+      # Получаем предсказания
+      predictions = classifier.predict(test_df)
+
+      # Считаем точность
+      accuracy = np.mean(predictions == test_labels)
+
+      # Сравниваем с предыдущей точностью
+      improvement = accuracy - cache['last_accuracy']
+      cache['last_accuracy'] = accuracy
+
+      logger.info(f"Производительность {symbol}: точность={accuracy:.3f}, "
+                  f"изменение={improvement:+.3f}")
+
+      # Если производительность сильно упала, можем переобучить модель
+      if improvement < -0.1 and len(cache['features']) >= self.min_history_size:
+        logger.warning(f"Значительное падение производительности {symbol}. "
+                       f"Рекомендуется полное переобучение")
+
+    except Exception as e:
+      logger.error(f"Ошибка оценки производительности {symbol}: {e}")
+
+  def _update_nearest_neighbors(self, symbol: str, new_feature_vector: np.ndarray, new_label: int):
+    """
+    Быстрое обновление ближайших соседей без полного переобучения
+    Эмулирует поведение индикатора в TradingView
+    """
+    if symbol not in self.models_cache:
+      return
+
+    classifier = self.models_cache[symbol]
+
+    # Добавляем новую точку в обучающие данные
+    # Это упрощенная версия - в реальности нужно обновлять
+    # внутренние структуры EnhancedLorentzianClassifier
+
+    # Временное решение - помечаем модель для обновления
+    if not hasattr(classifier, 'pending_updates'):
+      classifier.pending_updates = []
+
+    classifier.pending_updates.append((new_feature_vector, new_label))
+
+    # Применяем обновления при следующем predict
+    if len(classifier.pending_updates) > 10:
+      logger.debug(f"Накоплено {len(classifier.pending_updates)} обновлений для {symbol}")

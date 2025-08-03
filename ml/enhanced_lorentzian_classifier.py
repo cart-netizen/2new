@@ -79,6 +79,42 @@ class EnhancedLorentzianClassifier(BaseEstimator, ClassifierMixin):
 
     return self
 
+  def incremental_update(self, new_X: np.ndarray, new_y: int, symbol: str = None):
+      """
+      Инкрементальное обновление модели новыми данными
+      Эмулирует поведение TradingView индикатора
+      """
+      if not self.is_fitted:
+        raise ValueError("Модель должна быть обучена перед инкрементальным обновлением")
+
+      # Добавляем новые данные в обучающий набор
+      self.training_data = np.vstack([self.training_data, new_X])
+      self.training_labels = np.append(self.training_labels, new_y)
+
+      # Ограничиваем размер по max_bars_back
+      if len(self.training_data) > self.max_bars_back:
+        # Удаляем старые данные (FIFO)
+        remove_count = len(self.training_data) - self.max_bars_back
+        self.training_data = self.training_data[remove_count:]
+        self.training_labels = self.training_labels[remove_count:]
+
+      # Обновляем статистику для быстрого поиска
+      self._update_search_statistics()
+
+      return True
+
+  def _update_search_statistics(self):
+    """Обновляет внутренние структуры для ускорения поиска"""
+    # Предвычисляем квартили для оптимизации поиска
+    if hasattr(self, '_distance_cache'):
+      self._distance_cache.clear()
+
+    # Обновляем индексы для быстрого доступа
+    self._sample_indices = np.arange(0, len(self.training_data), 4)
+
+    logger.debug(f"Обновлены структуры поиска: {len(self.training_data)} образцов, "
+                 f"{len(self._sample_indices)} индексов")
+
   def predict(self, X: pd.DataFrame) -> np.ndarray:
     """
     Предсказание с использованием Approximate Nearest Neighbors алгоритма

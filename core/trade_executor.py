@@ -62,12 +62,16 @@ class TradeExecutor:
       'total_slippage': 0.0
     }
 
-    self.execution_stats = {
-      'orders_placed': 0,
-      'orders_filled': 0,
-      'orders_failed': 0,
-      'total_slippage': 0.0
-    }
+    # Настройки умного размещения из конфига
+    self.smart_pricing_enabled = self.config.get('trade_settings', {}).get('use_smart_pricing', True)
+    self.smart_pricing_config = self.config.get('trade_settings', {}).get('smart_pricing', {
+      'max_spread_pct': 0.5,
+      'volume_imbalance_threshold': 2.0,
+      'order_book_depth': 10,
+      'position_reduction_factor': 0.8,
+      'enable_spread_protection': True,
+      'enable_volume_analysis': True
+    })
 
   async def _get_roi_details(self, symbol: str, signal: TradingSignal) -> Optional[Dict]:
     """Получает детали ROI для сигнала"""
@@ -93,6 +97,10 @@ class TradeExecutor:
       f"ИСПОЛНИТЕЛЬ для {symbol}: Получена команда на реальное исполнение. Сигнал: {signal.signal_type.value}, Кол-во: {quantity:.5f}")
     logger.info(
         f"Стратегия: {signal.strategy_name}")
+    # === УМНОЕ РАЗМЕЩЕНИЕ ОРДЕРОВ ===
+    if self.smart_pricing_enabled:
+      logger.info(f"🧠 Активировано умное размещение для {symbol}")
+      return await self.execute_trade_with_smart_pricing(signal, symbol, quantity)
 
     try:
       # === НОВЫЙ БЛОК: Проверка возраста сигнала ===
@@ -448,43 +456,209 @@ class TradeExecutor:
 
   async def execute_trade_with_smart_pricing(self, signal: TradingSignal, symbol: str, quantity: float) -> Tuple[
     bool, Optional[Dict]]:
-    """Использует стакан для умного размещения ордеров."""
+    """
+    Использует стакан ордеров для умного размещения ордеров.
+    Анализирует рыночные условия и корректирует параметры исполнения.
+    """
     try:
+      logger.info(f"🧠 Умное размещение для {symbol}: анализ рыночных условий...")
+
+      # Получаем конфигурацию умного размещения
+      depth = self.smart_pricing_config.get('order_book_depth', 10)
+      max_spread_pct = self.smart_pricing_config.get('max_spread_pct', 0.5)
+      volume_threshold = self.smart_pricing_config.get('volume_imbalance_threshold', 2.0)
+      reduction_factor = self.smart_pricing_config.get('position_reduction_factor', 0.8)
+
       # Получаем стакан ордеров
-      order_book = await self.connector.fetch_order_book(symbol, depth=10)
+      order_book = await self.connector.fetch_order_book(symbol, depth=depth)
 
-      if order_book and 'bids' in order_book and 'asks' in order_book:
-        best_bid = float(order_book['bids'][0][0]) if order_book['bids'] else 0
-        best_ask = float(order_book['asks'][0][0]) if order_book['asks'] else 0
+      # Анализ данных стакана
+      market_analysis = await self._analyze_order_book(order_book, symbol, max_spread_pct, volume_threshold)
 
-        # Анализируем дисбаланс объемов
-        total_bid_volume = sum(float(bid[1]) for bid in order_book['bids'][:5])
-        total_ask_volume = sum(float(ask[1]) for ask in order_book['asks'][:5])
+      # Корректируем количество на основе анализа
+      adjusted_quantity = await self._adjust_quantity_based_on_liquidity(
+        quantity, market_analysis, reduction_factor, signal.signal_type
+      )
 
-        # Корректируем размер позиции на основе ликвидности
-        if total_bid_volume > total_ask_volume * 2:
-          logger.info("Сильное давление покупателей")
-        elif total_ask_volume > total_bid_volume * 2:
-          logger.warning("Сильное давление продавцов, уменьшаем позицию")
-          quantity *= 0.8
+      # Логируем результаты анализа
+      self._log_market_analysis(symbol, market_analysis, quantity, adjusted_quantity)
 
-        # Используем market order но с информацией о спреде
-        spread = best_ask - best_bid
-        spread_pct = (spread / best_bid) * 100 if best_bid > 0 else 0
+      # Проверяем условия для исполнения
+      if not self._should_proceed_with_execution(market_analysis):
+        logger.warning(f"❌ Неблагоприятные рыночные условия для {symbol}, отменяем исполнение")
+        return False, None
 
-        logger.info(f"Стакан {symbol}: bid={best_bid:.4f}, ask={best_ask:.4f}, spread={spread_pct:.3f}%")
+      # Сохраняем данные анализа для последующей аналитики
+      await self._save_execution_analytics(symbol, signal, market_analysis, adjusted_quantity)
 
-        # Если спред слишком широкий, можем отложить исполнение
-        if spread_pct > 0.5:  # Более 0.5%
-          logger.warning(f"Широкий спред {spread_pct:.3f}% для {symbol}, требуется осторожность")
-
-      # Выполняем обычное исполнение с учетом анализа
-      return await self.execute_trade(signal, symbol, quantity)
+      # Выполняем обычное исполнение с откорректированными параметрами
+      logger.info(f"✅ Условия подходят, исполняем ордер для {symbol} с кол-вом {adjusted_quantity:.6f}")
+      return await self.execute_trade(signal, symbol, adjusted_quantity)
 
     except Exception as e:
-      logger.error(f"Ошибка умного размещения: {e}")
+      logger.error(f"❌ Ошибка умного размещения для {symbol}: {e}")
+      logger.info(f"🔄 Fallback на обычное исполнение для {symbol}")
       # Fallback на обычное исполнение
       return await self.execute_trade(signal, symbol, quantity)
+
+  async def _analyze_order_book(self, order_book: Optional[Dict], symbol: str,
+                                max_spread_pct: float, volume_threshold: float) -> Dict:
+    """Анализирует стакан ордеров и возвращает ключевые метрики"""
+    analysis = {
+      'has_data': False,
+      'best_bid': 0.0,
+      'best_ask': 0.0,
+      'spread_pct': 0.0,
+      'bid_volume': 0.0,
+      'ask_volume': 0.0,
+      'volume_imbalance': 0.0,
+      'liquidity_quality': 'unknown',
+      'spread_quality': 'unknown',
+      'weighted_bid': 0.0,
+      'weighted_ask': 0.0
+    }
+
+    if not order_book or 'bids' not in order_book or 'asks' not in order_book:
+      logger.warning(f"⚠️ Нет данных стакана для {symbol}")
+      return analysis
+
+    bids = order_book.get('bids', [])
+    asks = order_book.get('asks', [])
+
+    if not bids or not asks:
+      logger.warning(f"⚠️ Пустой стакан для {symbol}")
+      return analysis
+
+    # Базовые параметры
+    best_bid = float(bids[0][0])
+    best_ask = float(asks[0][0])
+    spread = best_ask - best_bid
+    spread_pct = (spread / best_bid) * 100 if best_bid > 0 else 0
+
+    # Анализ объемов (топ 5 уровней)
+    top_levels = 5
+    total_bid_volume = sum(float(bid[1]) for bid in bids[:top_levels])
+    total_ask_volume = sum(float(ask[1]) for ask in asks[:top_levels])
+
+    # Weighted average price (для лучшего понимания ликвидности)
+    weighted_bid = sum(float(bid[0]) * float(bid[1]) for bid in
+                       bids[:top_levels]) / total_bid_volume if total_bid_volume > 0 else best_bid
+    weighted_ask = sum(float(ask[0]) * float(ask[1]) for ask in
+                       asks[:top_levels]) / total_ask_volume if total_ask_volume > 0 else best_ask
+
+    # Расчет дисбаланса
+    total_volume = total_bid_volume + total_ask_volume
+    volume_imbalance = (total_bid_volume - total_ask_volume) / total_volume if total_volume > 0 else 0
+
+    # Качественная оценка
+    liquidity_quality = 'good'
+    if total_bid_volume < total_ask_volume * volume_threshold:
+      liquidity_quality = 'sell_pressure'
+    elif total_ask_volume < total_bid_volume * volume_threshold:
+      liquidity_quality = 'buy_pressure'
+
+    spread_quality = 'good' if spread_pct <= max_spread_pct else 'wide'
+
+    analysis.update({
+      'has_data': True,
+      'best_bid': best_bid,
+      'best_ask': best_ask,
+      'spread_pct': spread_pct,
+      'bid_volume': total_bid_volume,
+      'ask_volume': total_ask_volume,
+      'volume_imbalance': volume_imbalance,
+      'liquidity_quality': liquidity_quality,
+      'spread_quality': spread_quality,
+      'weighted_bid': weighted_bid,
+      'weighted_ask': weighted_ask
+    })
+
+    return analysis
+
+  async def _adjust_quantity_based_on_liquidity(self, original_quantity: float,
+                                                market_analysis: Dict, reduction_factor: float,
+                                                signal_type) -> float:
+    """Корректирует размер позиции на основе анализа ликвидности"""
+    if not market_analysis.get('has_data'):
+      return original_quantity
+
+    adjusted_quantity = original_quantity
+
+    # Уменьшаем позицию при давлении продавцов (для BUY ордеров)
+    if (signal_type.value == 'BUY' and market_analysis['liquidity_quality'] == 'sell_pressure'):
+      adjusted_quantity *= reduction_factor
+      logger.info(f"📉 Давление продавцов обнаружено, уменьшаем BUY позицию на {(1 - reduction_factor) * 100:.0f}%")
+
+    # Уменьшаем позицию при давлении покупателей (для SELL ордеров)
+    elif (signal_type.value == 'SELL' and market_analysis['liquidity_quality'] == 'buy_pressure'):
+      adjusted_quantity *= reduction_factor
+      logger.info(f"📈 Давление покупателей обнаружено, уменьшаем SELL позицию на {(1 - reduction_factor) * 100:.0f}%")
+
+    return adjusted_quantity
+
+  def _should_proceed_with_execution(self, market_analysis: Dict) -> bool:
+    """Определяет, стоит ли продолжать исполнение на основе анализа рынка"""
+    if not market_analysis.get('has_data'):
+      logger.info("📊 Нет данных стакана, продолжаем с обычным исполнением")
+      return True
+
+    # Проверяем защиту от широкого спреда
+    if (self.smart_pricing_config.get('enable_spread_protection', True) and
+        market_analysis['spread_quality'] == 'wide'):
+      logger.warning(f"⚠️ Широкий спред {market_analysis['spread_pct']:.3f}%, но продолжаем с осторожностью")
+      # Не блокируем исполнение, только предупреждаем
+
+    return True
+
+  def _log_market_analysis(self, symbol: str, analysis: Dict, original_qty: float, adjusted_qty: float):
+    """Логирует результаты анализа рынка"""
+    if not analysis.get('has_data'):
+      return
+
+    logger.info(f"📊 АНАЛИЗ СТАКАНА {symbol}:")
+    logger.info(f"  💰 Лучшие цены: bid={analysis['best_bid']:.6f}, ask={analysis['best_ask']:.6f}")
+    logger.info(f"  📏 Спред: {analysis['spread_pct']:.3f}% ({analysis['spread_quality']})")
+    logger.info(f"  📈 Объемы: bid={analysis['bid_volume']:.2f}, ask={analysis['ask_volume']:.2f}")
+    logger.info(f"  ⚖️ Дисбаланс: {analysis['volume_imbalance'] * 100:.1f}% ({analysis['liquidity_quality']})")
+    logger.info(f"  🎯 Взвешенные цены: bid={analysis['weighted_bid']:.6f}, ask={analysis['weighted_ask']:.6f}")
+
+    if abs(adjusted_qty - original_qty) > 0.0001:
+      change_pct = ((adjusted_qty - original_qty) / original_qty) * 100
+      logger.info(f"  🔧 Корректировка количества: {original_qty:.6f} → {adjusted_qty:.6f} ({change_pct:+.1f}%)")
+
+  async def _save_execution_analytics(self, symbol: str, signal: TradingSignal,
+                                      market_analysis: Dict, adjusted_quantity: float):
+    """Сохраняет данные анализа для последующей аналитики"""
+    try:
+      if not market_analysis.get('has_data'):
+        return
+
+      # Создаем метаданные для сохранения в БД
+      execution_metadata = {
+        'smart_pricing_used': True,
+        'order_book_analysis': {
+          'spread_pct': market_analysis['spread_pct'],
+          'volume_imbalance': market_analysis['volume_imbalance'],
+          'liquidity_quality': market_analysis['liquidity_quality'],
+          'spread_quality': market_analysis['spread_quality'],
+          'bid_volume': market_analysis['bid_volume'],
+          'ask_volume': market_analysis['ask_volume']
+        },
+        'quantity_adjustment': {
+          'original': signal.metadata.get('original_quantity') if signal.metadata else None,
+          'adjusted': adjusted_quantity
+        }
+      }
+
+      # Обновляем метаданные сигнала
+      if not signal.metadata:
+        signal.metadata = {}
+      signal.metadata.update(execution_metadata)
+
+      logger.debug(f"💾 Сохранены метаданные умного размещения для {symbol}")
+
+    except Exception as e:
+      logger.error(f"Ошибка сохранения аналитики исполнения для {symbol}: {e}")
 
   async def close_position(self, symbol: str) -> bool:
     """
@@ -519,79 +693,35 @@ class TradeExecutor:
         # --- КОНЕЦ ЛОГИКИ ---
         return True  # Считаем задачу выполненной в любом случае
 
-      # Если позиция на бирже есть, продолжаем стандартное закрытие
-      pos_size_str = active_position.get('size', '0')
-      pos_side = active_position.get('side')
-      logger.info(f"Найдена позиция на бирже: {pos_side} {pos_size_str} {symbol}")
+        # Если позиция на бирже есть, продолжаем стандартное закрытие
+        pos_size_str = active_position.get('size', '0')
+        pos_side = active_position.get('side')
+        logger.info(f"Найдена позиция на бирже: {pos_side} {pos_size_str} {symbol}")
 
-      # 3. Формируем ордер на закрытие
-      close_side = "Sell" if pos_side == "Buy" else "Buy"
-      params = {
-        'symbol': symbol,
-        'side': close_side,
-        'orderType': 'Market',
-        'qty': str(float(pos_size_str)),
-        'reduceOnly': True,
-        'positionIdx': 0
-      }
-      # 4. Отправляем ордер
-      # Правильные параметры для bybit_connector.place_order
-      order_params = {
-        'symbol': symbol,
-        'side': 'Buy' if signal.signal_type == SignalType.BUY else 'Sell',
-        'order_type': 'Market',
-        'quantity': quantity,
-        'price': None,  # Для рыночных ордеров
-        'time_in_force': 'GTC'
-      }
+        # 3. Формируем ордер на закрытие
+        close_side = "Sell" if pos_side == "Buy" else "Buy"
+        quantity_to_close = abs(float(pos_size_str))
 
-      # Добавляем SL/TP если указаны
-      if signal.stop_loss and signal.stop_loss != 0:
-        order_params['stopLoss'] = signal.stop_loss
-      if signal.take_profit and signal.take_profit != 0:
-        order_params['takeProfit'] = signal.take_profit
+        params = {
+          'symbol': symbol,
+          'side': close_side,
+          'orderType': 'Market',
+          'qty': str(quantity_to_close),
+          'reduceOnly': True,
+          'positionIdx': 0
+        }
 
-      logger.info(f"Отправка ордера на открытие: {order_params}")
+        # 4. Отправляем ордер
+        logger.info(f"Отправка ордера на закрытие: {params}")
+        order_response = await self.connector.place_order(**params)
 
-      from core.circuit_breaker import get_circuit_breaker_manager, CircuitBreakerOpenError
-
-      # Получаем circuit breaker
-      circuit_manager = get_circuit_breaker_manager()
-      order_breaker = circuit_manager.get_breaker('order_execution')
-
-      try:
-        order_response = await order_breaker.call(
-          self.connector.place_order,
-          symbol=order_params['symbol'],
-          side=order_params['side'],
-          order_type=order_params['order_type'],
-          quantity=order_params['quantity'],
-          price=order_params.get('price'),
-          time_in_force=order_params.get('time_in_force', 'GTC'),
-          **{k: v for k, v in order_params.items() if
-             k not in ['symbol', 'side', 'order_type', 'quantity', 'price', 'time_in_force']}
-        )
-      except CircuitBreakerOpenError as e:
-        logger.error(f"Circuit breaker блокирует исполнение ордера для {symbol}: {e}")
-        return False, None
-
-      # 5. Проверяем результат
-      if order_response and order_response.get('orderId'):
-        logger.info(f"✅ Ордер на закрытие {symbol} успешно принят биржей. OrderID: {order_response.get('orderId')}")
-
-        # if hasattr(self, 'integrated_system') and self.integrated_system:
-        #     await self.integrated_system.position_manager.on_position_closed(symbol, profit_loss)
-
-        # ВАЖНО: На этом этапе мы только отправили ордер.
-        # Расчет PnL и обновление статуса в БД на 'CLOSED' должно происходить
-        # в отдельном процессе, который отслеживает исполнение ордеров.
-
-        return True
-
-
-      else:
-        logger.error(f"❌ Не удалось разместить ордер на закрытие для {symbol}. Ответ биржи: {order_response}")
-        return False
+        # 5. Обрабатываем результат
+        if order_response and order_response.get('orderId'):
+          logger.info(f"✅ Ордер на закрытие успешно размещен. OrderID: {order_response.get('orderId')}")
+          return True
+        else:
+          logger.error(f"❌ Не удалось разместить ордер на закрытие для {symbol}. Ответ биржи: {order_response}")
+          return False
 
     except Exception as e:
       logger.error(f"Критическая ошибка при закрытии позиции {symbol}: {e}", exc_info=True)

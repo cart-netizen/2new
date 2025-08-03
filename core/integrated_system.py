@@ -33,6 +33,7 @@ from strategies.ichimoku_strategy import IchimokuStrategy
 from strategies.mean_reversion_strategy import MeanReversionStrategy
 from strategies.momentum_strategy import MomentumStrategy
 from strategies.sar_strategy import StopAndReverseStrategy
+from strategies.lorentzian_strategy import LorentzianStrategy
 from utils.logging_config import get_logger
 from config import trading_params, api_keys, settings
 from core.data_fetcher import DataFetcher
@@ -143,6 +144,18 @@ class IntegratedTradingSystem:
 
     momentum_strategy = MomentumStrategy()
     self.strategy_manager.add_strategy(momentum_strategy)
+
+    if self.config.get('strategies', {}).get('lorentzian', {}).get('enabled', False):
+      try:
+        # Передаем только соответствующий блок конфигурации
+        lorentzian_config = self.config.get('strategies', {}).get('lorentzian', {})
+        lorentzian_strategy = LorentzianStrategy(config=lorentzian_config)
+        self.strategy_manager.add_strategy(lorentzian_strategy)
+        logger.info("✅ Lorentzian Classification стратегия зарегистрирована")
+      except Exception as e:
+        logger.error(f"Ошибка инициализации Lorentzian стратегии: {e}")
+    else:
+      logger.info("ℹ️ Lorentzian Classification стратегия отключена в конфиге.")
 
     try:
 
@@ -622,10 +635,12 @@ class IntegratedTradingSystem:
           return
 
       # Сбор сигналов от всех рекомендованных стратегий
-      all_strategies_to_check = list(set(regime_params.recommended_strategies + [
-        "Live_ML_Strategy", "Ichimoku_Cloud", "Dual_Thrust",
-        "Mean_Reversion_BB", "Momentum_Spike", "Stop_and_Reverse"
-      ]))
+      # all_strategies_to_check = list(set(regime_params.recommended_strategies + [
+      #   "Live_ML_Strategy", "Ichimoku_Cloud", "Dual_Thrust",
+      #   "Mean_Reversion_BB", "Momentum_Spike", "Stop_and_Reverse"
+      # ]))
+      all_registered_strategies = list(self.strategy_manager.strategies.keys())
+      all_strategies_to_check = list(set(regime_params.recommended_strategies + all_registered_strategies))
 
       signal_logger.info(f"🔍 Сбор сигналов от {len(all_strategies_to_check)} стратегий для {symbol}")
       logger.info(f"📋 Проверяем стратегии: {all_strategies_to_check}")
@@ -1049,18 +1064,18 @@ class IntegratedTradingSystem:
     self.state_manager.update_pending_signals(pending_signals)
 
     # ВРЕМЕННО: исполняем сразу без ожидания LTF подтверждения
-    logger.info(f"🚀 НЕМЕДЛЕННОЕ исполнение сигнала для {symbol}")
-    success, result = await self.trade_executor.execute_trade(signal, symbol, final_size)
+    # logger.info(f"🚀 НЕМЕДЛЕННОЕ исполнение сигнала для {symbol}")
+    # success, result = await self.trade_executor.execute_trade(signal, symbol, final_size)
 
-    if success:
-      logger.info(f"✅ Сделка {symbol} успешно открыта напрямую!")
-      # Удаляем из pending после исполнения
-      pending_signals = self.state_manager.get_pending_signals()
-      if symbol in pending_signals:
-        del pending_signals[symbol]
-        self.state_manager.update_pending_signals(pending_signals)
-    else:
-      logger.error(f"❌ Ошибка немедленного исполнения {symbol}: {result}")
+    # if success:
+    #   logger.info(f"✅ Сделка {symbol} успешно открыта напрямую!")
+    #   # Удаляем из pending после исполнения
+    #   pending_signals = self.state_manager.get_pending_signals()
+    #   if symbol in pending_signals:
+    #     del pending_signals[symbol]
+    #     self.state_manager.update_pending_signals(pending_signals)
+    # else:
+    #   logger.error(f"❌ Ошибка немедленного исполнения {symbol}: {result}")
 
     logger.info(f"✅ Enhanced сигнал для {symbol} одобрен и поставлен в очередь")
     signal_logger.info(f"====== ENHANCED СИГНАЛ ДЛЯ {symbol} ПОСТАВЛЕН В ОЧЕРЕДЬ ======")

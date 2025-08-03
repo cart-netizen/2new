@@ -114,7 +114,7 @@ class StopAndReverseStrategy(BaseStrategy):
         self.symbol_update_interval = timedelta(hours=1)
         
         # ML модели интеграция (для быстрого включения)
-        self.use_ml_confirmation = self.sar_config.get('use_ml_confirmation', False)
+        self.use_ml_confirmation = self.sar_config.get('use_ml_confirmation', True)
         self.ml_weight = self.sar_config.get('ml_weight', 1.0)
         
         # Текущие позиции стратегии
@@ -278,6 +278,8 @@ class StopAndReverseStrategy(BaseStrategy):
         try:
             components = SARSignalComponents()
 
+
+
             # Расчет индикаторов (предполагаем что они уже рассчитаны в data)
             psar_value = data['psar'].iloc[-1] if 'psar' in data.columns else None
             rsi_value = data['rsi'].iloc[-1] if 'rsi' in data.columns else 50.0
@@ -320,11 +322,11 @@ class StopAndReverseStrategy(BaseStrategy):
 
             config = getattr(self, 'config', {})
             strategy_settings = config.get('strategy_settings', {})
-            ltf_str = strategy_settings.get('ltf_entry_timeframe', '15m')
+            ltf_str = strategy_settings.get('ltf_entry_timeframe', '5m')
 
             config = getattr(self, 'config', {})
             strategy_settings = config.get('strategy_settings', {})
-            ltf_str = strategy_settings.get('ltf_entry_timeframe', '15m')
+            ltf_str = strategy_settings.get('ltf_entry_timeframe', '5m')
             # psar_value = data['psar'].iloc[-1]
             # Создаем сигнал с правильными параметрами
             signal = TradingSignal(

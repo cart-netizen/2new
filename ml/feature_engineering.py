@@ -1264,6 +1264,24 @@ class AdvancedFeatureEngineer:
 
         return df_with_indicators
 
+    def add_lorentzian_indicators(self, data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Добавляет индикаторы для Lorentzian Classification
+        """
+        from ml.lorentzian_indicators import LorentzianIndicators
+
+        # HLC3 для WaveTrend
+        data['hlc3'] = (data['high'] + data['low'] + data['close']) / 3
+
+        # Нормализованные индикаторы
+        data['n_rsi_14'] = LorentzianIndicators.n_rsi(data['close'], 14, 1)
+        data['n_rsi_9'] = LorentzianIndicators.n_rsi(data['close'], 9, 1)
+        data['n_wt'] = LorentzianIndicators.n_wt(data['hlc3'], 10, 11)
+        data['n_cci'] = LorentzianIndicators.n_cci(data['high'], data['low'], data['close'], 20, 1)
+        data['n_adx'] = LorentzianIndicators.n_adx(data['high'], data['low'], data['close'], 20)
+
+        return data
+
     def _final_preparation(self, features: pd.DataFrame, labels: Optional[pd.Series] = None) -> Tuple[
         Optional[pd.DataFrame], Optional[pd.Series]]:
         """

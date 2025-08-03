@@ -131,13 +131,23 @@
     },
     "trade_settings": {
         "leverage": 10,
-        "order_size_type": "fixed",
+        "order_size_type": "percentage",
         "order_size_value": 1.0,
         "min_order_value_usdt": 5.5,
         "grid_total_usdt_allocation": 10.0,
         "roi_stop_loss_pct": 8.0,
-        "roi_take_profit_pct": 40.0
-    },
+        "roi_take_profit_pct": 40.0,
+        "use_smart_pricing": true,
+        "smart_pricing": {
+        "max_spread_pct": 0.5,
+        "volume_imbalance_threshold": 2.0,
+        "order_book_depth": 10,
+        "position_reduction_factor": 0.8,
+        "enable_spread_protection": true,
+        "enable_volume_analysis": true
+    }
+
+},
     "strategy_settings": {
         "signal_confidence_threshold": 0.6,
         "use_trend_filter": true,
@@ -321,5 +331,157 @@
         "min_signal_score": 4,
         "min_daily_volume_usd": 1000000,
         "max_monitored_symbols": 100
+    },
+    "strategies": {
+    "lorentzian": {
+      "enabled": true,
+      "strategy_type": "LorentzianStrategy",
+
+      "strategy_settings": {
+        "// Основные параметры модели": "",
+        "neighbors_count": 8,
+        "max_bars_back": 2000,
+        "feature_count": 5,
+
+        "// Конфигурация признаков (как в оригинале)": "",
+        "feature_1": {
+          "type": "RSI",
+          "paramA": 14,
+          "paramB": 1
+        },
+
+        "feature_2": {
+          "type": "WT",
+          "paramA": 10,
+          "paramB": 11,
+          "_comment": "WaveTrend Classic"
+        },
+
+        "feature_3": {
+          "type": "CCI",
+          "paramA": 20,
+          "paramB": 1,
+          "_comment": "Commodity Channel Index"
+        },
+
+        "feature_4": {
+          "type": "ADX",
+          "paramA": 20,
+          "paramB": 2,
+          "_comment": "Average Directional Index"
+        },
+
+        "feature_5": {
+          "type": "RSI",
+          "paramA": 9,
+          "paramB": 1,
+          "_comment": "Второй RSI с коротким периодом"
+        },
+
+        "// Настройки фильтров": "",
+        "use_volatility_filter": true,
+        "use_regime_filter": true,
+        "use_adx_filter": false,
+        "regime_threshold": -0.1,
+        "adx_threshold": 20,
+
+        "// Настройки торговли": "",
+        "use_dynamic_exits": false,
+        "show_bar_predictions": true,
+
+        "// Пороги для сигналов": "",
+        "signal_confidence_threshold": 0.6,
+
+        "// Risk management": "",
+        "stop_loss_atr_multiplier": 2.0,
+        "take_profit_atr_multiplier": 3.0,
+
+        "// Дополнительные параметры": "",
+        "min_history_size": 500,
+        "retrain_interval": 1000,
+        "use_ema_filter": false,
+        "ema_period": 200,
+        "use_sma_filter": false,
+        "sma_period": 200
+      },
+
+      "risk_management": {
+        "position_size_percent": 2.0,
+        "max_positions": 1,
+        "max_daily_loss_percent": 5.0,
+        "max_drawdown_percent": 10.0
+      },
+
+      "timeframes": ["5m", "15m", "1h"],
+      "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+
+      "advanced_settings": {
+        "use_kernel_filter": true,
+        "kernel_settings": {
+          "lookback_window": 8,
+          "relative_weighting": 8.0,
+          "regression_level": 25,
+          "lag": 2
+        },
+
+        "color_compression": 1,
+        "use_worst_case_estimates": false,
+
+        "// Альтернативные конфигурации признаков": "",
+        "alternative_features": {
+          "conservative": {
+            "feature_1": {"type": "RSI", "paramA": 21, "paramB": 1},
+            "feature_2": {"type": "WT", "paramA": 10, "paramB": 11},
+            "feature_3": {"type": "CCI", "paramA": 20, "paramB": 1},
+            "feature_4": {"type": "ADX", "paramA": 20, "paramB": 2},
+            "feature_5": {"type": "RSI", "paramA": 14, "paramB": 1}
+          },
+          "aggressive": {
+            "feature_1": {"type": "RSI", "paramA": 9, "paramB": 1},
+            "feature_2": {"type": "WT", "paramA": 9, "paramB": 10},
+            "feature_3": {"type": "CCI", "paramA": 14, "paramB": 1},
+            "feature_4": {"type": "ADX", "paramA": 14, "paramB": 2},
+            "feature_5": {"type": "RSI", "paramA": 7, "paramB": 1}
+          },
+          "scalping": {
+            "feature_1": {"type": "RSI", "paramA": 7, "paramB": 1},
+            "feature_2": {"type": "WT", "paramA": 5, "paramB": 7},
+            "feature_3": {"type": "CCI", "paramA": 10, "paramB": 1},
+            "feature_4": {"type": "ADX", "paramA": 10, "paramB": 2},
+            "feature_5": {"type": "RSI", "paramA": 5, "paramB": 1}
+          }
+        }
+      }
     }
+  },
+
+  "// Глобальные настройки для Lorentzian стратегии": "",
+  "lorentzian_global": {
+    "data_requirements": {
+      "min_candles": 2000,
+      "preferred_candles": 5000,
+      "max_candles": 10000
+    },
+
+    "performance_optimization": {
+      "use_numba": true,
+      "cache_predictions": true,
+      "cache_ttl_seconds": 60,
+      "parallel_processing": false
+    },
+
+    "backtesting": {
+      "use_worst_case": false,
+      "include_fees": true,
+      "slippage_percent": 0.1
+    },
+
+    "logging": {
+      "log_predictions": true,
+      "log_features": false,
+      "log_filters": true,
+      "save_model_periodically": true,
+      "model_save_interval_hours": 24
+    }
+  }
 }

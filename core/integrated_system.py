@@ -814,8 +814,26 @@ class IntegratedTradingSystem:
           logger.debug(f"Получение ML предсказания для {symbol}...")
           _, ml_prediction = self.enhanced_ml_model.predict_proba(htf_data)
 
+          # if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
+          #   candidate_signals['ML_Enhanced'] = ml_prediction
           if ml_prediction and ml_prediction.signal_type != SignalType.HOLD:
-            candidate_signals['ML_Enhanced'] = ml_prediction
+            current_price = htf_data['close'].iloc[-1]
+            # Преобразуем MLPrediction в TradingSignal
+            ml_trading_signal = TradingSignal(
+              symbol=symbol,
+              signal_type=ml_prediction.signal_type,
+              confidence=ml_prediction.confidence,
+              price=current_price,
+              timestamp=datetime.now(timezone.utc),
+              strategy_name="ML_Enhanced",
+              metadata={
+                'model_agreement': ml_prediction.model_agreement,
+                'risk_assessment': ml_prediction.risk_assessment,
+                'feature_importance': ml_prediction.feature_importance,
+                'ml_metadata': ml_prediction.metadata
+              }
+            )
+            candidate_signals['ML_Enhanced'] = ml_trading_signal
             signal_logger.info(
               f"🤖 ML_Enhanced: {ml_prediction.signal_type.value}, уверенность: {ml_prediction.confidence:.3f}")
         except Exception as ml_error:
@@ -1114,8 +1132,8 @@ class IntegratedTradingSystem:
     self.state_manager.update_pending_signals(pending_signals)
 
     # ВРЕМЕННО: исполняем сразу без ожидания LTF подтверждения
-    # logger.info(f"🚀 НЕМЕДЛЕННОЕ исполнение сигнала для {symbol}")
-    # success, result = await self.trade_executor.execute_trade(signal, symbol, final_size)
+    logger.info(f"🚀 НЕМЕДЛЕННОЕ исполнение сигнала для {symbol}")
+    success, result = await self.trade_executor.execute_trade(signal, symbol, final_size)
 
     # if success:
     #   logger.info(f"✅ Сделка {symbol} успешно открыта напрямую!")
@@ -5018,7 +5036,7 @@ class IntegratedTradingSystem:
           try:
             # Получаем стратегию
             lorentzian_strategy = None
-            for strategy in self.strategies.values():
+            for strategy in self.strategy_manager.strategies.values():
               if hasattr(strategy, 'strategy_name') and 'lorentzian' in strategy.strategy_name.lower():
                 lorentzian_strategy = strategy
                 break

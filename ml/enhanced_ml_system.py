@@ -1599,6 +1599,8 @@ class EnhancedEnsembleModel:
         logger.info(f"После оптимизации осталось {len(final_columns)} признаков.")
 
       self.selected_features = list(X_clean.columns)
+      self.feature_names_ = self.selected_features.copy()
+      logger.info(f"✅ Сохранены названия признаков для обучения: {len(self.feature_names_)} признаков")
 
       # Шаг 3: Скалирование
       # logger.debug("Скалирование признаков...")
@@ -1688,6 +1690,10 @@ class EnhancedEnsembleModel:
         logger.warning(f"Мета-модель не обучена: {self.meta_model_stats.get('fallback_reason', 'unknown')}")
         logger.info("Система будет работать только с базовыми моделями")
         self.meta_model = None  # Отключаем мета-модель
+
+      if not hasattr(self, 'feature_names_'):
+        self.feature_names_ = self.selected_features.copy() if hasattr(self, 'selected_features') else []
+        logger.info(f"✅ Сохранены названия признаков для обучения: {len(self.feature_names_)} признаков")
 
       self.is_fitted = True
       # self.training_feature_info = {
@@ -1838,6 +1844,10 @@ class EnhancedEnsembleModel:
       logger.warning(f"Мета-модель не обучена: {self.meta_model_stats.get('fallback_reason', 'unknown')}")
       logger.info("Система будет работать только с базовыми моделями")
       # Не устанавливаем meta_model в None, так как ее может не быть
+
+    if not hasattr(self, 'feature_names_'):
+      self.feature_names_ = self.selected_features.copy() if hasattr(self, 'selected_features') else []
+      logger.info(f"✅ Сохранены названия признаков для обучения: {len(self.feature_names_)} признаков")
 
     self.is_fitted = True
     logger.info("=" * 20 + " ОБУЧЕНИЕ С ПОДБОРОМ ГИПЕРПАРАМЕТРОВ ЗАВЕРШЕНО " + "=" * 20)

@@ -493,13 +493,56 @@ class TradeExecutor:
 
       # Выполняем обычное исполнение с откорректированными параметрами
       logger.info(f"✅ Условия подходят, исполняем ордер для {symbol} с кол-вом {adjusted_quantity:.6f}")
-      return await self.execute_trade(signal, symbol, adjusted_quantity)
+      # return await self.execute_trade(signal, symbol, adjusted_quantity)
+      return await self._execute_regular_trade(signal, symbol, adjusted_quantity)
 
     except Exception as e:
       logger.error(f"❌ Ошибка умного размещения для {symbol}: {e}")
       logger.info(f"🔄 Fallback на обычное исполнение для {symbol}")
       # Fallback на обычное исполнение
       return await self.execute_trade(signal, symbol, quantity)
+
+  async def _execute_regular_trade(self, signal: TradingSignal, symbol: str, quantity: float) -> Tuple[
+    bool, Optional[Dict]]:
+    """Исполняет торговый сигнал без умного размещения (избегает рекурсии)"""
+    try:
+      # Получаем текущую цену из последних данных
+      try:
+        recent_data = await self.data_fetcher.get_historical_candles(
+          symbol, Timeframe.ONE_MINUTE, limit=1
+        )
+        if not recent_data.empty:
+          current_price = recent_data['close'].iloc[-1]
+        else:
+          logger.error(f"Не удалось получить текущую цену для {symbol}")
+          return False, None
+      except Exception as price_error:
+        logger.error(f"Ошибка получения цены для {symbol}: {price_error}")
+        return False, None
+
+      # Определяем параметры ордера
+      order_side = "Buy" if signal.signal_type == SignalType.BUY else "Sell"
+
+      # Используем правильный метод place_order из BybitConnector
+      result = await self.connector.place_order(
+        symbol=symbol,
+        side=order_side,
+        order_type='Market',
+        quantity=quantity,
+        category='linear',
+        positionIdx=0
+      )
+
+      if result and result.get('orderId'):
+        logger.info(f"✅ Ордер {symbol} успешно исполнен: {order_side} {quantity}")
+        return True, result
+      else:
+        logger.error(f"❌ Ошибка исполнения ордера {symbol}: {result}")
+        return False, None
+
+    except Exception as e:
+      logger.error(f"❌ Ошибка в _execute_regular_trade для {symbol}: {e}")
+      return False, None
 
   async def _analyze_order_book(self, order_book: Optional[Dict], symbol: str,
                                 max_spread_pct: float, volume_threshold: float) -> Dict:

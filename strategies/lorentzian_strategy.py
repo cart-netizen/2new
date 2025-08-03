@@ -12,6 +12,10 @@ from utils.logging_config import get_logger
 from ml.lorentzian_indicators import LorentzianIndicators, LorentzianFilters
 from ml.enhanced_lorentzian_classifier import EnhancedLorentzianClassifier, create_lorentzian_labels
 
+import pickle
+import os
+from functools import lru_cache
+
 logger = get_logger(__name__)
 
 
@@ -80,6 +84,14 @@ class LorentzianStrategy(BaseStrategy):
     self.models_cache = {}  # {symbol: classifier}
     self.training_data_cache = {}  # {symbol: (features, labels)}
     self.data_fetcher = None  # Будет установлен позже
+    self.performance_optimization = config.get('advanced_settings', {}).get('performance_optimization', {})
+    self.use_numba = self.performance_optimization.get('use_numba', True)
+    self.cache_predictions = self.performance_optimization.get('cache_predictions', True)
+    self.cache_ttl_seconds = self.performance_optimization.get('cache_ttl_seconds', 60)
+
+    # Директория для сохранения моделей
+    self.models_dir = "ml_models/lorentzian"
+    os.makedirs(self.models_dir, exist_ok=True)
 
   def set_data_fetcher(self, data_fetcher):
     """Устанавливает data_fetcher после инициализации"""
@@ -345,7 +357,7 @@ class LorentzianStrategy(BaseStrategy):
         self._evaluate_model_performance(symbol)
 
       # Сохранение модели каждые 100 обновлений
-      if cache['update_count'] % 100 == 0 and self.settings.get('save_models', True):
+      if cache['update_count'] % 2 == 0 and self.settings.get('save_models', True):
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         model_path = f"ml_models/lorentzian_{symbol}_{timestamp}.pkl"
         classifier.save_model(model_path)
@@ -399,7 +411,7 @@ class LorentzianStrategy(BaseStrategy):
   def _update_nearest_neighbors(self, symbol: str, new_feature_vector: np.ndarray, new_label: int):
     """
     Быстрое обновление ближайших соседей без полного переобучения
-    Эмулирует поведение индикатора в TradingView
+    эмулирует поведение индикатора в TradingView
     """
     if symbol not in self.models_cache:
       return
@@ -419,3 +431,30 @@ class LorentzianStrategy(BaseStrategy):
     # Применяем обновления при следующем predict
     if len(classifier.pending_updates) > 10:
       logger.debug(f"Накоплено {len(classifier.pending_updates)} обновлений для {symbol}")
+
+  async def process_trade_feedback(self, symbol: str, trade_result: Dict) -> None:
+    """Обрабатывает результаты сделки для переобучения модели"""
+    try:
+      # Определяем фактический результат
+      profit_loss = trade_result.get('profit_loss', 0)
+      if profit_loss > 0:
+        actual_outcome = 1  # Сигнал был правильным
+      elif profit_loss < 0:
+        actual_outcome = -1  # Сигнал был неправильным
+      else:
+        actual_outcome = 0  # Нейтральный результат
+
+      # Получаем последние данные для обновления модели
+      if hasattr(self, 'data_fetcher') and self.data_fetcher:
+        recent_data = await self.data_fetcher.get_historical_candles(
+          symbol,
+          Timeframe.FIVE_MINUTES,
+          limit=50
+        )
+
+        if not recent_data.empty:
+          self.update_model(symbol, recent_data, actual_outcome)
+          logger.info(f"✅ Lorentzian модель обновлена для {symbol}, результат: {actual_outcome}")
+
+    except Exception as e:
+      logger.error(f"Ошибка обработки торгового отзыва в Lorentzian: {e}")

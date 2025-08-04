@@ -341,9 +341,9 @@
       "strategy_settings": {
         "// Основные параметры модели": "",
         "neighbors_count": 8,
-        "max_bars_back": 2000,
+        "max_bars_back": 5000,
         "feature_count": 5,
-        "min_history_size": 200,
+        "min_history_size": 2000,
         "force_training": true,
         "initial_data_limit": 1000,
         "save_models": true,
@@ -457,7 +457,69 @@
             "feature_4": {"type": "ADX", "paramA": 10, "paramB": 2},
             "feature_5": {"type": "RSI", "paramA": 5, "paramB": 1}
           }
+        },
+        "wavetrend_3d_modes": {
+          "conservative": {
+            "divergence_size_percent": 60,
+            "min_confidence_threshold": 0.7,
+            "conflict_resolution": "skip",
+            "speed_to_emphasize": "Slow"
+          },
+          "aggressive": {
+            "divergence_size_percent": 30,
+            "min_confidence_threshold": 0.5,
+            "conflict_resolution": "reduce_confidence",
+            "speed_to_emphasize": "Fast"
+          },
+          "balanced": {
+            "divergence_size_percent": 40,
+            "min_confidence_threshold": 0.6,
+            "conflict_resolution": "reduce_confidence",
+            "speed_to_emphasize": "Normal"
+          }
         }
+      },
+      "use_wavetrend_3d": true,
+      "wavetrend_3d": {
+        "// Основные параметры": "",
+        "oscillator_lookback": 20,
+        "quadratic_mean_length": 50,
+
+        "// Параметры осцилляторов": "",
+        "fast_length": 0.75,
+        "fast_smoothing": 0.45,
+        "normal_length": 1.0,
+        "normal_smoothing": 1.0,
+        "slow_length": 1.75,
+        "slow_smoothing": 2.5,
+
+        "// Параметры дивергенций": "",
+        "divergence_distance": 30,
+        "divergence_size_percent": 40,
+
+        "// Kernel параметры": "",
+        "use_kernel_filter": true,
+        "kernel_lookback": 8,
+        "kernel_relative_weight": 8.0,
+        "kernel_regression_start": 25,
+        "kernel_lag": 2,
+
+        "// Зоны перекупленности/перепроданности": "",
+        "overbought_primary": 0.5,
+        "overbought_secondary": 0.75,
+        "oversold_primary": -0.5,
+        "oversold_secondary": -0.75,
+
+        "// Режимы работы": "",
+        "use_mirror": false,
+        "use_dynamic_exits": true,
+        "speed_to_emphasize": "Normal",
+
+        "// Интеграция с Lorentzian": "",
+        "integration_mode": "confirmation",
+        "min_confidence_threshold": 0.6,
+        "conflict_resolution": "reduce_confidence",
+        "signal_weight": 0.3
       }
     }
   },

@@ -411,7 +411,7 @@ class DataFetcher:
       self,
       symbol: str,
       timeframe: Timeframe,
-      limit: int = 250,
+      limit: int = 1000,
       use_cache: bool = True
   ) -> pd.DataFrame:
     """Получает исторические свечи с возможностью кэширования"""

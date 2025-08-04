@@ -1780,8 +1780,9 @@ class EnhancedEnsembleModel:
         self.training_features = self.selected_features.copy()
         logger.info(f"Сохранена информация о {len(self.training_features)} признаках обучения")
       else:
-        logger.warning("Информация о выбранных признаках отсутствует")
-
+        # logger.warning("Информация о выбранных признаках отсутствует")
+        self.training_features = list(X_train_resampled.columns) if hasattr(self, 'feature_names_') else []
+        logger.warning(f"Fallback: сохранено {len(self.training_features)} признаков из данных")
 
     except Exception as e:
       logger.error(f"Критическая ошибка при обучении модели: {e}", exc_info=True)

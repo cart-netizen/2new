@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
+from ml.wavetrend_3d import WaveTrend3D
 
 from strategies.base_strategy import BaseStrategy
 from core.schemas import TradingSignal
@@ -33,7 +34,7 @@ class LorentzianStrategy(BaseStrategy):
 
     # Настройки модели (как в оригинале)
     self.neighbors_count = self.settings.get('neighbors_count', 8)
-    self.max_bars_back = self.settings.get('max_bars_back', 2000)
+    self.max_bars_back = self.settings.get('max_bars_back', 5000)
     self.feature_count = self.settings.get('feature_count', 5)
 
     # Настройки признаков (по умолчанию как в оригинале)
@@ -60,6 +61,15 @@ class LorentzianStrategy(BaseStrategy):
       'adx_threshold': self.settings.get('adx_threshold', 20)
     }
 
+    self.use_wavetrend_3d = self.settings.get('use_wavetrend_3d', True)
+    self.wavetrend_3d_config = self.settings.get('wavetrend_3d', {})
+
+    # Инициализируем WaveTrend 3D если включен
+    if self.use_wavetrend_3d:
+      self.wavetrend_3d = WaveTrend3D(self.wavetrend_3d_config)
+      logger.info("✅ WaveTrend 3D интегрирован в Lorentzian стратегию")
+    else:
+      self.wavetrend_3d = None
     # Настройки для торговли
     self.use_dynamic_exits = self.settings.get('use_dynamic_exits', False)
     self.show_bar_predictions = self.settings.get('show_bar_predictions', True)
@@ -77,7 +87,7 @@ class LorentzianStrategy(BaseStrategy):
     # История для обучения - ИЗМЕНЕНО
     self.training_history = []
     # Адаптивный минимум данных в зависимости от таймфрейма
-    self.min_history_size = self.settings.get('min_history_size', 200)  # Уменьшили с 500
+    self.min_history_size = self.settings.get('min_history_size', 2000)  # Уменьшили с 500
     self.force_training = self.settings.get('force_training', True)  # Принудительное обучение
 
     # Кеш для моделей по символам
@@ -155,7 +165,7 @@ class LorentzianStrategy(BaseStrategy):
       prediction_proba = self.classifier.predict_proba(last_features)[0]
 
       # 5. Применяем фильтры
-      filter_results = self._apply_filters(data)
+      filter_results = self._apply_filters(data, symbol)
 
       # Если фильтры не пройдены - нет сигнала
       if not all(filter_results.values()):
@@ -166,6 +176,24 @@ class LorentzianStrategy(BaseStrategy):
       signal_type = None
       confidence = 0.0
 
+      # 6a. Применяем WaveTrend 3D для подтверждения и корректировки
+      if self.use_wavetrend_3d and 'wavetrend_direction' in filter_results:
+        wt_direction = filter_results['wavetrend_direction']
+        wt_confidence = filter_results['wavetrend_confidence']
+
+        # Если WaveTrend противоречит Lorentzian - снижаем уверенность
+        if (prediction == 1 and wt_direction < 0) or (prediction == 2 and wt_direction > 0):
+          logger.warning(f"⚠️ WaveTrend 3D противоречит Lorentzian для {symbol}")
+          # Можем либо отменить сигнал, либо снизить уверенность
+          if wt_confidence > 0.7:  # Сильный противоречащий сигнал
+            return None
+
+        # Если согласуются - усиливаем уверенность
+        elif (prediction == 1 and wt_direction > 0) or (prediction == 2 and wt_direction < 0):
+          logger.info(f"✅ WaveTrend 3D подтверждает Lorentzian для {symbol}")
+          # Усиливаем уверенность на основе WaveTrend
+          confidence_boost = wt_confidence * 0.2  # До 20% бонус
+
       if prediction == 1:  # BUY
         signal_type = SignalType.BUY
         confidence = prediction_proba[1]
@@ -174,6 +202,16 @@ class LorentzianStrategy(BaseStrategy):
         confidence = prediction_proba[2]
       else:  # HOLD
         return None
+      if self.use_wavetrend_3d and 'wavetrend_confidence' in filter_results:
+        wt_confidence = filter_results['wavetrend_confidence']
+        if (signal_type == SignalType.BUY and filter_results.get('wavetrend_direction', 0) > 0) or \
+            (signal_type == SignalType.SELL and filter_results.get('wavetrend_direction', 0) < 0):
+          # Усиливаем уверенность
+          confidence = min(0.95, confidence + wt_confidence * 0.15)
+        elif filter_results.get('wavetrend_direction', 0) != 0:
+          # Снижаем уверенность при несоответствии
+          confidence = max(0.3, confidence - wt_confidence * 0.2)
+
 
       # 7. Рассчитываем параметры позиции
       current_price = float(data['close'].iloc[-1])
@@ -205,6 +243,12 @@ class LorentzianStrategy(BaseStrategy):
             'sell': float(prediction_proba[2])
           },
           'filters_passed': filter_results,
+          'wavetrend_3d': {
+            'used': self.use_wavetrend_3d,
+            'direction': filter_results.get('wavetrend_direction', 0),
+            'confidence': filter_results.get('wavetrend_confidence', 0),
+            'passed': filter_results.get('wavetrend_3d', True)
+          },
           'features': {
             'f1': float(last_features['f1'].iloc[0]),
             'f2': float(last_features['f2'].iloc[0]),
@@ -222,6 +266,45 @@ class LorentzianStrategy(BaseStrategy):
     except Exception as e:
       logger.error(f"Ошибка генерации Lorentzian сигнала для {symbol}: {e}", exc_info=True)
       return None
+
+  def analyze_signal_alignment(self, lorentzian_signal: int, wavetrend_data: Dict) -> Dict[str, Any]:
+    """
+    Анализирует согласованность сигналов Lorentzian и WaveTrend 3D
+
+    Returns:
+        Dict с анализом согласованности и рекомендациями
+    """
+    wt_direction = wavetrend_data.get('direction', 0)
+    wt_confidence = wavetrend_data.get('confidence', 0.5)
+
+    # Полное согласование
+    if (lorentzian_signal == 1 and wt_direction > 0) or \
+        (lorentzian_signal == 2 and wt_direction < 0):
+      return {
+        'aligned': True,
+        'strength': 'strong',
+        'confidence_multiplier': 1.0 + wt_confidence * 0.3,
+        'recommendation': 'proceed'
+      }
+
+    # Противоречие
+    elif (lorentzian_signal == 1 and wt_direction < 0) or \
+        (lorentzian_signal == 2 and wt_direction > 0):
+      return {
+        'aligned': False,
+        'strength': 'conflict',
+        'confidence_multiplier': 1.0 - wt_confidence * 0.4,
+        'recommendation': 'caution' if wt_confidence < 0.7 else 'skip'
+      }
+
+    # Нейтральный WaveTrend
+    else:
+      return {
+        'aligned': None,
+        'strength': 'neutral',
+        'confidence_multiplier': 1.0,
+        'recommendation': 'proceed_normal'
+      }
 
   async def _train_model(self, data: pd.DataFrame, features: pd.DataFrame) -> bool:
     """
@@ -270,9 +353,9 @@ class LorentzianStrategy(BaseStrategy):
       logger.error(f"Ошибка при обучении модели: {e}", exc_info=True)
       return False
 
-  def _apply_filters(self, data: pd.DataFrame) -> Dict[str, bool]:
+  def _apply_filters(self, data: pd.DataFrame, symbol: str = None) -> Dict[str, bool]:
     """
-    Применение фильтров из оригинального индикатора
+    Применение фильтров из оригинального индикатора + WaveTrend 3D
     """
     results = {}
 
@@ -296,6 +379,21 @@ class LorentzianStrategy(BaseStrategy):
       results['adx'] = bool(adx_pass.iloc[-1]) if not adx_pass.empty else True
     else:
       results['adx'] = True
+
+    # WaveTrend 3D Filter
+    if self.use_wavetrend_3d and self.wavetrend_3d and symbol:
+      wavetrend_signal = self.wavetrend_3d.get_signal_for_lorentzian(data, symbol)
+      if wavetrend_signal:
+        # Проверяем согласованность направления
+        results['wavetrend_3d'] = True
+        results['wavetrend_direction'] = wavetrend_signal['direction']
+        results['wavetrend_confidence'] = wavetrend_signal['confidence']
+      else:
+        results['wavetrend_3d'] = True  # Не блокируем если нет сигнала
+        results['wavetrend_direction'] = 0
+        results['wavetrend_confidence'] = 0.5
+    else:
+      results['wavetrend_3d'] = True
 
     return results
 

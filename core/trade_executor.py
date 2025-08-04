@@ -561,8 +561,23 @@ class TradeExecutor:
       'weighted_ask': 0.0
     }
 
-    if not order_book or 'bids' not in order_book or 'asks' not in order_book:
+    if not order_book:
       logger.warning(f"⚠️ Нет данных стакана для {symbol}")
+      logger.info(f"📊 Используем обычное исполнение без анализа стакана")
+
+      # Добавляем небольшую задержку для стабильности
+      await asyncio.sleep(0.1)
+
+      # Получаем текущую цену перед исполнением
+      try:
+        ticker_data = await self.connector.fetch_ticker(symbol)
+        if ticker_data and 'last' in ticker_data:
+          current_price = float(ticker_data['last'])
+          logger.info(f"📈 Текущая цена {symbol}: {current_price}")
+        else:
+          logger.warning(f"⚠️ Не удалось получить текущую цену для {symbol}")
+      except Exception as price_error:
+        logger.warning(f"⚠️ Ошибка получения цены для {symbol}: {price_error}")
       return analysis
 
     bids = order_book.get('bids', [])

@@ -689,24 +689,86 @@ class WebSocketDataManager:
       logger.debug(f"Данные тикера: {data}")
 
   async def _handle_orderbook_update(self, data: dict):
-    """Обрабатывает обновления стакана"""
+    """Обрабатывает обновления стакана с улучшенной проверкой"""
     try:
       topic = data.get('topic', '')
-      if 'data' in data and 'orderbook' in topic:
+      if not topic or 'orderbook' not in topic:
+        logger.debug("Некорректный topic для orderbook")
+        return
+
+      if 'data' not in data:
+        logger.debug("Нет данных в orderbook update")
+        return
+
+      # Извлекаем символ из topic
+      try:
         symbol = topic.split('.')[-1]
+        if not symbol:
+          logger.warning("Не удалось извлечь символ из topic")
+          return
+      except IndexError:
+        logger.warning(f"Некорректный формат topic: {topic}")
+        return
 
-        orderbook_data = data['data']
-        self.data_cache[f"orderbook_{symbol}"] = {
-          'symbol': symbol,
-          'bids': orderbook_data.get('b', []),
-          'asks': orderbook_data.get('a', []),
-          'timestamp': datetime.now()
-        }
+      orderbook_data = data['data']
 
-        await self._notify_subscribers('orderbook', symbol, self.data_cache[f"orderbook_{symbol}"])
+      # Проверяем структуру данных
+      if not isinstance(orderbook_data, dict):
+        logger.warning(f"Неожиданный тип данных orderbook: {type(orderbook_data)}")
+        return
+
+      bids = orderbook_data.get('b', [])
+      asks = orderbook_data.get('a', [])
+
+      # Проверяем качество данных
+      if not isinstance(bids, list) or not isinstance(asks, list):
+        logger.warning(f"Некорректные типы bids/asks для {symbol}")
+        return
+
+      # Валидируем данные стакана
+      valid_bids = []
+      valid_asks = []
+
+      for bid in bids:
+        try:
+          if len(bid) >= 2 and float(bid[0]) > 0 and float(bid[1]) > 0:
+            valid_bids.append(bid)
+        except (ValueError, TypeError, IndexError):
+          continue
+
+      for ask in asks:
+        try:
+          if len(ask) >= 2 and float(ask[0]) > 0 and float(ask[1]) > 0:
+            valid_asks.append(ask)
+        except (ValueError, TypeError, IndexError):
+          continue
+
+      if not valid_bids and not valid_asks:
+        logger.debug(f"Нет валидных данных стакана для {symbol}")
+        return
+
+      # Сортируем данные правильно
+      try:
+        valid_bids.sort(key=lambda x: float(x[0]), reverse=True)  # По убыванию цены
+        valid_asks.sort(key=lambda x: float(x[0]))  # По возрастанию цены
+      except (ValueError, TypeError) as e:
+        logger.warning(f"Ошибка сортировки стакана для {symbol}: {e}")
+        return
+
+      self.data_cache[f"orderbook_{symbol}"] = {
+        'symbol': symbol,
+        'bids': valid_bids,
+        'asks': valid_asks,
+        'timestamp': datetime.now(),
+        'update_count': self.data_cache.get(f"orderbook_{symbol}", {}).get('update_count', 0) + 1
+      }
+
+      await self._notify_subscribers('orderbook', symbol, self.data_cache[f"orderbook_{symbol}"])
+
+      logger.debug(f"✅ Обновлен стакан для {symbol}: {len(valid_bids)} bids, {len(valid_asks)} asks")
 
     except Exception as e:
-      logger.error(f"Ошибка обработки стакана: {e}")
+      logger.error(f"❌ Критическая ошибка обработки стакана: {e}", exc_info=True)
 
   async def _handle_trade_update(self, data: dict):
     """Обрабатывает публичные сделки"""

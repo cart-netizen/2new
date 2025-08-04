@@ -618,11 +618,50 @@ class BybitConnector:
 
     return await self._make_request('POST', endpoint, params, use_cache=False)
 
-  async def fetch_order_book(self, symbol: str, depth: int) -> Optional[Dict]:
-    """Получает стакан ордеров"""
-    endpoint = "/v5/market/orderbook"
-    params = {'category': 'linear', 'symbol': symbol, 'limit': depth}
-    return await self._make_request('GET', endpoint, params, use_cache=True)
+  async def fetch_order_book(self, symbol: str, depth: int = 25) -> Optional[Dict]:
+    """Получает стакан ордеров для символа"""
+    try:
+      params = {
+        'category': self.default_category,
+        'symbol': symbol,
+        'limit': depth
+      }
+
+      response = await self._make_request('GET', '/v5/market/orderbook', params=params)
+
+      if response and 'result' in response:
+        data = response['result']
+
+        # ДОБАВЛЯЕМ ПРОВЕРКУ И ИСПРАВЛЕНИЕ СОРТИРОВКИ
+        bids = data.get('b', [])
+        asks = data.get('a', [])
+
+        # Сортируем bids по убыванию цены (лучшие предложения сверху)
+        if bids:
+          bids_sorted = sorted(bids, key=lambda x: float(x[0]), reverse=True)
+          if bids != bids_sorted:
+            logger.warning(f"⚠️ Исправлена сортировка bids для {symbol}")
+            data['b'] = bids_sorted
+
+        # Сортируем asks по возрастанию цены (лучшие предложения сверху)
+        if asks:
+          asks_sorted = sorted(asks, key=lambda x: float(x[0]))
+          if asks != asks_sorted:
+            logger.warning(f"⚠️ Исправлена сортировка asks для {symbol}")
+            data['a'] = asks_sorted
+
+        return {
+          'bids': [[float(price), float(qty)] for price, qty in data.get('b', [])],
+          'asks': [[float(price), float(qty)] for price, qty in data.get('a', [])],
+          'timestamp': data.get('ts', int(datetime.now().timestamp() * 1000)),
+          'symbol': symbol
+        }
+
+      return None
+
+    except Exception as e:
+      logger.error(f"❌ Ошибка получения стакана для {symbol}: {e}")
+      return None
 
   async def fetch_positions(self, symbol: str) -> List[Dict]:
     """Получает открытые позиции для конкретного символа"""

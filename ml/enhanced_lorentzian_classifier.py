@@ -55,27 +55,69 @@ class EnhancedLorentzianClassifier(BaseEstimator, ClassifierMixin):
     self.predictions_array = []
     self.distances_array = []
 
+  # def fit(self, X: pd.DataFrame, y: pd.Series):
+  #   """
+  #   Обучение модели с использованием алгоритма ANN из оригинала
+  #   """
+  #   logger.info(f"Обучение Enhanced Lorentzian Classifier на {len(X)} примерах")
+  #
+  #   # Проверяем количество признаков
+  #   if X.shape[1] != self.feature_count:
+  #     raise ValueError(f"Ожидалось {self.feature_count} признаков, получено {X.shape[1]}")
+  #
+  #   # Ограничиваем размер обучающей выборки
+  #   if len(X) > self.max_bars_back:
+  #     X = X.tail(self.max_bars_back)
+  #     y = y.tail(self.max_bars_back)
+  #
+  #   self.training_data = X.values
+  #   self.training_labels = y.values
+  #   self.feature_names = X.columns.tolist()
+  #
+  #   self.is_fitted = True
+  #   logger.info("Модель успешно обучена")
+  #
+  #   return self
+
   def fit(self, X: pd.DataFrame, y: pd.Series):
     """
     Обучение модели с использованием алгоритма ANN из оригинала
     """
+    # Проверяем входные данные
+    if X.empty or y.empty:
+      raise ValueError("Входные данные не могут быть пустыми")
+
+    if len(X) != len(y):
+      raise ValueError(f"Размерности не совпадают: X={len(X)}, y={len(y)}")
+
     logger.info(f"Обучение Enhanced Lorentzian Classifier на {len(X)} примерах")
 
     # Проверяем количество признаков
     if X.shape[1] != self.feature_count:
-      raise ValueError(f"Ожидалось {self.feature_count} признаков, получено {X.shape[1]}")
+      logger.warning(f"Ожидалось {self.feature_count} признаков, получено {X.shape[1]}. Корректируем...")
+      self.feature_count = X.shape[1]
 
     # Ограничиваем размер обучающей выборки
     if len(X) > self.max_bars_back:
+      logger.info(f"Обрезаем данные с {len(X)} до {self.max_bars_back} записей")
       X = X.tail(self.max_bars_back)
       y = y.tail(self.max_bars_back)
+
+    # Проверяем на NaN и бесконечные значения
+    if X.isnull().any().any():
+      logger.warning("Обнаружены NaN в обучающих данных, заполняем медианными значениями")
+      X = X.fillna(X.median()).fillna(0)
+
+    if not np.isfinite(X.values).all():
+      logger.warning("Обнаружены бесконечные значения, заменяем нулями")
+      X = X.replace([np.inf, -np.inf], 0)
 
     self.training_data = X.values
     self.training_labels = y.values
     self.feature_names = X.columns.tolist()
 
     self.is_fitted = True
-    logger.info("Модель успешно обучена")
+    logger.info("✅ Модель успешно обучена")
 
     return self
 

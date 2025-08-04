@@ -14,3 +14,8 @@ USE_TESTNET = False # ВАЖНО: Установите False для реальн
 
 API_KEY = BYBIT_TESTNET_API_KEY if USE_TESTNET else BYBIT_API_KEY
 API_SECRET = BYBIT_TESTNET_API_SECRET if USE_TESTNET else BYBIT_API_SECRET
+
+api_keys = {
+    'api_key': BYBIT_API_KEY,
+    'api_secret': BYBIT_API_SECRET
+}

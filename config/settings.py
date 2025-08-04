@@ -1,6 +1,6 @@
 import os
 
-from config.api_keys import API_KEY, API_SECRET
+from config.api_keys import BYBIT_API_KEY, BYBIT_API_SECRET
 
 # Общие настройки
 LOG_LEVEL = "INFO"  # Уровни: DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -28,3 +28,8 @@ BYBIT_WS_URL_PRIVATE_TESTNET = "wss://stream-testnet.bybit.com/v5/private"
 
 BYBIT_WS_PUBLIC_URL = BYBIT_WS_URL_PUBLIC_MAINNET if USE_TESTNET else BYBIT_WS_URL_PUBLIC_TESTNET
 BYBIT_WS_PRIVATE_URL = BYBIT_WS_URL_PRIVATE_MAINNET if USE_TESTNET else BYBIT_WS_URL_PRIVATE_TESTNET
+
+api_keys = {
+    'api_key': BYBIT_API_KEY,
+    'api_secret': BYBIT_API_SECRET
+}

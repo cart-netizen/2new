@@ -193,9 +193,12 @@ class LorentzianStrategy(BaseStrategy):
           old_model.unlink()
           logger.debug(f"Удалена старая модель: {old_model.name}")
 
-      # Сохраняем новую модель
-      with open(model_path, 'wb') as f:
-        joblib.dump(classifier, f)
+      # # Сохраняем новую модель
+      # with open(model_path, 'wb') as f:
+      #   joblib.dump(classifier, f)
+
+      # Сохраняем новую модель используя встроенный метод
+      classifier.save_model(str(model_path))
 
       # --- ИСПРАВЛЕНИЕ: Заменяем символическую ссылку на простое копирование ---
       # Этот метод не требует прав администратора в Windows.
@@ -208,10 +211,6 @@ class LorentzianStrategy(BaseStrategy):
       # --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
       return True
-
-    except Exception as e:
-      logger.error(f"Ошибка сохранения модели {symbol}: {e}")
-      return False
 
     except Exception as e:
       logger.error(f"Ошибка сохранения модели {symbol}: {e}")
@@ -505,18 +504,18 @@ class LorentzianStrategy(BaseStrategy):
       current_price = data['close'].iloc[-1]
       volatility_ratio = avg_volatility / current_price if current_price > 0 else 0.02
 
-      # Адаптивный порог на основе волатильности
-      if volatility_ratio > 0.03:  # Высокая волатильность
-        threshold = 1.2  # Более строгие требования
-        future_bars = 6
+      # Адаптивные пороги для 15M таймфрейма
+      if volatility_ratio > 0.015:  # Высокая волатильность для 15M
+        threshold = 0.4  # Снижено с 1.2% до 0.4%
+        future_bars = 4  # 4 бара = 1 час
         logger.info(f"📊 {symbol}: высокая волатильность {volatility_ratio:.4f}, порог={threshold}%")
-      elif volatility_ratio > 0.015:  # Средняя волатильность
-        threshold = 0.9
+      elif volatility_ratio > 0.008:  # Средняя волатильность для 15M
+        threshold = 0.25  # Снижено с 0.9% до 0.25%
         future_bars = 4
         logger.info(f"📊 {symbol}: средняя волатильность {volatility_ratio:.4f}, порог={threshold}%")
-      else:  # Низкая волатильность
-        threshold = 0.6  # Более мягкие требования
-        future_bars = 3
+      else:  # Низкая волатильность для 15M
+        threshold = 0.15  # Снижено с 0.6% до 0.15%
+        future_bars = 4  # Оставляем 4 бара для стабильности
         logger.info(f"📊 {symbol}: низкая волатильность {volatility_ratio:.4f}, порог={threshold}%")
 
       # Создаем метки с новой улучшенной функцией
@@ -619,11 +618,24 @@ class LorentzianStrategy(BaseStrategy):
       logger.info(f"📊 {symbol}: точность по классам - HOLD={class_accuracies.get(0, 0):.3f}, "
                   f"BUY={class_accuracies.get(1, 0):.3f}, SELL={class_accuracies.get(2, 0):.3f}")
 
-      # УЛУЧШЕННЫЕ КРИТЕРИИ СОХРАНЕНИЯ
+      # АДАПТИВНЫЕ КРИТЕРИИ СОХРАНЕНИЯ для 15M
+      # Более мягкие требования для высокочастотной торговли
       # Сохраняем модель если:
-      # 1. Общая точность > 0.55 ИЛИ
-      # 2. Точность торговых сигналов > 0.5 И общая точность > 0.4
-      save_model = (accuracy > 0.55) or (trading_accuracy > 0.5 and accuracy > 0.4)
+      # 1. Общая точность > 0.45 ИЛИ
+      # 2. Точность торговых сигналов > 0.35 И общая точность > 0.35 ИЛИ
+      # 3. Есть хотя бы какая-то точность по BUY или SELL классам
+      has_trading_accuracy = (class_accuracies.get(1, 0) > 0.2 or class_accuracies.get(2, 0) > 0.2)
+
+      save_model = (
+          accuracy > 0.45 or
+          (trading_accuracy > 0.35 and accuracy > 0.35) or
+          (has_trading_accuracy and accuracy > 0.30)
+      )
+
+      # Специальное условие для символов с хорошим распределением классов
+      good_distribution = (buy_ratio > 0.15 and sell_ratio > 0.15 and hold_ratio < 0.7)
+      if good_distribution and accuracy > 0.30:
+        save_model = True
 
       if save_model:
         self._save_model(symbol, classifier)
@@ -650,8 +662,9 @@ class LorentzianStrategy(BaseStrategy):
 
     current_hold_ratio = hold_count / total_samples
 
-    if current_hold_ratio <= max_hold_ratio:
-      return labels  # Уже сбалансировано
+    # Для 15M разрешаем больше HOLD (до 85% вместо 70%)
+    if current_hold_ratio <= 0.85:
+      return labels  # Уже достаточно сбалансировано для 15M
 
     # Вычисляем сколько HOLD нужно перевести в торговые сигналы
     target_hold_count = int(total_samples * max_hold_ratio)
@@ -708,9 +721,18 @@ class LorentzianStrategy(BaseStrategy):
       current_atr = df.iloc[i]['atr'] if pd.notna(df.iloc[i]['atr']) else current_price * 0.02
       current_vol_ratio = df.iloc[i]['volume_ratio'] if pd.notna(df.iloc[i]['volume_ratio']) else 1.0
 
-      # Адаптивный порог на основе ATR
+
+      # Адаптивный порог на основе ATR (оптимизировано для 15M)
       atr_factor = current_atr / current_price
-      dynamic_threshold = max(threshold_percent / 100, atr_factor * 2.0)
+
+      # Для 15M используем более агрессивные пороги
+      # ATR обычно 0.001-0.003 для крипто на 15M, что дает 0.1-0.3%
+      # Умножаем на 0.5-1.0 вместо 2.0 для большего количества сигналов
+      dynamic_threshold = max(threshold_percent / 100, atr_factor * 0.7)
+
+      # Ограничиваем порог для 15M
+      dynamic_threshold = min(dynamic_threshold, 0.004)  # Максимум 0.4%
+      dynamic_threshold = max(dynamic_threshold, 0.001)  # Минимум 0.1%
 
       # Анализ будущих цен
       future_slice = df.iloc[i + 1:i + future_bars + 1]
@@ -725,6 +747,10 @@ class LorentzianStrategy(BaseStrategy):
       # Потенциальные движения
       max_upside = (max_high - current_price) / current_price
       max_downside = (current_price - min_low) / current_price
+
+      if i % 500 == 0:  # Логируем каждую 500-ю свечу
+        logger.debug(f"{symbol} [{i}]: upside={max_upside:.4f}, downside={max_downside:.4f}, "
+                     f"threshold={dynamic_threshold:.4f}, atr_factor={atr_factor:.4f}")
       final_return = (final_close - current_price) / current_price
 
       # Анализ качества движения
@@ -766,6 +792,22 @@ class LorentzianStrategy(BaseStrategy):
       f"🏷️ {symbol}: метки созданы - BUY={class_counts.get(1, 0)} ({class_counts.get(1, 0) / total * 100:.1f}%), "
       f"SELL={class_counts.get(2, 0)} ({class_counts.get(2, 0) / total * 100:.1f}%), "
       f"HOLD={class_counts.get(0, 0)} ({class_counts.get(0, 0) / total * 100:.1f}%)")
+
+    # Итоговая статистика
+    buy_final = labels_series.eq(1).sum()
+    sell_final = labels_series.eq(2).sum()
+    hold_final = labels_series.eq(0).sum()
+    total = len(labels_series)
+
+    logger.info(f"🏷️ {symbol}: метки созданы - BUY={buy_final} ({buy_final / total * 100:.1f}%), "
+                f"SELL={sell_final} ({sell_final / total * 100:.1f}%), "
+                f"HOLD={hold_final} ({hold_final / total * 100:.1f}%)")
+
+    if (buy_final + sell_final) / total < 0.03:
+      logger.warning(f"⚠️ {symbol}: Очень мало торговых сигналов! "
+                     f"Рекомендуется еще снизить пороги")
+
+
 
     return labels_series
 

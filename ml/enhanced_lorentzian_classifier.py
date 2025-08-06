@@ -219,14 +219,27 @@ class EnhancedLorentzianClassifier(BaseEstimator, ClassifierMixin):
 
       # В оригинале: prediction > 0 => LONG, prediction < 0 => SHORT
       # Преобразуем в наши метки: 0=HOLD, 1=BUY, 2=SELL
-      if prediction > 0:
-        return 1  # BUY
-      elif prediction < 0:
-        return 2  # SELL
-      else:
-        return 0  # HOLD
+    #   if prediction > 0:
+    #     return 1  # BUY
+    #   elif prediction < 0:
+    #     return 2  # SELL
+    #   else:
+    #     return 0  # HOLD
+    #
+    # return 0  # По умолчанию HOLD
+      # Преобразуем предсказание если нужно
+      if prediction not in [0, 1, 2]:
+        # Если prediction отрицательное число - это SELL (2)
+        # Если положительное - BUY (1)
+        # Иначе HOLD (0)
+        if prediction < 0:
+          prediction = 2
+        elif prediction > 0:
+          prediction = 1
+        else:
+          prediction = 0
 
-    return 0  # По умолчанию HOLD
+      return int(prediction)
 
   def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
     """
@@ -252,8 +265,9 @@ class EnhancedLorentzianClassifier(BaseEstimator, ClassifierMixin):
     predictions = []
     last_distance = -1.0
 
-    # Собираем k ближайших соседей
-    for i in range(0, len(self.training_data), 4):
+    # Уменьшаем шаг для 15M таймфрейма (больше соседей для анализа)
+    step = min(2, max(1, len(self.training_data) // 1000))  # Адаптивный шаг
+    for i in range(0, len(self.training_data), step):
       d = lorentzian_distance_fast(x_new, self.training_data[i])
 
       if d >= last_distance:
@@ -407,7 +421,9 @@ class EnhancedLorentzianClassifier(BaseEstimator, ClassifierMixin):
 #
 #   return pd.Series(labels, index=df.index)
 
-def create_lorentzian_labels(data: pd.DataFrame, future_bars: int = 4, threshold_percent: float = 0.85) -> pd.Series:
+def create_lorentzian_labels(data: pd.DataFrame, future_bars: int = 4,
+                            threshold_percent: float = 0.2,
+                            use_volatility_threshold: bool = True) -> pd.Series:
     """
     Создает метки для обучения Lorentzian классификатора (улучшенная версия)
 
@@ -440,9 +456,17 @@ def create_lorentzian_labels(data: pd.DataFrame, future_bars: int = 4, threshold
       if len(future_highs) == 0 or len(future_lows) == 0:
         continue
 
-      # Используем ATR для адаптивного порога
-      current_atr = atr.iloc[i] if not pd.isna(atr.iloc[i]) else current_close * 0.01
-      adaptive_threshold = max(current_close * (threshold_percent / 100), current_atr * 0.5)
+      # Используем ATR для адаптивного порога (оптимизировано для 15M)
+      current_atr = atr.iloc[i] if not pd.isna(atr.iloc[i]) else current_close * 0.002
+      # Для 15M таймфрейма используем 30-40% от ATR как порог
+      atr_threshold = current_atr * 0.35
+
+      # Минимальный порог 0.15% для 15M (за 4 бара = 1 час)
+      min_threshold = current_close * 0.0015
+      # Максимальный порог 0.5% чтобы не пропустить слишком много сигналов
+      max_threshold = current_close * 0.005
+
+      adaptive_threshold = np.clip(atr_threshold, min_threshold, max_threshold)
 
       max_future_high = future_highs.max()
       min_future_low = future_lows.min()
@@ -452,10 +476,19 @@ def create_lorentzian_labels(data: pd.DataFrame, future_bars: int = 4, threshold
       # Потенциальная прибыль для SELL
       sell_profit = current_close - min_future_low
 
-      # Определяем метку на основе максимальной потенциальной прибыли
-      if buy_profit > adaptive_threshold and buy_profit > sell_profit:
-        labels.iloc[i] = 1  # BUY
-      elif sell_profit > adaptive_threshold and sell_profit > buy_profit:
+      # Определяем метку с учетом соотношения риск/прибыль
+      # Для 15M требуем меньшее преимущество одного направления над другим
+      profit_ratio = 1.2  # Было бы 2.0 для часового, но для 15M снижаем
+
+      # Определяем метку (более агрессивно для 15M)
+      # Не требуем строгого превосходства одного направления над другим
+      if buy_profit > adaptive_threshold:
+        # Для BUY: проверяем что потенциал вверх хотя бы на 20% больше потенциала вниз
+        if sell_profit < adaptive_threshold or buy_profit > sell_profit * 1.2:
+          labels.iloc[i] = 1  # BUY
+        elif sell_profit > adaptive_threshold and sell_profit > buy_profit * 1.2:
+          labels.iloc[i] = 2  # SELL
+      elif sell_profit > adaptive_threshold:
         labels.iloc[i] = 2  # SELL
       # Иначе остается 0 (HOLD)
 

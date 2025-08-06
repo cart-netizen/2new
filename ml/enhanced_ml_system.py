@@ -1404,16 +1404,37 @@ class EnhancedEnsembleModel:
     """
     Проверяет и обеспечивает соответствие признаков между обучением и предсказанием
     """
+    # if is_training:
+    #   # При обучении сохраняем список признаков
+    #   self.training_features = list(X.columns)
+    #   logger.info(f"Сохранено {len(self.training_features)} признаков для обучения")
+    #   return X
+    #
+    # # При предсказании проверяем соответствие
+    # if self.training_features is None:
+    #   logger.warning("Информация о признаках обучения отсутствует")
+    #   return X
     if is_training:
-      # При обучении сохраняем список признаков
-      self.training_features = list(X.columns)
-      logger.info(f"Сохранено {len(self.training_features)} признаков для обучения")
-      return X
+        # ИСПРАВЛЕНИЕ: Проверяем, не установлены ли уже признаки из feature_engineer
+        if hasattr(self.feature_engineer, 'feature_names_in_') and self.feature_engineer.feature_names_in_:
+            self.training_features = self.feature_engineer.feature_names_in_.copy()
+            logger.info(f"Использованы признаки из feature_engineer: {len(self.training_features)} признаков")
+        else:
+            self.training_features = list(X.columns)
+            logger.info(f"Сохранено {len(self.training_features)} признаков для обучения")
+        return X
 
     # При предсказании проверяем соответствие
-    if self.training_features is None:
-      logger.warning("Информация о признаках обучения отсутствует")
-      return X
+    if not hasattr(self, 'training_features') or self.training_features is None:
+        # ИСПРАВЛЕНИЕ: Пытаемся получить из feature_engineer
+        if hasattr(self.feature_engineer, 'feature_names_in_') and self.feature_engineer.feature_names_in_:
+            self.training_features = self.feature_engineer.feature_names_in_.copy()
+            logger.info(f"Восстановлены признаки из feature_engineer: {len(self.training_features)} признаков")
+        else:
+            logger.warning("Информация о признаках обучения отсутствует - система не может применить этот модуль для верификации и оценки сигнала")
+            return X
+
+
 
     current_features = list(X.columns)
 
@@ -1565,6 +1586,16 @@ class EnhancedEnsembleModel:
       # Шаг 1: Создание и выравнивание признаков
       logger.info("Создание продвинутых признаков...")
       X_enhanced = self.feature_engineer.create_advanced_features(X, external_data)
+      # Синхронизируем информацию о признаках
+      if hasattr(self.feature_engineer, 'feature_names_in_') and self.feature_engineer.feature_names_in_:
+        self.training_feature_info = {
+          'feature_names': self.feature_engineer.feature_names_in_.copy(),
+          'feature_count': len(self.feature_engineer.feature_names_in_),
+          'training_timestamp': datetime.now().isoformat(),
+          'source': 'feature_engineer'
+        }
+        logger.info(
+          f"✅ Синхронизирована информация о {len(self.feature_engineer.feature_names_in_)} признаках из feature_engineer")
 
       logger.info("Выравнивание и очистка данных...")
       common_index = X_enhanced.index.intersection(y.index)

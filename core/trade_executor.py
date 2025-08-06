@@ -314,6 +314,7 @@ class TradeExecutor:
       if signal.take_profit and signal.take_profit != 0:
         order_params['takeProfit'] = signal.take_profit
 
+      logger.info(f"SL/TP параметры: SL={signal.stop_loss}, TP={signal.take_profit}")
       logger.info(f"Отправка ордера на открытие: {order_params}")
 
       from core.circuit_breaker import get_circuit_breaker_manager, CircuitBreakerOpenError
@@ -323,6 +324,16 @@ class TradeExecutor:
       order_breaker = circuit_manager.get_breaker('order_execution')
 
       try:
+        additional_params = {}
+        if signal.stop_loss and signal.stop_loss != 0:
+          additional_params['stopLoss'] = str(signal.stop_loss)
+        if signal.take_profit and signal.take_profit != 0:
+          additional_params['takeProfit'] = str(signal.take_profit)
+
+        # Логируем SL/TP для проверки
+        if additional_params:
+          logger.info(f"🎯 Добавляем SL/TP к ордеру {symbol}: {additional_params}")
+
         order_response = await order_breaker.call(
           self.connector.place_order,
           symbol=order_params['symbol'],
@@ -330,7 +341,8 @@ class TradeExecutor:
           order_type='Market',  # Передаем строку напрямую
           quantity=float(order_params['qty']),  # Конвертируем обратно в float
           category=order_params.get('category', 'linear'),
-          positionIdx=order_params.get('positionIdx', 0)
+          positionIdx=order_params.get('positionIdx', 0),
+          **additional_params
         )
       except CircuitBreakerOpenError as e:
         logger.error(f"Circuit breaker блокирует исполнение ордера для {symbol}: {e}")
@@ -524,13 +536,23 @@ class TradeExecutor:
       order_side = "Buy" if signal.signal_type == SignalType.BUY else "Sell"
 
       # Используем правильный метод place_order из BybitConnector
+      additional_params = {}
+      if hasattr(signal, 'stop_loss') and signal.stop_loss and signal.stop_loss != 0:
+        additional_params['stopLoss'] = str(signal.stop_loss)
+      if hasattr(signal, 'take_profit') and signal.take_profit and signal.take_profit != 0:
+        additional_params['takeProfit'] = str(signal.take_profit)
+
+      if additional_params:
+        logger.info(f"🎯 Regular trade с SL/TP для {symbol}: {additional_params}")
+
       result = await self.connector.place_order(
         symbol=symbol,
         side=order_side,
         order_type='Market',
         quantity=quantity,
         category='linear',
-        positionIdx=0
+        positionIdx=0,
+        **additional_params
       )
 
       if result and result.get('orderId'):
@@ -545,91 +567,77 @@ class TradeExecutor:
       return False, None
 
   async def _analyze_order_book(self, order_book: Optional[Dict], symbol: str,
-                                max_spread_pct: float, volume_threshold: float) -> Dict:
-    """Анализирует стакан ордеров и возвращает ключевые метрики"""
+                                max_spread_pct: float, volume_threshold: float) -> Dict[str, Any]:
+    """
+    Анализирует данные стакана ордеров
+    """
+    # Базовый анализ с нейтральными значениями
     analysis = {
       'has_data': False,
-      'best_bid': 0.0,
-      'best_ask': 0.0,
       'spread_pct': 0.0,
-      'bid_volume': 0.0,
-      'ask_volume': 0.0,
-      'volume_imbalance': 0.0,
-      'liquidity_quality': 'unknown',
-      'spread_quality': 'unknown',
-      'weighted_bid': 0.0,
-      'weighted_ask': 0.0
+      'bid_depth': 0.0,
+      'ask_depth': 0.0,
+      'volume_imbalance': 1.0,
+      'liquidity_score': 0.5,
+      'execution_recommendation': 'proceed',
+      'reasons': []
     }
 
-    if not order_book:
-      logger.warning(f"⚠️ Нет данных стакана для {symbol}")
-      logger.info(f"📊 Используем обычное исполнение без анализа стакана")
-
-      # Добавляем небольшую задержку для стабильности
-      await asyncio.sleep(0.1)
-
-      # Получаем текущую цену перед исполнением
-      try:
-        ticker_data = await self.connector.fetch_ticker(symbol)
-        if ticker_data and 'last' in ticker_data:
-          current_price = float(ticker_data['last'])
-          logger.info(f"📈 Текущая цена {symbol}: {current_price}")
-        else:
-          logger.warning(f"⚠️ Не удалось получить текущую цену для {symbol}")
-      except Exception as price_error:
-        logger.warning(f"⚠️ Ошибка получения цены для {symbol}: {price_error}")
+    if not order_book or 'bids' not in order_book or 'asks' not in order_book:
+      analysis['reasons'].append('no_orderbook_data')
+      logger.debug(f"📊 Нет данных стакана для {symbol}, используем нейтральный анализ")
       return analysis
 
-    bids = order_book.get('bids', [])
-    asks = order_book.get('asks', [])
+    try:
+      bids = order_book.get('bids', [])
+      asks = order_book.get('asks', [])
 
-    if not bids or not asks:
-      logger.warning(f"⚠️ Пустой стакан для {symbol}")
-      return analysis
+      if not bids or not asks:
+        analysis['reasons'].append('empty_orderbook_sides')
+        return analysis
 
-    # Базовые параметры
-    best_bid = float(bids[0][0])
-    best_ask = float(asks[0][0])
-    spread = best_ask - best_bid
-    spread_pct = (spread / best_bid) * 100 if best_bid > 0 else 0
+      analysis['has_data'] = True
 
-    # Анализ объемов (топ 5 уровней)
-    top_levels = 5
-    total_bid_volume = sum(float(bid[1]) for bid in bids[:top_levels])
-    total_ask_volume = sum(float(ask[1]) for ask in asks[:top_levels])
+      # Рассчитываем основные метрики
+      best_bid = float(bids[0][0])
+      best_ask = float(asks[0][0])
 
-    # Weighted average price (для лучшего понимания ликвидности)
-    weighted_bid = sum(float(bid[0]) * float(bid[1]) for bid in
-                       bids[:top_levels]) / total_bid_volume if total_bid_volume > 0 else best_bid
-    weighted_ask = sum(float(ask[0]) * float(ask[1]) for ask in
-                       asks[:top_levels]) / total_ask_volume if total_ask_volume > 0 else best_ask
+      # Спред
+      spread_pct = (best_ask - best_bid) / best_bid * 100
+      analysis['spread_pct'] = spread_pct
 
-    # Расчет дисбаланса
-    total_volume = total_bid_volume + total_ask_volume
-    volume_imbalance = (total_bid_volume - total_ask_volume) / total_volume if total_volume > 0 else 0
+      # Глубина стакана
+      bid_volume = sum(float(bid[1]) for bid in bids[:5])  # Топ 5 уровней
+      ask_volume = sum(float(ask[1]) for ask in asks[:5])
 
-    # Качественная оценка
-    liquidity_quality = 'good'
-    if total_bid_volume < total_ask_volume * volume_threshold:
-      liquidity_quality = 'sell_pressure'
-    elif total_ask_volume < total_bid_volume * volume_threshold:
-      liquidity_quality = 'buy_pressure'
+      analysis['bid_depth'] = bid_volume
+      analysis['ask_depth'] = ask_volume
 
-    spread_quality = 'good' if spread_pct <= max_spread_pct else 'wide'
+      # Дисбаланс объемов
+      total_volume = bid_volume + ask_volume
+      if total_volume > 0:
+        analysis['volume_imbalance'] = bid_volume / ask_volume
 
-    analysis.update({
-      'has_data': True,
-      'best_bid': best_bid,
-      'best_ask': best_ask,
-      'spread_pct': spread_pct,
-      'bid_volume': total_bid_volume,
-      'ask_volume': total_ask_volume,
-      'volume_imbalance': volume_imbalance,
-      'liquidity_quality': liquidity_quality,
-      'spread_quality': spread_quality,
-      'weighted_bid': weighted_bid,
-      'weighted_ask': weighted_ask
-    })
+      # Оценка ликвидности
+      if spread_pct <= max_spread_pct and total_volume > 0:
+        analysis['liquidity_score'] = min(1.0, total_volume / 1000)  # Нормализуем
+
+      # Определяем рекомендацию
+      if spread_pct > max_spread_pct * 2:
+        analysis['execution_recommendation'] = 'delay'
+        analysis['reasons'].append(f'high_spread_{spread_pct:.3f}%')
+      elif total_volume < 100:  # Минимальный объем
+        analysis['execution_recommendation'] = 'caution'
+        analysis['reasons'].append('low_liquidity')
+      else:
+        analysis['execution_recommendation'] = 'proceed'
+        analysis['reasons'].append('good_conditions')
+
+      logger.debug(f"📊 Анализ стакана {symbol}: спред={spread_pct:.3f}%, ликвидность={analysis['liquidity_score']:.2f}")
+
+    except Exception as e:
+      logger.warning(f"Ошибка анализа стакана для {symbol}: {e}")
+      analysis['reasons'].append(f'analysis_error_{str(e)[:20]}')
 
     return analysis
 

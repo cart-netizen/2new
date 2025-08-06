@@ -4,371 +4,40 @@
     "pid": null
   },
   "latest_metrics": {
-    "total_balance_usdt": 4.00235666,
-    "available_balance_usdt": 0.23778056,
-    "unrealized_pnl_total": 0.04292,
+    "total_balance_usdt": 1.21455879,
+    "available_balance_usdt": 1.21451142,
+    "unrealized_pnl_total": 0.0,
     "daily_loss_limit_pct": 0.02,
     "current_daily_loss_usdt": 0.0,
     "max_position_size_pct": 0.1,
-    "realized_pnl_total": -118.24182906
+    "realized_pnl_total": -121.02962693
   },
   "open_positions": [],
-  "pending_entry_signals": {
-    "BRETTUSDT": {
-      "signal_type": "BUY",
-      "symbol": "BRETTUSDT",
-      "price": 0.05191,
-      "confidence": 0.7,
-      "strategy_name": "Mean_Reversion_BB",
-      "timestamp": "2025-08-03T14:06:37.115680+00:00",
-      "stop_loss": 0.051557012,
-      "take_profit": 0.05377876,
-      "metadata": {
-        "ml_evaluation": {
-          "ml_signal": "HOLD",
-          "ml_confidence": 0.1,
-          "model_agreement": 0.9055871560354557,
-          "adjustment": 0.0,
-          "risk_assessment": {
-            "anomaly_detected": false,
-            "volatility_regime": "normal",
-            "market_stress": false
-          }
-        },
-        "roi_targets": {
-          "entry_price": 0.05191,
-          "signal_type": "BUY",
-          "stop_loss": {
-            "price": 0.05149472,
-            "distance_abs": 0.00041527999999999704,
-            "distance_pct": 0.8,
-            "roi_pct": 8.0
-          },
-          "take_profit": {
-            "price": 0.0539864,
-            "distance_abs": 0.002076399999999999,
-            "distance_pct": 4.0,
-            "roi_pct": 40.0
-          },
-          "risk_reward_ratio": 5.0,
-          "leverage": 10,
-          "calculation_method": "roi_based"
-        },
-        "quick_quality_check": true,
-        "quality_timestamp": "2025-08-03T14:06:49.581876+00:00",
-        "approved_size": 100.0,
-        "signal_time": "2025-08-03T14:06:49.898868+00:00",
-        "position_size_multiplier": 1.0
-      },
-      "order_type": "Market",
-      "quantity_usdt": null
-    },
-    "INITUSDT": {
-      "signal_type": "BUY",
-      "symbol": "INITUSDT",
-      "price": 0.5067,
-      "confidence": 0.9,
-      "strategy_name": "Consensus_BUY",
-      "timestamp": "2025-08-03T13:29:46.382893+00:00",
-      "stop_loss": 0.50325444,
-      "take_profit": 0.5249412000000001,
-      "metadata": {
-        "prediction_raw": 1,
-        "probabilities": {
-          "hold": 0.0,
-          "buy": 1.0,
-          "sell": 0.0
-        },
-        "filters_passed": {
-          "volatility": true,
-          "regime": true,
-          "adx": true
-        },
-        "features": {
-          "f1": 0.6218035681100378,
-          "f2": 0.91147315138687,
-          "f3": 0.7948983452603473,
-          "f4": 0.23496777822941423,
-          "f5": 0.679890284976425
-        },
-        "ml_evaluation": {
-          "ml_signal": "HOLD",
-          "ml_confidence": 0.1,
-          "model_agreement": 0.8722437152491984,
-          "adjustment": 0.0,
-          "risk_assessment": {
-            "anomaly_detected": false,
-            "volatility_regime": "normal",
-            "market_stress": false
-          }
-        },
-        "consensus_type": "multiple_buy",
-        "confirming_strategies": [
-          "Lorentzian_Classification",
-          "Mean_Reversion_BB"
-        ],
-        "original_confidence": 0.9,
-        "consensus_boost": 0.05,
-        "weighted_confidence": 0.85,
-        "roi_targets": {
-          "entry_price": 0.5067,
-          "signal_type": "BUY",
-          "stop_loss": {
-            "price": 0.5026464,
-            "distance_abs": 0.0040535999999999905,
-            "distance_pct": 0.8,
-            "roi_pct": 8.0
-          },
-          "take_profit": {
-            "price": 0.5269680000000001,
-            "distance_abs": 0.020268000000000064,
-            "distance_pct": 4.0,
-            "roi_pct": 40.0
-          },
-          "risk_reward_ratio": 5.0,
-          "leverage": 10,
-          "calculation_method": "roi_based"
-        },
-        "quick_quality_check": true,
-        "quality_timestamp": "2025-08-03T13:30:02.015114+00:00",
-        "approved_size": 10.0,
-        "signal_time": "2025-08-03T13:30:02.308613+00:00",
-        "position_size_multiplier": 1.0
-      },
-      "order_type": "Market",
-      "quantity_usdt": null
-    },
-    "PONKEUSDT": {
-      "signal_type": "BUY",
-      "symbol": "PONKEUSDT",
-      "price": 0.11735,
-      "confidence": 0.7,
-      "strategy_name": "Mean_Reversion_BB",
-      "timestamp": "2025-08-03T14:08:19.798003+00:00",
-      "stop_loss": 0.11655201999999999,
-      "take_profit": 0.1215746,
-      "metadata": {
-        "ml_evaluation": {
-          "ml_signal": "HOLD",
-          "ml_confidence": 0.1,
-          "model_agreement": 0.9245173157729827,
-          "adjustment": 0.0,
-          "risk_assessment": {
-            "anomaly_detected": false,
-            "volatility_regime": "normal",
-            "market_stress": false
-          }
-        },
-        "roi_targets": {
-          "entry_price": 0.11735,
-          "signal_type": "BUY",
-          "stop_loss": {
-            "price": 0.11641119999999999,
-            "distance_abs": 0.0009388000000000035,
-            "distance_pct": 0.8,
-            "roi_pct": 8.0
-          },
-          "take_profit": {
-            "price": 0.122044,
-            "distance_abs": 0.004694000000000004,
-            "distance_pct": 4.0,
-            "roi_pct": 40.0
-          },
-          "risk_reward_ratio": 5.0,
-          "leverage": 10,
-          "calculation_method": "roi_based"
-        },
-        "quick_quality_check": true,
-        "quality_timestamp": "2025-08-03T14:08:25.166894+00:00",
-        "approved_size": 46.0,
-        "signal_time": "2025-08-03T14:08:25.470104+00:00",
-        "position_size_multiplier": 1.0
-      },
-      "order_type": "Market",
-      "quantity_usdt": null
-    },
-    "PUMPFUNUSDT": {
-      "signal_type": "BUY",
-      "symbol": "PUMPFUNUSDT",
-      "price": 0.002875,
-      "confidence": 0.6108937626178593,
-      "strategy_name": "Consensus_BUY",
-      "timestamp": "2025-08-03T14:08:12.154609+00:00",
-      "stop_loss": 0.00285545,
-      "take_profit": 0.0029785000000000002,
-      "metadata": {
-        "ml_evaluation": {
-          "ml_signal": "HOLD",
-          "ml_confidence": 0.1,
-          "model_agreement": 0.8997178589598291,
-          "adjustment": 0.0,
-          "risk_assessment": {
-            "anomaly_detected": false,
-            "volatility_regime": "normal",
-            "market_stress": false
-          }
-        },
-        "consensus_type": "multiple_buy",
-        "confirming_strategies": [
-          "Mean_Reversion_BB",
-          "Lorentzian_Classification"
-        ],
-        "original_confidence": 0.6108937626178593,
-        "consensus_boost": 0.05,
-        "weighted_confidence": 0.5608937626178593,
-        "roi_targets": {
-          "entry_price": 0.002875,
-          "signal_type": "BUY",
-          "stop_loss": {
-            "price": 0.002852,
-            "distance_abs": 2.3000000000000017e-05,
-            "distance_pct": 0.8,
-            "roi_pct": 8.0
-          },
-          "take_profit": {
-            "price": 0.00299,
-            "distance_abs": 0.00011500000000000008,
-            "distance_pct": 4.0,
-            "roi_pct": 40.0
-          },
-          "risk_reward_ratio": 5.0,
-          "leverage": 10,
-          "calculation_method": "roi_based"
-        },
-        "quick_quality_check": true,
-        "quality_timestamp": "2025-08-03T14:08:24.117567+00:00",
-        "approved_size": 1900.0,
-        "signal_time": "2025-08-03T14:08:25.152587+00:00",
-        "position_size_multiplier": 1.0
-      },
-      "order_type": "Market",
-      "quantity_usdt": null
-    },
-    "HYPERUSDT": {
-      "signal_type": "SELL",
-      "symbol": "HYPERUSDT",
-      "price": 0.3878,
-      "confidence": 0.7,
-      "strategy_name": "Mean_Reversion_BB",
-      "timestamp": "2025-08-03T14:06:36.112719+00:00",
-      "stop_loss": 0.39043703999999996,
-      "take_profit": 0.3738392,
-      "metadata": {
-        "ml_evaluation": {
-          "ml_signal": "HOLD",
-          "ml_confidence": 0.1,
-          "model_agreement": 0.9441145464930472,
-          "adjustment": 0.0,
-          "risk_assessment": {
-            "anomaly_detected": false,
-            "volatility_regime": "normal",
-            "market_stress": false
-          }
-        },
-        "roi_targets": {
-          "entry_price": 0.3878,
-          "signal_type": "SELL",
-          "stop_loss": {
-            "price": 0.3909024,
-            "distance_abs": 0.003102400000000005,
-            "distance_pct": 0.8,
-            "roi_pct": 8.0
-          },
-          "take_profit": {
-            "price": 0.37228799999999995,
-            "distance_abs": 0.015512000000000026,
-            "distance_pct": 4.0,
-            "roi_pct": 40.0
-          },
-          "risk_reward_ratio": 5.0,
-          "leverage": 10,
-          "calculation_method": "roi_based"
-        },
-        "quick_quality_check": true,
-        "quality_timestamp": "2025-08-03T14:06:49.576781+00:00",
-        "approved_size": 14.0,
-        "signal_time": "2025-08-03T14:06:49.877108+00:00",
-        "position_size_multiplier": 1.0
-      },
-      "order_type": "Market",
-      "quantity_usdt": null
-    }
-  },
+  "pending_entry_signals": {},
   "model_info": {
     "error": "asdict() should be called on dataclass instances"
   },
   "custom_data": {
     "active_strategies": {
-      "Live_ML_Strategy": true,
+      "Live_ML_Strategy": false,
       "Ichimoku_Cloud": false,
       "Dual_Thrust": false,
-      "Mean_Reversion_BB": true,
-      "Momentum_Spike": true,
+      "Mean_Reversion_BB": false,
+      "Momentum_Spike": false,
       "Grid_Trading": false,
-      "Stop_and_Reverse": false
+      "Stop_and_Reverse": true
     },
     "sar_strategy_status": {
       "strategy_name": "Stop_and_Reverse",
-      "monitored_symbols_count": 50,
-      "monitored_symbols": [
-        "BTCUSDT",
-        "FARTCOINUSDT",
-        "SUIUSDT",
-        "HYPEUSDT",
-        "ADAUSDT",
-        "PUMPFUNUSDT",
-        "VINEUSDT",
-        "LTCUSDT",
-        "HBARUSDT",
-        "1000BONKUSDT",
-        "ZORAUSDT",
-        "TRUMPUSDT",
-        "OMUSDT",
-        "CFXUSDT",
-        "GALAUSDT",
-        "SEIUSDT",
-        "ICNTUSDT",
-        "BCHUSDT",
-        "NAORISUSDT",
-        "SPKUSDT",
-        "1000TOSHIUSDT",
-        "TREEUSDT",
-        "LDOUSDT",
-        "OMNIUSDT",
-        "DUCKUSDT",
-        "ETHFIUSDT",
-        "NOTUSDT",
-        "1INCHUSDT",
-        "STRKUSDT",
-        "WAVESUSDT",
-        "EIGENUSDT",
-        "ERAUSDT",
-        "KAIAUSDT",
-        "ALTUSDT",
-        "APEUSDT",
-        "SANDUSDT",
-        "SYRUPUSDT",
-        "DEEPUSDT",
-        "PEOPLEUSDT",
-        "MOVEUSDT",
-        "IOTXUSDT",
-        "BANANAS31USDT",
-        "RESOLVUSDT",
-        "HEIUSDT",
-        "CUSDT",
-        "KERNELUSDT",
-        "BOMEUSDT",
-        "GMTUSDT",
-        "ZBCNUSDT",
-        "COMPUSDT"
-      ],
+      "monitored_symbols_count": 0,
+      "monitored_symbols": [],
       "current_positions_count": 0,
       "current_positions": [],
-      "last_symbol_update": "2025-08-03T21:04:08.403161",
+      "last_symbol_update": "2025-08-05T11:31:00.103313",
       "config": {
         "min_signal_score": 4,
-        "chop_threshold": 95,
-        "adx_threshold": 15,
+        "chop_threshold": 60,
+        "adx_threshold": 20,
         "use_shadow_system": true,
         "use_ml_confirmation": true,
         "min_daily_volume_usd": 1000000
@@ -385,7 +54,7 @@
       "total_loss": 0.0,
       "avg_profit_per_trade": 0.0,
       "recent_trades_count": 0,
-      "last_update": "2025-08-03T21:03:29.817493",
+      "last_update": "2025-08-05T11:27:26.043013",
       "current_parameters": {
         "acceleration": 0.02,
         "max_acceleration": 0.2,
@@ -395,17 +64,49 @@
         "take_profit_atr_multiplier": 3.0
       },
       "parameter_history": [],
-      "monitored_symbols": 50,
+      "monitored_symbols": 0,
       "active_positions": 0,
       "market_regime": "unknown",
       "trend_strength": 0.5
     },
     "adaptive_weights": {
+      "Lorentzian_Classification": 1.0,
+      "Live_ML_Strategy": 1.0,
+      "ExchangeSync": 1.0,
       "Mean_Reversion_BB": 1.0,
-      "Consensus_SELL": 1.0,
-      "Live_ML_Strategy": 1.0
+      "Consensus_SELL": 1.0
     },
     "strategy_performance_summary": {
+      "Lorentzian_Classification": {
+        "active": false,
+        "weight": 1.0,
+        "total_trades": 1,
+        "win_rate": 0.0,
+        "recent_win_rate": 0.0,
+        "profit_factor": 0,
+        "total_profit": 0.0,
+        "last_update": "2025-08-05T11:27:26.041311"
+      },
+      "Live_ML_Strategy": {
+        "active": false,
+        "weight": 1.0,
+        "total_trades": 12,
+        "win_rate": 0.0,
+        "recent_win_rate": 0.0,
+        "profit_factor": 0,
+        "total_profit": 0.0,
+        "last_update": "2025-08-05T11:27:26.041342"
+      },
+      "ExchangeSync": {
+        "active": false,
+        "weight": 1.0,
+        "total_trades": 4,
+        "win_rate": 0.0,
+        "recent_win_rate": 0.0,
+        "profit_factor": 0,
+        "total_profit": 0.0,
+        "last_update": "2025-08-05T11:27:26.041419"
+      },
       "Mean_Reversion_BB": {
         "active": false,
         "weight": 1.0,
@@ -414,7 +115,7 @@
         "recent_win_rate": 0.0,
         "profit_factor": 0,
         "total_profit": 0.0,
-        "last_update": "2025-08-03T21:03:29.815440"
+        "last_update": "2025-08-05T11:27:26.041442"
       },
       "Consensus_SELL": {
         "active": false,
@@ -424,158 +125,148 @@
         "recent_win_rate": 0.0,
         "profit_factor": 0,
         "total_profit": 0.0,
-        "last_update": "2025-08-03T21:03:29.815529"
-      },
-      "Live_ML_Strategy": {
-        "active": false,
-        "weight": 1.0,
-        "total_trades": 87,
-        "win_rate": 0.0,
-        "recent_win_rate": 0.0,
-        "profit_factor": 0.0,
-        "total_profit": -0.04,
-        "last_update": "2025-08-03T21:03:29.815631"
+        "last_update": "2025-08-05T11:27:26.041492"
       }
     },
     "market_regimes": {
       "ETHUSDT": {
-        "regime": "squeeze",
-        "confidence": 0.5,
-        "trend_strength": -0.45068069383450393,
-        "volatility": 0.2868276154846843,
+        "regime": "ranging",
+        "confidence": 1.0,
+        "trend_strength": -0.00880694904243364,
+        "volatility": 0.4723603312382534,
         "duration": "Just started"
       },
       "BTCUSDT": {
-        "regime": "squeeze",
-        "confidence": 0.5,
-        "trend_strength": -0.394266191178024,
-        "volatility": 0.2282846412272816,
-        "duration": "Just started"
-      },
-      "XRPUSDT": {
-        "regime": "squeeze",
-        "confidence": 0.5,
-        "trend_strength": -0.4607234613600207,
-        "volatility": 0.24849610589555682,
+        "regime": "ranging",
+        "confidence": 1.0,
+        "trend_strength": 0.02245058639505686,
+        "volatility": 0.35284011053532655,
         "duration": "Just started"
       },
       "SOLUSDT": {
         "regime": "ranging",
-        "confidence": 0.8,
-        "trend_strength": -0.37838760099040547,
-        "volatility": 0.33005436822709644,
+        "confidence": 1.0,
+        "trend_strength": 0.049198867169501156,
+        "volatility": 0.5331516226211168,
         "duration": "Just started"
       },
-      "DOGEUSDT": {
+      "XRPUSDT": {
         "regime": "ranging",
-        "confidence": 0.8,
-        "trend_strength": -0.3905315656291135,
-        "volatility": 0.31972232696021435,
+        "confidence": 1.0,
+        "trend_strength": 0.0758885390622411,
+        "volatility": 0.4147191887154099,
         "duration": "Just started"
       },
       "ENAUSDT": {
-        "regime": "ranging",
-        "confidence": 0.8,
-        "trend_strength": -0.8855437602305036,
-        "volatility": 0.3886225762348654,
+        "regime": "trend_up",
+        "confidence": 0.5,
+        "trend_strength": 0.9807105800974689,
+        "volatility": 0.41852416363997946,
+        "duration": "Just started"
+      },
+      "DOGEUSDT": {
+        "regime": "trend_up",
+        "confidence": 0.5,
+        "trend_strength": 0.29855744439441867,
+        "volatility": 0.5129147342173495,
         "duration": "Just started"
       },
       "FARTCOINUSDT": {
-        "regime": "weak_trend_up",
+        "regime": "trend_up",
         "confidence": 0.5,
-        "trend_strength": 0.05883203365876653,
-        "volatility": 0.27487961886591994,
+        "trend_strength": 0.6783110492825299,
+        "volatility": 0.481152168035918,
         "duration": "Just started"
       },
       "SUIUSDT": {
-        "regime": "ranging",
-        "confidence": 0.8,
-        "trend_strength": -0.8554716273448533,
-        "volatility": 0.5643439047058549,
+        "regime": "strong_trend_up",
+        "confidence": 0.8999999999999999,
+        "trend_strength": 0.9730288148811426,
+        "volatility": 0.4953466869143609,
         "duration": "Just started"
       },
-      "HYPEUSDT": {
-        "regime": "weak_trend_up",
+      "MAGICUSDT": {
+        "regime": "trend_up",
         "confidence": 0.5,
-        "trend_strength": 0.4210116991073291,
-        "volatility": 0.2102102078357694,
+        "trend_strength": 0.224261617010276,
+        "volatility": 0.17349019964292386,
         "duration": "Just started"
       },
-      "ADAUSDT": {
-        "regime": "squeeze",
+      "LTCUSDT": {
+        "regime": "trend_up",
         "confidence": 0.5,
-        "trend_strength": -0.4235789148603515,
-        "volatility": 0.2857260454546406,
-        "duration": "Just started"
-      },
-      "1000PEPEUSDT": {
-        "regime": "ranging",
-        "confidence": 1.0,
-        "trend_strength": -0.06305938183820294,
-        "volatility": 0.32482028585596273,
+        "trend_strength": 0.22518816686499,
+        "volatility": 0.45474562520995904,
         "duration": "Just started"
       },
       "PUMPFUNUSDT": {
         "regime": "ranging",
         "confidence": 0.8,
-        "trend_strength": -0.43293249680492485,
-        "volatility": 0.6754162219876878,
+        "trend_strength": 0.30575663828905275,
+        "volatility": 0.3434167903700352,
+        "duration": "Just started"
+      },
+      "HYPEUSDT": {
+        "regime": "ranging",
+        "confidence": 1.0,
+        "trend_strength": -0.1375072148847304,
+        "volatility": 0.37795680660212827,
         "duration": "Just started"
       },
       "PENGUUSDT": {
-        "regime": "weak_trend_down",
+        "regime": "trend_up",
         "confidence": 0.5,
-        "trend_strength": -0.5501481854065889,
-        "volatility": 0.46924401180971176,
+        "trend_strength": 1.0,
+        "volatility": 0.2827110199009801,
+        "duration": "Just started"
+      },
+      "ADAUSDT": {
+        "regime": "trend_up",
+        "confidence": 0.5,
+        "trend_strength": 0.24031497232849286,
+        "volatility": 0.46710736868480424,
+        "duration": "Just started"
+      },
+      "1000PEPEUSDT": {
+        "regime": "trend_up",
+        "confidence": 0.5,
+        "trend_strength": 0.31660747749282464,
+        "volatility": 0.55148579008461,
+        "duration": "Just started"
+      },
+      "SPKUSDT": {
+        "regime": "trend_up",
+        "confidence": 0.5,
+        "trend_strength": 1.0,
+        "volatility": 0.43904746400157096,
+        "duration": "Just started"
+      },
+      "TONUSDT": {
+        "regime": "ranging",
+        "confidence": 1.0,
+        "trend_strength": 0.1378998373563423,
+        "volatility": 0.25059624173084205,
         "duration": "Just started"
       },
       "WIFUSDT": {
-        "regime": "ranging",
-        "confidence": 0.8,
-        "trend_strength": -0.5469814695388293,
-        "volatility": 0.2912574723826063,
-        "duration": "Just started"
-      },
-      "VINEUSDT": {
-        "regime": "trend_down",
+        "regime": "trend_up",
         "confidence": 0.5,
-        "trend_strength": -1.0,
-        "volatility": 0.4033465768905598,
+        "trend_strength": 0.41029239766081815,
+        "volatility": 0.5419603999844471,
         "duration": "Just started"
       },
       "MUSDT": {
         "regime": "ranging",
         "confidence": 0.8,
-        "trend_strength": 0.9640510872740937,
-        "volatility": 0.35653428785905406,
+        "trend_strength": -0.2699594455541427,
+        "volatility": 0.2696046572323158,
         "duration": "Just started"
       },
-      "LTCUSDT": {
-        "regime": "ranging",
-        "confidence": 0.8,
-        "trend_strength": -0.39526676619823814,
-        "volatility": 0.3058525317863875,
-        "duration": "Just started"
-      },
-      "MAGICUSDT": {
-        "regime": "squeeze",
+      "1000BONKUSDT": {
+        "regime": "trend_up",
         "confidence": 0.5,
-        "trend_strength": 0.010273371921120392,
-        "volatility": 0.16472408933445212,
-        "duration": "Just started"
-      },
-      "HBARUSDT": {
-        "regime": "ranging",
-        "confidence": 0.8,
-        "trend_strength": -1.0,
-        "volatility": 0.5559246902077694,
-        "duration": "Just started"
-      },
-      "TONUSDT": {
-        "regime": "squeeze",
-        "confidence": 0.5,
-        "trend_strength": -0.027613903609449937,
-        "volatility": 0.1996289634524221,
+        "trend_strength": 0.2212531248421989,
+        "volatility": 0.7930541184083985,
         "duration": "Just started"
       }
     },
@@ -602,85 +293,85 @@
     },
     "focus_list": {
       "symbols": [
-        "VINEUSDT",
-        "DUCKUSDT",
-        "MUSDT",
-        "1000TOSHIUSDT",
-        "TREEUSDT",
-        "NAORISUSDT",
-        "FRAGUSDT",
+        "ILVUSDT",
         "MAGICUSDT",
-        "LAUNCHCOINUSDT",
-        "AGTUSDT",
-        "SPXUSDT",
-        "PONKEUSDT",
-        "CFXUSDT",
-        "PUMPFUNUSDT",
-        "IDEXUSDT",
-        "DOLOUSDT",
-        "RESOLVUSDT",
-        "FHEUSDT",
-        "ICNTUSDT",
-        "DBRUSDT",
+        "NEIROETHUSDT",
+        "RAREUSDT",
         "ESPORTSUSDT",
-        "OMUSDT",
-        "HYPERUSDT",
-        "BRETTUSDT",
+        "MUSDT",
+        "KERNELUSDT",
+        "PARTIUSDT",
+        "SYNUSDT",
+        "ZRCUSDT",
+        "B3USDT",
+        "NAORISUSDT",
         "A2ZUSDT",
-        "IPUSDT",
-        "1000CATUSDT",
-        "ENAUSDT",
-        "NOTUSDT",
-        "VICUSDT",
-        "CVXUSDT",
-        "SOPHUSDT",
+        "MNTUSDT",
         "SPKUSDT",
-        "SOONUSDT",
-        "HOMEUSDT",
-        "HEIUSDT",
-        "ELXUSDT",
-        "CUSDT",
-        "ETHFIUSDT",
-        "SAROSUSDT"
+        "GASUSDT",
+        "PUMPFUNUSDT",
+        "LTCUSDT",
+        "VINEUSDT",
+        "TREEUSDT",
+        "NEWTUSDT",
+        "1000CATUSDT",
+        "TAUSDT",
+        "HYPERUSDT",
+        "ZORAUSDT",
+        "USELESSUSDT",
+        "SEIUSDT",
+        "ENAUSDT",
+        "ERAUSDT",
+        "LAUNCHCOINUSDT",
+        "UNIUSDT",
+        "1000BONKUSDT",
+        "TONUSDT",
+        "FARTCOINUSDT",
+        "KASUSDT",
+        "CROSSUSDT",
+        "1000000MOGUSDT",
+        "AI16ZUSDT",
+        "AVAXUSDT",
+        "CRVUSDT"
       ],
-      "updated": "2025-08-03T21:04:04.729337",
+      "updated": "2025-08-05T10:54:30.097362",
       "stats": {
         "total": 40,
         "top_movers": [
           {
-            "symbol": "VINEUSDT",
-            "price_change_24h": -31.0821,
-            "volume_24h": 146978574.726,
-            "atr_percent": 10.991577874499997,
-            "volatility_score": 21.03683893725
+            "symbol": "ILVUSDT",
+            "price_change_24h": 60.158100000000005,
+            "volume_24h": 26611825.0417,
+            "atr_percent": 3.670912951589733,
+            "volatility_score": 31.91450647579487
           },
           {
-            "symbol": "DUCKUSDT",
-            "price_change_24h": 35.5354,
-            "volume_24h": 14827664.179,
-            "atr_percent": 5.075222388415375,
-            "volatility_score": 20.30531119420769
+            "symbol": "MAGICUSDT",
+            "price_change_24h": 47.5418,
+            "volume_24h": 332921703.0621,
+            "atr_percent": 9.000067325841755,
+            "volatility_score": 28.27093366292088
           },
           {
-            "symbol": "MUSDT",
-            "price_change_24h": 27.8983,
-            "volume_24h": 137655965.1516,
-            "atr_percent": 11.462956092559734,
-            "volatility_score": 19.680628046279868
+            "symbol": "NEIROETHUSDT",
+            "price_change_24h": 34.0021,
+            "volume_24h": 46942558.8258,
+            "atr_percent": 6.775206765164947,
+            "volatility_score": 20.388653382582472
           },
           {
-            "symbol": "1000TOSHIUSDT",
-            "price_change_24h": 18.0199,
-            "volume_24h": 24869065.157,
-            "atr_percent": 4.264466456990705,
-            "volatility_score": 11.142183228495352
+            "symbol": "RAREUSDT",
+            "price_change_24h": 30.6827,
+            "volume_24h": 32254885.6499,
+            "atr_percent": 4.452867606900832,
+            "volatility_score": 17.567783803450418
           },
           {
-            "symbol": "TREEUSDT",
-            "price_change_24h": -13.7108,
-            "volume_24h": 23089338.0346,
-            "atr_percent": 3.4826545018432826,
-            "volatility_score": 8.596727250921642
+            "symbol": "ESPORTSUSDT",
+            "price_change_24h": -25.054199999999998,
+            "volume_24h": 116056274.7127,
+            "atr_percent": 9.423541729021405,
+            "volatility_score": 17.2388708645107
           }
         ]
       }
@@ -700,6 +391,265 @@
         "volatility_level": 0.524
       },
       "current_regime": "ranging"
+    },
+    "websocket_stats": {
+      "messages_received": 229568,
+      "last_message_time": "2025-08-04T22:46:07.024821",
+      "uptime_seconds": 1540.787408,
+      "reconnections": 2,
+      "errors": 0,
+      "active_subscriptions": 33,
+      "subscriptions": {
+        "position": {
+          "symbols_count": 0,
+          "last_update": null,
+          "message_count": 0
+        },
+        "order": {
+          "symbols_count": 0,
+          "last_update": null,
+          "message_count": 0
+        },
+        "execution": {
+          "symbols_count": 0,
+          "last_update": null,
+          "message_count": 0
+        },
+        "tickers.SEIUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.961482",
+          "message_count": 8544
+        },
+        "tickers.CVXUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.966163",
+          "message_count": 4256
+        },
+        "tickers.TREEUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.985625",
+          "message_count": 6846
+        },
+        "tickers.PENGUUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.855963",
+          "message_count": 11304
+        },
+        "tickers.LAUNCHCOINUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.775764",
+          "message_count": 7862
+        },
+        "tickers.SPKUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.973511",
+          "message_count": 11752
+        },
+        "tickers.INITUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.452756",
+          "message_count": 6595
+        },
+        "tickers.TONUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.966057",
+          "message_count": 8302
+        },
+        "tickers.HYPERUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.967780",
+          "message_count": 4947
+        },
+        "tickers.PUMPFUNUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.982690",
+          "message_count": 10356
+        },
+        "tickers.VINEUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.944872",
+          "message_count": 8827
+        },
+        "tickers.MAGICUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.939267",
+          "message_count": 13186
+        },
+        "tickers.MNTUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.951392",
+          "message_count": 11615
+        },
+        "tickers.DOLOUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.933320",
+          "message_count": 4073
+        },
+        "tickers.USELESSUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.863053",
+          "message_count": 7031
+        },
+        "tickers.KERNELUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.967748",
+          "message_count": 6063
+        },
+        "tickers.ASPUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:01.548781",
+          "message_count": 2315
+        },
+        "tickers.SAHARAUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.952445",
+          "message_count": 4779
+        },
+        "tickers.BRETTUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:05.963427",
+          "message_count": 6392
+        },
+        "tickers.SYRUPUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.358776",
+          "message_count": 4849
+        },
+        "tickers.NAORISUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.970660",
+          "message_count": 5020
+        },
+        "tickers.LTCUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.956171",
+          "message_count": 10043
+        },
+        "tickers.TAUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.819992",
+          "message_count": 2343
+        },
+        "tickers.ENAUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:07.004202",
+          "message_count": 12162
+        },
+        "tickers.UNIUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.696716",
+          "message_count": 10535
+        },
+        "tickers.ZORAUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.939492",
+          "message_count": 10425
+        },
+        "tickers.MUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.995102",
+          "message_count": 8647
+        },
+        "tickers.1000000MOGUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:07.024825",
+          "message_count": 6419
+        },
+        "tickers.DUCKUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.858068",
+          "message_count": 2807
+        },
+        "tickers.AI16ZUSDT": {
+          "symbols_count": 1,
+          "last_update": "2025-08-04T22:46:06.844089",
+          "message_count": 2873
+        }
+      },
+      "connections": {
+        "public": true,
+        "private": true
+      }
+    },
+    "api_performance": {
+      "/v5/market/tickers": 3,
+      "total_requests": 2807,
+      "successful_requests": 2807,
+      "avg_response_time_ms": 2205.2239050931416,
+      "/v5/market/kline": 2666,
+      "/v5/account/wallet-balance": 16,
+      "/v5/market/instruments-info": 10,
+      "/v5/position/set-leverage": 100,
+      "/v5/position/list": 12
+    },
+    "cache_performance": {
+      "cache_stats": {
+        "hits": 31,
+        "misses": 2466,
+        "hit_rate": "1.2%",
+        "entries": 498,
+        "max_entries": 10000,
+        "evictions": 0
+      },
+      "top_symbols": [
+        [
+          "AI16ZUSDT",
+          65
+        ],
+        [
+          "UNIUSDT",
+          57
+        ],
+        [
+          "NAORISUSDT",
+          57
+        ],
+        [
+          "BRETTUSDT",
+          57
+        ],
+        [
+          "NEWTUSDT",
+          57
+        ],
+        [
+          "ENSUSDT",
+          57
+        ],
+        [
+          "OPUSDT",
+          57
+        ],
+        [
+          "CVXUSDT",
+          56
+        ],
+        [
+          "TAUSDT",
+          56
+        ],
+        [
+          "DUCKUSDT",
+          56
+        ]
+      ],
+      "ttl_config": {
+        "candles": 30,
+        "ticker": 15,
+        "balance": 60,
+        "positions": 45,
+        "orders": 30,
+        "instrument": 300,
+        "volatility": 120,
+        "ml_features": 180
+      },
+      "focus_symbols_count": 38
+    },
+    "circuit_breaker_health": {
+      "healthy_breakers": 4,
+      "total_breakers": 4,
+      "health_percentage": 100.0,
+      "unhealthy_breakers": []
     }
   }
 }

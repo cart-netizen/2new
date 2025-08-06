@@ -277,32 +277,103 @@ class BybitWebSocketClient:
       return 'unknown'
 
   # Методы подписки
+  # async def subscribe_tickers(self, symbols: List[str], callback: Callable = None):
+  #   """Подписывается на тикеры символов"""
+  #   if not symbols:
+  #     return
+  #
+  #   # Bybit позволяет подписаться на все тикеры сразу
+  #   topic = "tickers"
+  #
+  #   subscription_message = {
+  #     "op": "subscribe",
+  #     "args": [f"tickers.{symbol}" for symbol in symbols]
+  #   }
+  #
+  #   await self._send_subscription(subscription_message, 'public')
+  #
+  #   # Сохраняем информацию о подписке
+  #   self.subscriptions[topic] = SubscriptionInfo(
+  #     topic=topic,
+  #     symbols=set(symbols),
+  #     callback=callback
+  #   )
+  #
+  #   if callback:
+  #     self.callbacks[topic].append(callback)
+  #
+  #   logger.info(f"Подписка на тикеры {len(symbols)} символов")
+
   async def subscribe_tickers(self, symbols: List[str], callback: Callable = None):
     """Подписывается на тикеры символов"""
     if not symbols:
       return
 
-    # Bybit позволяет подписаться на все тикеры сразу
-    topic = "tickers"
+    # Фильтруем уже подписанные символы
+    new_symbols = []
+    for symbol in symbols:
+      ticker_topic = f"tickers.{symbol}"
+      if ticker_topic not in self.subscriptions:
+        new_symbols.append(symbol)
 
+    if not new_symbols:
+      logger.debug(f"Все символы уже подписаны: {symbols}")
+      return
+
+    # Подписываемся только на новые символы
     subscription_message = {
       "op": "subscribe",
-      "args": [f"tickers.{symbol}" for symbol in symbols]
+      "args": [f"tickers.{symbol}" for symbol in new_symbols]
     }
 
     await self._send_subscription(subscription_message, 'public')
 
-    # Сохраняем информацию о подписке
-    self.subscriptions[topic] = SubscriptionInfo(
-      topic=topic,
-      symbols=set(symbols),
-      callback=callback
-    )
+    # Сохраняем информацию о каждой подписке отдельно
+    for symbol in new_symbols:
+      ticker_topic = f"tickers.{symbol}"
+      self.subscriptions[ticker_topic] = SubscriptionInfo(
+        topic=ticker_topic,
+        symbols={symbol},
+        callback=callback
+      )
 
-    if callback:
-      self.callbacks[topic].append(callback)
+      if callback:
+        self.callbacks[ticker_topic].append(callback)
 
-    logger.info(f"Подписка на тикеры {len(symbols)} символов")
+    logger.info(f"Подписка на тикеры {len(new_symbols)} новых символов из {len(symbols)}")
+
+  async def unsubscribe_tickers(self, symbols: List[str]):
+    """Отписывается от тикеров символов"""
+    if not symbols:
+      return
+
+    # Формируем список для отписки
+    topics_to_unsubscribe = []
+    for symbol in symbols:
+      ticker_topic = f"tickers.{symbol}"
+      if ticker_topic in self.subscriptions:
+        topics_to_unsubscribe.append(ticker_topic)
+
+    if not topics_to_unsubscribe:
+      logger.debug(f"Нет активных подписок для отписки: {symbols}")
+      return
+
+    # Отправляем сообщение об отписке
+    unsubscription_message = {
+      "op": "unsubscribe",
+      "args": topics_to_unsubscribe
+    }
+
+    await self._send_subscription(unsubscription_message, 'public')
+
+    # Удаляем из локального реестра
+    for topic in topics_to_unsubscribe:
+      if topic in self.subscriptions:
+        del self.subscriptions[topic]
+      if topic in self.callbacks:
+        del self.callbacks[topic]
+
+    logger.info(f"Отписка от {len(topics_to_unsubscribe)} тикеров")
 
   async def subscribe_orderbook(self, symbols: List[str], depth: int = 25, callback: Callable = None):
     """Подписывается на стакан символов"""
@@ -598,10 +669,32 @@ class BybitWebSocketClient:
         for topic, sub in self.subscriptions.items()
       },
       'connections': {
-        'public': self.public_ws is not None and not self.public_ws.closed,
-        'private': self.private_ws is not None and not self.private_ws.closed
+        'public': self.public_ws is not None and self._is_connection_alive(self.public_ws),
+        'private': self.private_ws is not None and self._is_connection_alive(self.private_ws)
       }
     }
+
+  def _is_connection_alive(self, ws_connection) -> bool:
+    """Проверяет, живо ли WebSocket соединение"""
+    try:
+      if ws_connection is None:
+        return False
+
+      # Проверяем различные атрибуты состояния соединения
+      if hasattr(ws_connection, 'closed'):
+        return not ws_connection.closed
+      elif hasattr(ws_connection, 'state'):
+        # websockets.protocol.State.OPEN == 1
+        return ws_connection.state == 1
+      elif hasattr(ws_connection, 'close_code'):
+        return ws_connection.close_code is None
+      else:
+        # Если нет явных индикаторов, считаем соединение живым
+        return True
+
+    except Exception as e:
+      logger.debug(f"Ошибка проверки состояния WebSocket: {e}")
+      return False
 
   # Закрытие соединений
   async def close(self):

@@ -108,8 +108,14 @@ class PositionManager:
                 'side': position.get('side', 'Buy').upper(),
                 'open_price': float(position.get('avgPrice', 0)),
                 'quantity': size,
+                'price': position.get('avgPrice', position.get('markPrice', 0.0)),  # ДОБАВИТЬ
+                'entry_price': position.get('avgPrice', 0.0),  # ДОБАВИТЬ
                 'leverage': int(position.get('leverage', 1)),
                 'strategy_name': 'Unknown_Recovery',
+                'timestamp': datetime.now(),
+                'order_id': f"sync_{symbol}_{int(datetime.now().timestamp())}",
+                'status': 'OPEN',
+
                 'metadata': {
                   'recovered_from_exchange': True,
                   'recovery_time': datetime.now(timezone.utc).isoformat(),

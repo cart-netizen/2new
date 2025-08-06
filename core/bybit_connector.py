@@ -129,6 +129,8 @@ class BybitConnector:
 
     TradingCircuitBreakers.setup_trading_breakers()
 
+    self.default_category = "linear"
+
     if not self.api_key or "YOUR_" in self.api_key:
       logger.warning("API ключ Bybit не настроен или используется ключ-заглушка.")
     if not self.api_secret or "YOUR_" in self.api_secret:
@@ -442,32 +444,27 @@ class BybitConnector:
 
   async def get_kline(self, symbol: str, interval: str, limit: int = 200, force_fresh: bool = False, **kwargs) -> List[
     List[Any]]:
-    """Получает исторические данные K-line (свечи) с опцией принудительного обновления"""
+    """
+    Получает исторические данные K-line (свечи).
+    ИСПРАВЛЕНО: Корректно обрабатывает 'end' для запроса исторических данных.
+    """
     endpoint = "/v5/market/kline"
-
-    # ИСПРАВЛЕНИЕ: Добавляем параметры времени для получения свежих данных
-    current_time_ms = int(time.time() * 1000)
 
     params = {
       'category': 'linear',
       'symbol': symbol,
       'interval': interval,
       'limit': limit,
-      'end': current_time_ms,  # Явно указываем конечное время
-      **kwargs
+      **kwargs  # ИЗМЕНЕНО: Сначала применяем переданные аргументы
     }
 
-    # НОВОЕ: Определяем использование кэша
-    use_cache_setting = not force_fresh  # Если force_fresh=True, то use_cache=False
+    # ИЗМЕНЕНО: Добавляем 'end' только если он не был передан явно в kwargs
+    if 'end' not in params:
+      current_time_ms = int(time.time() * 1000)
+      params['end'] = current_time_ms
 
-    # ДИАГНОСТИКА: Логируем запрос
-    # logger.info(f"🔍 ДЕТАЛЬНЫЙ API запрос для {symbol}:")
-    # logger.info(f"  - Endpoint: {endpoint}")
-    # logger.info(f"  - Параметры: {params}")
-    # logger.info(f"  - use_cache: {use_cache_setting}")
-    # logger.info(f"  - force_fresh: {force_fresh}")
+    use_cache_setting = not force_fresh
 
-    # НОВОЕ: Если force_fresh, очищаем кэш для этого символа
     if force_fresh:
       self.clear_symbol_cache(symbol)
 
@@ -612,7 +609,12 @@ class BybitConnector:
     # Добавляем дополнительные параметры
     for key, value in kwargs.items():
       if key not in params and value is not None:
-        params[key] = str(value) if isinstance(value, (int, float)) else value
+        # Специальная обработка для SL/TP параметров
+        if key in ['stopLoss', 'takeProfit']:
+          params[key] = str(float(value))  # Обеспечиваем правильный формат для SL/TP
+          logger.info(f"🎯 Добавлен {key}: {params[key]} для ордера {symbol}")
+        else:
+          params[key] = str(value) if isinstance(value, (int, float)) else value
 
     logger.debug(f"Отправка ордера: {params}")
 
@@ -632,16 +634,40 @@ class BybitConnector:
       if response and 'result' in response:
         data = response['result']
 
-        # ДОБАВЛЯЕМ ПРОВЕРКУ И ИСПРАВЛЕНИЕ СОРТИРОВКИ
+        # ИСПРАВЛЕННАЯ ВЕРСИЯ с улучшенной обработкой
         bids = data.get('b', [])
         asks = data.get('a', [])
 
-        # Сортируем bids по убыванию цены (лучшие предложения сверху)
-        if bids:
-          bids_sorted = sorted(bids, key=lambda x: float(x[0]), reverse=True)
-          if bids != bids_sorted:
-            logger.warning(f"⚠️ Исправлена сортировка bids для {symbol}")
-            data['b'] = bids_sorted
+        # Улучшенная проверка и исправление сортировки
+        if bids and len(bids) > 1:
+          try:
+            # Проверяем правильность сортировки bids (должны быть по убыванию цены)
+            first_bid_price = float(bids[0][0])
+            second_bid_price = float(bids[1][0])
+
+            if first_bid_price < second_bid_price:
+              logger.debug(f"Исправляем сортировку bids: {first_bid_price} < {second_bid_price}")
+              bids.sort(key=lambda x: float(x[0]), reverse=True)
+              logger.debug("✅ Bids пересортированы по убыванию цены")
+            else:
+              logger.debug("✅ Bids уже правильно отсортированы")
+          except (ValueError, IndexError) as e:
+            logger.warning(f"Ошибка при проверке сортировки bids: {e}")
+
+        if asks and len(asks) > 1:
+          try:
+            # Проверяем правильность сортировки asks (должны быть по возрастанию цены)
+            first_ask_price = float(asks[0][0])
+            second_ask_price = float(asks[1][0])
+
+            if first_ask_price > second_ask_price:
+              logger.debug(f"Исправляем сортировку asks: {first_ask_price} > {second_ask_price}")
+              asks.sort(key=lambda x: float(x[0]))
+              logger.debug("✅ Asks пересортированы по возрастанию цены")
+            else:
+              logger.debug("✅ Asks уже правильно отсортированы")
+          except (ValueError, IndexError) as e:
+            logger.warning(f"Ошибка при проверке сортировки asks: {e}")
 
         # Сортируем asks по возрастанию цены (лучшие предложения сверху)
         if asks:
@@ -779,7 +805,7 @@ class BybitConnector:
         # Fallback: получаем по одному
         for symbol in batch:
           try:
-            ticker = await self.get_ticker(symbol)
+            ticker = await self.fetch_ticker(symbol)
             if ticker:
               results[symbol] = ticker
             await asyncio.sleep(0.05)

@@ -435,7 +435,7 @@ class IntegratedTradingSystem:
     #     logger.error(f"Ошибка инициализации RL Trading: {e}", exc_info=True)
     #     # Отключаем RL если инициализация не удалась
     #     self.config['rl_trading']['enabled'] = False
-
+    self.is_initialized = False
     logger.info("IntegratedTradingSystem полностью инициализирован.")
 
   @staticmethod
@@ -1135,15 +1135,15 @@ class IntegratedTradingSystem:
     logger.info(f"🚀 НЕМЕДЛЕННОЕ исполнение сигнала для {symbol}")
     success, result = await self.trade_executor.execute_trade(signal, symbol, final_size)
 
-    # if success:
-    #   logger.info(f"✅ Сделка {symbol} успешно открыта напрямую!")
-    #   # Удаляем из pending после исполнения
-    #   pending_signals = self.state_manager.get_pending_signals()
-    #   if symbol in pending_signals:
-    #     del pending_signals[symbol]
-    #     self.state_manager.update_pending_signals(pending_signals)
-    # else:
-    #   logger.error(f"❌ Ошибка немедленного исполнения {symbol}: {result}")
+    if success:
+      logger.info(f"✅ Сделка {symbol} успешно открыта напрямую!")
+      # Удаляем из pending после исполнения
+      pending_signals = self.state_manager.get_pending_signals()
+      if symbol in pending_signals:
+        del pending_signals[symbol]
+        self.state_manager.update_pending_signals(pending_signals)
+    else:
+      logger.error(f"❌ Ошибка немедленного исполнения {symbol}: {result}")
 
     logger.info(f"✅ Enhanced сигнал для {symbol} одобрен и поставлен в очередь")
     signal_logger.info(f"====== ENHANCED СИГНАЛ ДЛЯ {symbol} ПОСТАВЛЕН В ОЧЕРЕДЬ ======")
@@ -1637,7 +1637,9 @@ class IntegratedTradingSystem:
     Инициализация системы с ГИБРИДНОЙ логикой выбора символов.
     """
     logger.info("Начало инициализации системы...")
-
+    if self.is_initialized:
+      logger.info("Система уже инициализирована, пропуск повторной инициализации.")
+      return True
     # Загружаем конфиг
     config_manager = ConfigManager()  # Убедитесь, что ConfigManager импортирован
     self.config = config_manager.load_config()
@@ -1672,7 +1674,8 @@ class IntegratedTradingSystem:
         asyncio.create_task(self.ws_client.start_heartbeat())
 
         logger.info("✅ WebSocket интеграция завершена")
-
+        self.is_initialized = True
+        return True
       except Exception as e:
         logger.error(f"Ошибка инициализации WebSocket: {e}")
         self.ws_enabled = False
@@ -5317,13 +5320,42 @@ class IntegratedTradingSystem:
     if not self.ws_client or not self.focus_list_symbols:
       return
 
-    try:
-      # Подписываемся на новые focus символы
-      await self.ws_client.subscribe_tickers(self.focus_list_symbols[:30])
-      logger.info(f"Обновлены WebSocket подписки для {len(self.focus_list_symbols)} focus символов")
+    # try:
+    #   # Подписываемся на новые focus символы
+    #   await self.ws_client.subscribe_tickers(self.focus_list_symbols[:30])
+    #   logger.info(f"Обновлены WebSocket подписки для {len(self.focus_list_symbols)} focus символов")
+    #
+    # except Exception as e:
+    #   logger.error(f"Ошибка обновления WebSocket подписок: {e}")
 
-    except Exception as e:
-      logger.error(f"Ошибка обновления WebSocket подписок: {e}")
+    if self.focus_list_symbols and hasattr(self.ws_client, 'subscribe_tickers'):
+      try:
+        # Получаем текущие подписки
+        current_subscriptions = set()
+        for topic in self.ws_client.subscriptions.keys():
+          if topic.startswith('tickers.'):
+            symbol = topic.replace('tickers.', '')
+            current_subscriptions.add(symbol)
+
+        # Определяем изменения
+        new_symbols = set(self.focus_list_symbols[:30])  # Ограничиваем до 30 символов
+        symbols_to_add = new_symbols - current_subscriptions
+        symbols_to_remove = current_subscriptions - new_symbols
+
+        # Отписываемся от удаленных символов
+        if symbols_to_remove:
+          await self.ws_client.unsubscribe_tickers(list(symbols_to_remove))
+          logger.info(f"➖ Отписка от {len(symbols_to_remove)} символов")
+
+        # Подписываемся на новые символы
+        if symbols_to_add:
+          await self.ws_client.subscribe_tickers(list(symbols_to_add))
+          logger.info(f"➕ Подписка на {len(symbols_to_add)} новых символов")
+
+        logger.info(f"Обновлены WebSocket подписки для {len(new_symbols)} focus символов")
+
+      except Exception as e:
+        logger.error(f"Ошибка обновления WebSocket подписок: {e}")
 
   async def handle_performance_commands(self):
       """Обрабатывает команды управления производительностью"""

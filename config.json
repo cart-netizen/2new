@@ -26,7 +26,6 @@
         "enable_request_batching": true,
         "enable_cache": true
     },
-
     "ltf_entry_settings": {
         "description": "Настройки для оптимального входа на низких таймфреймах",
         "timeframes": {
@@ -137,17 +136,18 @@
         "grid_total_usdt_allocation": 10.0,
         "roi_stop_loss_pct": 8.0,
         "roi_take_profit_pct": 40.0,
-        "use_smart_pricing": true,
+        "use_smart_pricing": false,
+        "enable_stop_loss": true,
+        "enable_take_profit": true,
         "smart_pricing": {
-        "max_spread_pct": 0.5,
-        "volume_imbalance_threshold": 2.0,
-        "order_book_depth": 10,
-        "position_reduction_factor": 0.8,
-        "enable_spread_protection": true,
-        "enable_volume_analysis": true
-    }
-
-},
+            "max_spread_pct": 0.5,
+            "volume_imbalance_threshold": 2.0,
+            "order_book_depth": 10,
+            "position_reduction_factor": 0.8,
+            "enable_spread_protection": true,
+            "enable_volume_analysis": true
+        }
+    },
     "strategy_settings": {
         "signal_confidence_threshold": 0.6,
         "use_trend_filter": true,
@@ -167,26 +167,10 @@
     },
     "general_settings": {
         "symbol_selection_mode": "dynamic",
-        "dynamic_symbols_count": 200,
+        "dynamic_symbols_count": 100,
         "static_symbol_list": [],
         "symbol_blacklist": [],
         "min_24h_volume_usdt": 1000000,
-            "enable_websocket": true,
-            "priority_monitoring": {
-              "enabled": true,
-              "focus_list_size": 40,
-              "update_interval_minutes": 15,
-              "volatility_threshold_percent": 3.0,
-              "volume_spike_ratio": 2.0,
-              "atr_spike_ratio": 2.0
-            },
-            "performance_optimization": {
-              "use_adaptive_cache": true,
-              "enable_circuit_breakers": true,
-              "batch_size": 15,
-              "parallel_processing": true,
-              "preload_focus_data": true
-            },
         "monitoring_interval_seconds": 30
     },
     "feature_weights": {
@@ -322,9 +306,9 @@
             "daily_loss_limit_percentage": 3.0,
             "volatility_circuit_breaker": 5.0
         },
-        "chop_threshold": 95,
-        "adx_threshold": 15,
-        "atr_multiplier": 1.0,
+        "chop_threshold": 60,
+        "adx_threshold": 20,
+        "atr_multiplier": 1.5,
         "psar_start": 0.02,
         "psar_step": 0.02,
         "psar_max": 0.2,
@@ -333,224 +317,264 @@
         "max_monitored_symbols": 100
     },
     "strategies": {
-    "lorentzian": {
-      "enabled": true,
-      "strategy_type": "LorentzianStrategy",
-
-
-      "strategy_settings": {
-        "// Основные параметры модели": "",
-        "neighbors_count": 8,
-        "max_bars_back": 5000,
-        "feature_count": 5,
-        "min_history_size": 2000,
-        "force_training": true,
-        "initial_data_limit": 1000,
-        "save_models": true,
-        "update_frequency": 20,
-        "use_online_learning": true,
-
-        "// Конфигурация признаков (как в оригинале)": "",
-        "feature_1": {
-          "type": "RSI",
-          "paramA": 14,
-          "paramB": 1
-        },
-
-        "feature_2": {
-          "type": "WT",
-          "paramA": 10,
-          "paramB": 11,
-          "_comment": "WaveTrend Classic"
-        },
-
-        "feature_3": {
-          "type": "CCI",
-          "paramA": 20,
-          "paramB": 1,
-          "_comment": "Commodity Channel Index"
-        },
-
-        "feature_4": {
-          "type": "ADX",
-          "paramA": 20,
-          "paramB": 2,
-          "_comment": "Average Directional Index"
-        },
-
-        "feature_5": {
-          "type": "RSI",
-          "paramA": 9,
-          "paramB": 1,
-          "_comment": "Второй RSI с коротким периодом"
-        },
-
-        "// Настройки фильтров": "",
-        "use_volatility_filter": true,
-        "use_regime_filter": true,
-        "use_adx_filter": false,
-        "regime_threshold": -0.1,
-        "adx_threshold": 20,
-
-        "// Настройки торговли": "",
-        "use_dynamic_exits": false,
-        "show_bar_predictions": true,
-
-        "// Пороги для сигналов": "",
-        "signal_confidence_threshold": 0.6,
-
-        "// Risk management": "",
-        "stop_loss_atr_multiplier": 2.0,
-        "take_profit_atr_multiplier": 3.0,
-
-        "// Дополнительные параметры": "",
-
-        "retrain_interval": 1000,
-        "use_ema_filter": false,
-        "ema_period": 200,
-        "use_sma_filter": false,
-        "sma_period": 200
-      },
-
-      "risk_management": {
-        "position_size_percent": 2.0,
-        "max_positions": 1,
-        "max_daily_loss_percent": 5.0,
-        "max_drawdown_percent": 10.0
-      },
-
-      "timeframes": ["5m", "15m", "1h"],
-      "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],
-
-      "advanced_settings": {
-        "use_kernel_filter": true,
-        "kernel_settings": {
-          "lookback_window": 8,
-          "relative_weighting": 8.0,
-          "regression_level": 25,
-          "lag": 2
-        },
-
-        "color_compression": 1,
-        "use_worst_case_estimates": false,
-
-        "// Альтернативные конфигурации признаков": "",
-        "alternative_features": {
-          "conservative": {
-            "feature_1": {"type": "RSI", "paramA": 21, "paramB": 1},
-            "feature_2": {"type": "WT", "paramA": 10, "paramB": 11},
-            "feature_3": {"type": "CCI", "paramA": 20, "paramB": 1},
-            "feature_4": {"type": "ADX", "paramA": 20, "paramB": 2},
-            "feature_5": {"type": "RSI", "paramA": 14, "paramB": 1}
-          },
-          "aggressive": {
-            "feature_1": {"type": "RSI", "paramA": 9, "paramB": 1},
-            "feature_2": {"type": "WT", "paramA": 9, "paramB": 10},
-            "feature_3": {"type": "CCI", "paramA": 14, "paramB": 1},
-            "feature_4": {"type": "ADX", "paramA": 14, "paramB": 2},
-            "feature_5": {"type": "RSI", "paramA": 7, "paramB": 1}
-          },
-          "scalping": {
-            "feature_1": {"type": "RSI", "paramA": 7, "paramB": 1},
-            "feature_2": {"type": "WT", "paramA": 5, "paramB": 7},
-            "feature_3": {"type": "CCI", "paramA": 10, "paramB": 1},
-            "feature_4": {"type": "ADX", "paramA": 10, "paramB": 2},
-            "feature_5": {"type": "RSI", "paramA": 5, "paramB": 1}
-          }
-        },
-        "wavetrend_3d_modes": {
-          "conservative": {
-            "divergence_size_percent": 60,
-            "min_confidence_threshold": 0.7,
-            "conflict_resolution": "skip",
-            "speed_to_emphasize": "Slow"
-          },
-          "aggressive": {
-            "divergence_size_percent": 30,
-            "min_confidence_threshold": 0.5,
-            "conflict_resolution": "reduce_confidence",
-            "speed_to_emphasize": "Fast"
-          },
-          "balanced": {
-            "divergence_size_percent": 40,
-            "min_confidence_threshold": 0.6,
-            "conflict_resolution": "reduce_confidence",
-            "speed_to_emphasize": "Normal"
-          }
+        "lorentzian": {
+            "enabled": true,
+            "strategy_type": "LorentzianStrategy",
+            "strategy_settings": {
+                "// Основные параметры модели": "",
+                "neighbors_count": 8,
+                "max_bars_back": 5000,
+                "feature_count": 5,
+                "min_history_size": 2000,
+                "force_training": true,
+                "initial_data_limit": 1000,
+                "save_models": true,
+                "update_frequency": 20,
+                "use_online_learning": true,
+                "// Конфигурация признаков (как в оригинале)": "",
+                "feature_1": {
+                    "type": "RSI",
+                    "paramA": 14,
+                    "paramB": 1
+                },
+                "feature_2": {
+                    "type": "WT",
+                    "paramA": 10,
+                    "paramB": 11,
+                    "_comment": "WaveTrend Classic"
+                },
+                "feature_3": {
+                    "type": "CCI",
+                    "paramA": 20,
+                    "paramB": 1,
+                    "_comment": "Commodity Channel Index"
+                },
+                "feature_4": {
+                    "type": "ADX",
+                    "paramA": 20,
+                    "paramB": 2,
+                    "_comment": "Average Directional Index"
+                },
+                "feature_5": {
+                    "type": "RSI",
+                    "paramA": 9,
+                    "paramB": 1,
+                    "_comment": "Второй RSI с коротким периодом"
+                },
+                "// Настройки фильтров": "",
+                "use_volatility_filter": true,
+                "use_regime_filter": true,
+                "use_adx_filter": false,
+                "regime_threshold": -0.1,
+                "adx_threshold": 20,
+                "// Настройки торговли": "",
+                "use_dynamic_exits": false,
+                "show_bar_predictions": true,
+                "// Пороги для сигналов": "",
+                "signal_confidence_threshold": 0.6,
+                "// Risk management": "",
+                "stop_loss_atr_multiplier": 2.0,
+                "take_profit_atr_multiplier": 3.0,
+                "// Дополнительные параметры": "",
+                "retrain_interval": 1000,
+                "use_ema_filter": false,
+                "ema_period": 200,
+                "use_sma_filter": false,
+                "sma_period": 200
+            },
+            "risk_management": {
+                "position_size_percent": 2.0,
+                "max_positions": 1,
+                "max_daily_loss_percent": 5.0,
+                "max_drawdown_percent": 10.0
+            },
+            "timeframes": [
+                "5m",
+                "15m",
+                "1h"
+            ],
+            "symbols": [
+                "BTCUSDT",
+                "ETHUSDT",
+                "SOLUSDT"
+            ],
+            "advanced_settings": {
+                "use_kernel_filter": true,
+                "kernel_settings": {
+                    "lookback_window": 8,
+                    "relative_weighting": 8.0,
+                    "regression_level": 25,
+                    "lag": 2
+                },
+                "color_compression": 1,
+                "use_worst_case_estimates": false,
+                "// Альтернативные конфигурации признаков": "",
+                "alternative_features": {
+                    "conservative": {
+                        "feature_1": {
+                            "type": "RSI",
+                            "paramA": 21,
+                            "paramB": 1
+                        },
+                        "feature_2": {
+                            "type": "WT",
+                            "paramA": 10,
+                            "paramB": 11
+                        },
+                        "feature_3": {
+                            "type": "CCI",
+                            "paramA": 20,
+                            "paramB": 1
+                        },
+                        "feature_4": {
+                            "type": "ADX",
+                            "paramA": 20,
+                            "paramB": 2
+                        },
+                        "feature_5": {
+                            "type": "RSI",
+                            "paramA": 14,
+                            "paramB": 1
+                        }
+                    },
+                    "aggressive": {
+                        "feature_1": {
+                            "type": "RSI",
+                            "paramA": 9,
+                            "paramB": 1
+                        },
+                        "feature_2": {
+                            "type": "WT",
+                            "paramA": 9,
+                            "paramB": 10
+                        },
+                        "feature_3": {
+                            "type": "CCI",
+                            "paramA": 14,
+                            "paramB": 1
+                        },
+                        "feature_4": {
+                            "type": "ADX",
+                            "paramA": 14,
+                            "paramB": 2
+                        },
+                        "feature_5": {
+                            "type": "RSI",
+                            "paramA": 7,
+                            "paramB": 1
+                        }
+                    },
+                    "scalping": {
+                        "feature_1": {
+                            "type": "RSI",
+                            "paramA": 7,
+                            "paramB": 1
+                        },
+                        "feature_2": {
+                            "type": "WT",
+                            "paramA": 5,
+                            "paramB": 7
+                        },
+                        "feature_3": {
+                            "type": "CCI",
+                            "paramA": 10,
+                            "paramB": 1
+                        },
+                        "feature_4": {
+                            "type": "ADX",
+                            "paramA": 10,
+                            "paramB": 2
+                        },
+                        "feature_5": {
+                            "type": "RSI",
+                            "paramA": 5,
+                            "paramB": 1
+                        }
+                    }
+                },
+                "wavetrend_3d_modes": {
+                    "conservative": {
+                        "divergence_size_percent": 60,
+                        "min_confidence_threshold": 0.7,
+                        "conflict_resolution": "skip",
+                        "speed_to_emphasize": "Slow"
+                    },
+                    "aggressive": {
+                        "divergence_size_percent": 30,
+                        "min_confidence_threshold": 0.5,
+                        "conflict_resolution": "reduce_confidence",
+                        "speed_to_emphasize": "Fast"
+                    },
+                    "balanced": {
+                        "divergence_size_percent": 40,
+                        "min_confidence_threshold": 0.6,
+                        "conflict_resolution": "reduce_confidence",
+                        "speed_to_emphasize": "Normal"
+                    }
+                }
+            },
+            "use_wavetrend_3d": true,
+            "wavetrend_3d": {
+                "// Основные параметры": "",
+                "oscillator_lookback": 20,
+                "quadratic_mean_length": 70,
+                "// Параметры осцилляторов": "",
+                "fast_length": 0.75,
+                "fast_smoothing": 0.35,
+                "normal_length": 1.0,
+                "normal_smoothing": 1.0,
+                "slow_length": 1.75,
+                "slow_smoothing": 2.5,
+                "// Параметры дивергенций": "",
+                "divergence_distance": 40,
+                "divergence_size_percent": 40,
+                "// Kernel параметры": "",
+                "use_kernel_filter": true,
+                "kernel_lookback": 8,
+                "kernel_relative_weight": 8.0,
+                "kernel_regression_start": 25,
+                "kernel_lag": 2,
+                "// Зоны перекупленности/перепроданности": "",
+                "overbought_primary": 0.5,
+                "overbought_secondary": 0.75,
+                "oversold_primary": -0.5,
+                "oversold_secondary": -0.75,
+                "// Режимы работы": "",
+                "use_mirror": false,
+                "use_dynamic_exits": true,
+                "speed_to_emphasize": "Normal",
+                "// Интеграция с Lorentzian": "",
+                "integration_mode": "confirmation",
+                "min_confidence_threshold": 0.6,
+                "conflict_resolution": "reduce_confidence",
+                "signal_weight": 0.3
+            }
         }
-      },
-      "use_wavetrend_3d": true,
-      "wavetrend_3d": {
-        "// Основные параметры": "",
-        "oscillator_lookback": 20,
-        "quadratic_mean_length": 50,
-
-        "// Параметры осцилляторов": "",
-        "fast_length": 0.75,
-        "fast_smoothing": 0.45,
-        "normal_length": 1.0,
-        "normal_smoothing": 1.0,
-        "slow_length": 1.75,
-        "slow_smoothing": 2.5,
-
-        "// Параметры дивергенций": "",
-        "divergence_distance": 30,
-        "divergence_size_percent": 40,
-
-        "// Kernel параметры": "",
-        "use_kernel_filter": true,
-        "kernel_lookback": 8,
-        "kernel_relative_weight": 8.0,
-        "kernel_regression_start": 25,
-        "kernel_lag": 2,
-
-        "// Зоны перекупленности/перепроданности": "",
-        "overbought_primary": 0.5,
-        "overbought_secondary": 0.75,
-        "oversold_primary": -0.5,
-        "oversold_secondary": -0.75,
-
-        "// Режимы работы": "",
-        "use_mirror": false,
-        "use_dynamic_exits": true,
-        "speed_to_emphasize": "Normal",
-
-        "// Интеграция с Lorentzian": "",
-        "integration_mode": "confirmation",
-        "min_confidence_threshold": 0.6,
-        "conflict_resolution": "reduce_confidence",
-        "signal_weight": 0.3
-      }
+    },
+    "// Глобальные настройки для Lorentzian стратегии": "",
+    "lorentzian_global": {
+        "data_requirements": {
+            "min_candles": 2000,
+            "preferred_candles": 5000,
+            "max_candles": 10000
+        },
+        "performance_optimization": {
+            "use_numba": true,
+            "cache_predictions": true,
+            "cache_ttl_seconds": 60,
+            "parallel_processing": false
+        },
+        "backtesting": {
+            "use_worst_case": false,
+            "include_fees": true,
+            "slippage_percent": 0.1
+        },
+        "logging": {
+            "log_predictions": true,
+            "log_features": false,
+            "log_filters": true,
+            "save_model_periodically": true,
+            "model_save_interval_hours": 24
+        }
     }
-  },
-
-  "// Глобальные настройки для Lorentzian стратегии": "",
-  "lorentzian_global": {
-    "data_requirements": {
-      "min_candles": 2000,
-      "preferred_candles": 5000,
-      "max_candles": 10000
-    },
-
-    "performance_optimization": {
-      "use_numba": true,
-      "cache_predictions": true,
-      "cache_ttl_seconds": 60,
-      "parallel_processing": false
-    },
-
-    "backtesting": {
-      "use_worst_case": false,
-      "include_fees": true,
-      "slippage_percent": 0.1
-    },
-
-    "logging": {
-      "log_predictions": true,
-      "log_features": false,
-      "log_filters": true,
-      "save_model_periodically": true,
-      "model_save_interval_hours": 24
-    }
-  }
 }

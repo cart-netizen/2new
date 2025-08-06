@@ -407,121 +407,78 @@ class DataFetcher:
       logger.debug(f"Ошибка проверки данных для {symbol}: {e}")
       return False
 
+  # В файле: core/data_fetcher.py
+
   async def get_historical_candles(
       self,
       symbol: str,
       timeframe: Timeframe,
       limit: int = 1000,
-      use_cache: bool = True
+      use_cache: bool = True,
+      **kwargs  # Добавляем для гибкости
   ) -> pd.DataFrame:
-    """Получает исторические свечи с возможностью кэширования"""
+    """
+    Получает исторические свечи.
+    ИСПРАВЛЕНО: Устанавливает DatetimeIndex и передает доп. аргументы.
+    """
     self.total_requests += 1
+
+    if kwargs:
+      use_cache = False
 
     cache_key = f"{symbol}_{timeframe.value}_{limit}"
 
-    # Проверяем кэш, если разрешено
     if use_cache and cache_key in self.candles_cache:
       cached = self.candles_cache[cache_key]
       if cached.is_valid():
         self.cache_hits += 1
-        logger.debug(f"Свечи {symbol} {timeframe.value} получены из кэша")
         return cached.data
 
     self.cache_misses += 1
 
-    cache_manager = get_cache_manager()
-    cached_data = await cache_manager.get(symbol, 'candles', timeframe=timeframe.value, limit=limit)
-    if cached_data is not None:
-      return cached_data
-
-    # Используем блокировку для предотвращения дублирующих запросов
     async with self.fetch_locks[cache_key]:
-      # Проверяем еще раз после получения блокировки
       if use_cache and cache_key in self.candles_cache and self.candles_cache[cache_key].is_valid():
         return self.candles_cache[cache_key].data
 
       try:
-        # Маппинг таймфреймов
         interval_map = {
-          Timeframe.ONE_MINUTE: '1',
-          Timeframe.FIVE_MINUTES: '5',
-          Timeframe.FIFTEEN_MINUTES: '15',
-          Timeframe.THIRTY_MINUTES: '30',
-          Timeframe.ONE_HOUR: '60',
-          Timeframe.FOUR_HOURS: '240',
+          Timeframe.ONE_MINUTE: '1', Timeframe.FIVE_MINUTES: '5',
+          Timeframe.FIFTEEN_MINUTES: '15', Timeframe.THIRTY_MINUTES: '30',
+          Timeframe.ONE_HOUR: '60', Timeframe.FOUR_HOURS: '240',
           Timeframe.ONE_DAY: 'D'
         }
-
         interval = interval_map.get(timeframe)
         if not interval:
-          logger.error(f"Неподдерживаемый таймфрейм: {timeframe}")
           return pd.DataFrame()
 
-        logger.debug(f"Запрос свечей {symbol} {timeframe.value} с биржи")
-
-        # ДИАГНОСТИЧЕСКИЙ БЛОК - выявляем источник старых данных
-        # logger.info(f"🔍 ДИАГНОСТИКА: Запрос свечей для {symbol} {timeframe.value}")
-        # logger.info(f"  - Использование кэша: {use_cache}")
-        # logger.info(f"  - Ключ кэша: {cache_key}")
-        # logger.info(f"  - Лимит свечей: {limit}")
-
-        # Принудительно очищаем кэш для этого символа если данные устарели
-        if use_cache and cache_key in self.candles_cache:
-          cached_data = self.candles_cache[cache_key]
-          if not cached_data.is_valid():
-            # logger.info(f"🗑️ Удаляем устаревший кэш для {symbol}")
-            del self.candles_cache[cache_key]
-          else:
-            last_cached_time = cached_data.data['timestamp'].iloc[-1] if not cached_data.data.empty else None
-            logger.info(f"📦 Последнее время в кэше: {last_cached_time}")
-
-        # Логируем параметры для API
-        # logger.info(f"📡 Параметры API запроса: symbol={symbol}, interval={interval}, limit={limit}")
-
-        force_fresh = not use_cache  # Если кэш отключен, принуждаем к свежим данным
-
-        # logger.debug(f"🔍 Запрос к API: force_fresh={force_fresh}, use_cache={use_cache}")
-
-        raw_candles = await self.connector.get_kline(symbol, interval, limit=limit, force_fresh=force_fresh)
+        # Передаем kwargs в коннектор
+        raw_candles = await self.connector.get_kline(symbol, interval, limit=limit, force_fresh=not use_cache, **kwargs)
 
         if not raw_candles:
-          logger.warning(f"Не получены данные свечей для {symbol} {timeframe.value}")
           return pd.DataFrame()
 
-        # Преобразуем в DataFrame
-        df = pd.DataFrame(raw_candles)
-        df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover']
-
-        # Конвертируем типы данных
+        df = pd.DataFrame(raw_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
         df['timestamp'] = pd.to_datetime(df['timestamp'].astype(int), unit='ms', utc=True)
-        # df.set_index('timestamp', inplace=True)
+
+        # --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ---
+        df.set_index('timestamp', inplace=True)  # Раскомментировали эту строку
+        # ---------------------------
 
         for col in ['open', 'high', 'low', 'close', 'volume', 'turnover']:
           df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        # Сортируем по времени
-        df.sort_index(inplace=True)
+        df.sort_index(inplace=True)  # Теперь сортировка будет работать правильно по времени
 
-        # Кэшируем результат
         if use_cache:
           ttl = self.candles_cache_ttl
-          # Для больших таймфреймов увеличиваем TTL
           if timeframe in [Timeframe.FOUR_HOURS, Timeframe.ONE_DAY]:
-            ttl = 300  # 5 минут
-
+            ttl = 300
           self.candles_cache[cache_key] = CachedData(df.copy(), ttl)
-
-        # Периодически чистим устаревший кэш
-        if self.total_requests % 100 == 0:
-          asyncio.create_task(asyncio.to_thread(self._clean_expired_cache))
-
-        if df is not None and not df.empty:
-          await cache_manager.set(symbol, 'candles', df, timeframe=timeframe.value, limit=limit)
 
         return df
 
       except Exception as e:
-        logger.error(f"Ошибка при получении свечей для {symbol}: {e}")
+        logger.error(f"Ошибка при получении свечей для {symbol}: {e}", exc_info=True)
         return pd.DataFrame()
 
   async def get_absolutely_fresh_candles(self, symbol: str, timeframe: Timeframe, limit: int = 200) -> pd.DataFrame:
